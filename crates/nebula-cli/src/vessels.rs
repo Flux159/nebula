@@ -35,6 +35,10 @@ pub struct NewOpts {
     pub mem: u64,
     pub gpu: bool,
     pub data_gib: u64,
+    /// Build the vessel's rootfs from a docker image reference.
+    pub from_image: Option<String>,
+    /// Rootfs size when building from an image (MiB).
+    pub rootfs_mb: u64,
 }
 
 fn vessels_root() -> anyhow::Result<PathBuf> {
@@ -95,20 +99,26 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
     };
     let kernel = home.join("kernel/Image");
     anyhow::ensure!(
-        base_rootfs.is_file() && kernel.is_file(),
+        kernel.is_file(),
+        "guest kernel missing — run `nebula up` once first"
+    );
+    anyhow::ensure!(
+        opts.from_image.is_some() || base_rootfs.is_file(),
         "guest images missing — run `nebula up` once first"
     );
 
     std::fs::create_dir_all(&dir)?;
-    // APFS copy-on-write clone: instant and space-shared with the base.
-    let status = std::process::Command::new("cp")
-        .arg("-c")
-        .arg(&base_rootfs)
-        .arg(dir.join("rootfs.img"))
-        .status()?;
-    anyhow::ensure!(status.success(), "rootfs clone failed");
-    let data = std::fs::File::create(dir.join("data.img"))?;
-    data.set_len(opts.data_gib * 1024 * 1024 * 1024)?;
+    if let Some(image) = &opts.from_image {
+        // Docker image -> bootable microVM rootfs, built inside the engine
+        // (it has docker + e2fsprogs; our static init/agent are injected so
+        // ANY arm64 linux image becomes a manageable vessel).
+        build_rootfs_from_image(image, &opts.name, &dir, opts.rootfs_mb, opts.data_gib)?;
+    } else {
+        // APFS copy-on-write clone: instant and space-shared with the base.
+        clone_file(&base_rootfs, &dir.join("rootfs.img"))?;
+        let data = std::fs::File::create(dir.join("data.img"))?;
+        data.set_len(opts.data_gib * 1024 * 1024 * 1024)?;
+    }
 
     let spec = VmSpec {
         name: format!("vessel-{}", opts.name),
@@ -279,6 +289,129 @@ pub fn reset(name: &str, wipe_data: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Build a vessel rootfs from a docker image, inside the engine vessel.
+/// Output lands in `dir` via the $HOME virtiofs share.
+fn build_rootfs_from_image(
+    image: &str,
+    name: &str,
+    dir: &std::path::Path,
+    rootfs_mb: u64,
+    data_gib: u64,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        client::daemon_running(),
+        "building from an image needs the engine: nebula up"
+    );
+    let host_home = std::env::var("HOME").context("HOME not set")?;
+    let stage_host = std::path::PathBuf::from(&host_home)
+        .join(".nebula-image-build")
+        .join(name);
+    std::fs::create_dir_all(&stage_host)?;
+
+    // Pull + export on the HOST (resolved docker CLI against the engine
+    // socket — the slim guest image carries no docker CLI), then do the
+    // filesystem work inside the engine where ext4 tooling lives.
+    println!("building rootfs from docker image `{image}`…");
+    let docker = crate::wrap::resolve_tool("docker");
+    let sock = client::nebula_home()?.join("run/docker.sock");
+    let docker_env = format!("unix://{}", sock.display());
+    let run_docker = |args: &[&str]| -> anyhow::Result<std::process::Output> {
+        Ok(std::process::Command::new(&docker)
+            .env("DOCKER_HOST", &docker_env)
+            .args(args)
+            .output()?)
+    };
+    let pull = run_docker(&["pull", "-q", image])?;
+    anyhow::ensure!(
+        pull.status.success(),
+        "docker pull failed: {}",
+        String::from_utf8_lossy(&pull.stderr)
+    );
+    let create = run_docker(&["create", image, "/bin/true"])?;
+    anyhow::ensure!(
+        create.status.success(),
+        "docker create failed: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let cid = String::from_utf8_lossy(&create.stdout).trim().to_string();
+    let export_tar = stage_host.join("export.tar");
+    let export = std::process::Command::new(&docker)
+        .env("DOCKER_HOST", &docker_env)
+        .args(["export", "-o"])
+        .arg(&export_tar)
+        .arg(&cid)
+        .status()?;
+    let _ = run_docker(&["rm", &cid]);
+    anyhow::ensure!(export.success(), "docker export failed");
+
+    let script = format!(
+        r#"set -e
+STAGE='{stage}'; SIZE_MB={rootfs_mb}; DATA_MB={data_mb}
+BUILD=/var/lib/nebula/img-build-{name}
+rm -rf "$BUILD"; mkdir -p "$BUILD/root"
+tar -xf "$STAGE/export.tar" -C "$BUILD/root"
+# Inject Nebula's static guest binaries so any image boots managed.
+cp /sbin/nebula-init "$BUILD/root/sbin/nebula-init"
+cp /usr/bin/vessel-agent "$BUILD/root/usr/bin/vessel-agent" 2>/dev/null || {{ mkdir -p "$BUILD/root/usr/bin"; cp /usr/bin/vessel-agent "$BUILD/root/usr/bin/vessel-agent"; }}
+mkdir -p "$BUILD/root/var/lib/nebula" "$BUILD/root/run" "$BUILD/root/tmp" "$BUILD/root/proc" "$BUILD/root/sys" "$BUILD/root/dev"
+truncate -s ${{SIZE_MB}}M "$BUILD/rootfs.img"
+mkfs.ext4 -q -L nebula-root -d "$BUILD/root" "$BUILD/rootfs.img"
+# Pre-format the data disk here too: foreign images may lack e2fsprogs.
+truncate -s ${{DATA_MB}}M "$BUILD/data.img"
+mkfs.ext4 -q -L nebula-data "$BUILD/data.img"
+mv "$BUILD/rootfs.img" "$STAGE/rootfs.img"
+mv "$BUILD/data.img" "$STAGE/data.img"
+rm -rf "$BUILD"
+"#,
+        stage = stage_host.display(),
+        data_mb = data_gib * 1024,
+    );
+    // (export.tar consumed in-guest; removed with the stage dir below)
+    let r = engine_exec_long(&script)?;
+    if r.exit_code != 0 {
+        let _ = std::fs::remove_dir_all(&stage_host);
+        bail!(
+            "image build failed:
+{}{}",
+            r.stdout,
+            r.stderr
+        );
+    }
+    // Move (or copy across volumes) into the vessel dir.
+    for f in ["rootfs.img", "data.img"] {
+        let src = stage_host.join(f);
+        let dst = dir.join(f);
+        if std::fs::rename(&src, &dst).is_err() {
+            std::fs::copy(&src, &dst)?;
+            let _ = std::fs::remove_file(&src);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&stage_host);
+    Ok(())
+}
+
+/// Exec in the ENGINE vessel with a long timeout (image pulls can be slow).
+fn engine_exec_long(script: &str) -> anyhow::Result<ExecResult> {
+    let req = DaemonRequest::Agent {
+        request: AgentRequest::Exec {
+            cmd: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+            env: vec![],
+            timeout_ms: 900_000,
+        },
+    };
+    match client::request(&req)? {
+        DaemonResponse::Agent {
+            response: AgentResponse::Exec(r),
+        } => Ok(r),
+        DaemonResponse::Agent {
+            response: AgentResponse::Error { message },
+        } => bail!("{message}"),
+        DaemonResponse::Error { message } => bail!("{message}"),
+        other => bail!("unexpected response: {other:?}"),
+    }
+}
+
 fn clone_file(from: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()> {
     let status = std::process::Command::new("cp")
         .arg("-c")
@@ -292,6 +425,201 @@ fn clone_file(from: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()
         to.display()
     );
     Ok(())
+}
+
+fn snap_dir(dir: &std::path::Path, label: &str) -> PathBuf {
+    dir.join("snapshots").join(label)
+}
+
+fn validate_label(label: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !label.is_empty()
+            && label
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'),
+        "snapshot labels must be [a-zA-Z0-9._-], got `{label}`"
+    );
+    Ok(())
+}
+
+/// Crash-consistent disk snapshot: stop (if running), APFS-clone both disks,
+/// restart. Stopping takes ~0.2s and restart ~0.1s, so snapshotting a live
+/// vessel costs well under a second.
+pub fn snapshot(name: &str, label: &str) -> anyhow::Result<()> {
+    validate_label(label)?;
+    let dir = dir_of(name)?;
+    anyhow::ensure!(dir.exists(), "no vessel named `{name}`");
+    let sdir = snap_dir(&dir, label);
+    anyhow::ensure!(!sdir.exists(), "snapshot `{label}` already exists");
+
+    let was_running = live_pid(&dir).is_some();
+    if was_running {
+        stop(name)?;
+    }
+    std::fs::create_dir_all(&sdir)?;
+    let t0 = Instant::now();
+    clone_file(&dir.join("rootfs.img"), &sdir.join("rootfs.img"))?;
+    if dir.join("data.img").is_file() {
+        clone_file(&dir.join("data.img"), &sdir.join("data.img"))?;
+    }
+    println!("snapshot `{name}@{label}` taken in {:.0?}", t0.elapsed());
+    if was_running {
+        start(name)?;
+    }
+    Ok(())
+}
+
+pub fn snapshots(name: &str) -> anyhow::Result<()> {
+    let dir = dir_of(name)?;
+    let root = dir.join("snapshots");
+    let mut labels: Vec<String> = match std::fs::read_dir(&root) {
+        Ok(rd) => rd
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect(),
+        Err(_) => vec![],
+    };
+    labels.sort();
+    if labels.is_empty() {
+        println!("no snapshots for `{name}` (create one: nebula vessels snapshot {name} <label>)");
+        return Ok(());
+    }
+    for l in labels {
+        println!("{name}@{l}");
+    }
+    Ok(())
+}
+
+pub fn snapshot_rm(name: &str, label: &str) -> anyhow::Result<()> {
+    validate_label(label)?;
+    let dir = dir_of(name)?;
+    let sdir = snap_dir(&dir, label);
+    anyhow::ensure!(sdir.exists(), "no snapshot `{name}@{label}`");
+    std::fs::remove_dir_all(&sdir)?;
+    println!("removed snapshot `{name}@{label}`");
+    Ok(())
+}
+
+/// Roll a vessel back to a snapshot (its current disks are replaced).
+pub fn restore(name: &str, label: &str) -> anyhow::Result<()> {
+    validate_label(label)?;
+    let dir = dir_of(name)?;
+    let sdir = snap_dir(&dir, label);
+    anyhow::ensure!(sdir.exists(), "no snapshot `{name}@{label}`");
+    let was_running = live_pid(&dir).is_some();
+    if was_running {
+        stop(name)?;
+    }
+    for img in ["rootfs.img", "data.img"] {
+        if sdir.join(img).is_file() {
+            let _ = std::fs::remove_file(dir.join(img));
+            clone_file(&sdir.join(img), &dir.join(img))?;
+        }
+    }
+    println!("`{name}` restored to @{label}");
+    if was_running {
+        start(name)?;
+    }
+    Ok(())
+}
+
+/// Branch new vessel(s) from a snapshot (or from the current state when no
+/// label is given). With --count N this is the tree-search fan-out: N clones,
+/// each booted, each fully independent.
+pub fn branch(name: &str, new_name: &str, label: Option<&str>, count: u32) -> anyhow::Result<()> {
+    let dir = dir_of(name)?;
+    anyhow::ensure!(dir.exists(), "no vessel named `{name}`");
+    let spec = read_spec(&dir)?;
+
+    // Branch source: a snapshot, or a transient clone of the current state.
+    let (src_root, src_data, _tmp_guard);
+    match label {
+        Some(l) => {
+            validate_label(l)?;
+            let sdir = snap_dir(&dir, l);
+            anyhow::ensure!(sdir.exists(), "no snapshot `{name}@{l}`");
+            src_root = sdir.join("rootfs.img");
+            src_data = sdir.join("data.img");
+            _tmp_guard = None::<tempdir::Guard>;
+        }
+        None => {
+            let was_running = live_pid(&dir).is_some();
+            if was_running {
+                stop(name)?;
+            }
+            let tmp = dir.join(".branch-src");
+            let _ = std::fs::remove_dir_all(&tmp);
+            std::fs::create_dir_all(&tmp)?;
+            clone_file(&dir.join("rootfs.img"), &tmp.join("rootfs.img"))?;
+            if dir.join("data.img").is_file() {
+                clone_file(&dir.join("data.img"), &tmp.join("data.img"))?;
+            }
+            if was_running {
+                start(name)?;
+            }
+            src_root = tmp.join("rootfs.img");
+            src_data = tmp.join("data.img");
+            _tmp_guard = Some(tempdir::Guard(tmp));
+        }
+    }
+
+    let t0 = Instant::now();
+    let names: Vec<String> = if count <= 1 {
+        vec![new_name.to_string()]
+    } else {
+        (1..=count).map(|i| format!("{new_name}-{i}")).collect()
+    };
+    for n in &names {
+        validate_name(n)?;
+        let ndir = vessels_root()?.join(n);
+        anyhow::ensure!(!ndir.exists(), "vessel `{n}` already exists");
+        std::fs::create_dir_all(&ndir)?;
+        clone_file(&src_root, &ndir.join("rootfs.img"))?;
+        if src_data.is_file() {
+            clone_file(&src_data, &ndir.join("data.img"))?;
+        }
+        let mut nspec = spec.clone();
+        nspec.name = format!("vessel-{n}");
+        retarget_spec(&mut nspec, &ndir);
+        std::fs::write(ndir.join("spec.json"), serde_json::to_vec_pretty(&nspec)?)?;
+        start(n)?;
+    }
+    println!(
+        "branched {} vessel(s) from `{name}{}` in {:.2?}",
+        names.len(),
+        label.map(|l| format!("@{l}")).unwrap_or_default(),
+        t0.elapsed()
+    );
+    Ok(())
+}
+
+/// Point a cloned spec's paths (disks, console, vsock sockets) at its own dir.
+fn retarget_spec(spec: &mut VmSpec, dir: &std::path::Path) {
+    for d in &mut spec.disks {
+        if let Some(fname) = d.path.file_name() {
+            d.path = dir.join(fname);
+        }
+    }
+    if let nebula_core::ConsoleSpec::File(p) = &mut spec.console {
+        if let Some(fname) = p.file_name() {
+            *p = dir.join(fname);
+        }
+    }
+    for m in &mut spec.vsock_ports {
+        if let Some(fname) = m.host_path.file_name() {
+            m.host_path = dir.join(fname);
+        }
+    }
+}
+
+mod tempdir {
+    pub struct Guard(pub std::path::PathBuf);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 }
 
 pub fn rm(name: &str, force: bool) -> anyhow::Result<()> {

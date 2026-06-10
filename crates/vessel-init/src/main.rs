@@ -235,14 +235,18 @@ mod init {
                 .any(|l| l.split_whitespace().nth(1) == Some("00000000"))
         };
         let mut gw = false;
-        for _ in 0..30 {
-            gw = std::fs::read_to_string("/proc/net/route")
-                .map(|r| has_gw(&r))
-                .unwrap_or(false);
-            if gw {
-                break;
+        // No NIC at all (libkrun/TSI vessels): decide instantly — waiting for
+        // DHCP that can never arrive costs 6s on every boot.
+        if std::path::Path::new("/sys/class/net/eth0").exists() {
+            for _ in 0..30 {
+                gw = std::fs::read_to_string("/proc/net/route")
+                    .map(|r| has_gw(&r))
+                    .unwrap_or(false);
+                if gw {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
             }
-            std::thread::sleep(Duration::from_millis(200));
         }
         let want: &'static str = if gw {
             "nameserver 127.0.0.1\n"

@@ -53,7 +53,7 @@ fn ensure_engine() -> anyhow::Result<()> {
 /// Find `tool`: the user's own install (PATH) wins; otherwise fall back to
 /// the copy bundled with Nebula.app (Contents/Resources/resources/bin next
 /// to this sidecar) or ~/.nebula/bin.
-fn resolve_tool(tool: &str) -> String {
+pub fn resolve_tool(tool: &str) -> String {
     let on_path = std::process::Command::new("/usr/bin/which")
         .arg(tool)
         .output()

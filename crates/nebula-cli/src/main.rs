@@ -161,6 +161,13 @@ enum VesselsAction {
         /// Data disk size in GiB (sparse).
         #[arg(long, default_value_t = 16)]
         disk: u64,
+        /// Build the rootfs from a docker image (full VM isolation +
+        /// snapshots for a standard container image).
+        #[arg(long)]
+        from_image: Option<String>,
+        /// Rootfs size in MiB when building from an image.
+        #[arg(long, default_value_t = 4096)]
+        rootfs_size: u64,
     },
     /// List vessels (including the engine vessel).
     Ls,
@@ -173,6 +180,25 @@ enum VesselsAction {
         name: String,
         #[arg(long)]
         force: bool,
+    },
+    /// Take a crash-consistent disk snapshot (stop->clone->restart, <1s).
+    Snapshot { name: String, label: String },
+    /// List a vessel's snapshots.
+    Snapshots { name: String },
+    /// Delete a snapshot.
+    SnapshotRm { name: String, label: String },
+    /// Roll a vessel back to a snapshot.
+    Restore { name: String, label: String },
+    /// Clone new vessel(s) from a snapshot (or current state) and boot them.
+    Branch {
+        name: String,
+        new_name: String,
+        /// Branch from this snapshot instead of the current state.
+        #[arg(long)]
+        snapshot: Option<String>,
+        /// Fan out N clones (named <new_name>-1..N) — the tree-search primitive.
+        #[arg(long, default_value_t = 1)]
+        count: u32,
     },
     /// Restore a vessel's rootfs to pristine (works on the engine vessel too).
     Reset {
@@ -281,17 +307,31 @@ fn main() -> anyhow::Result<()> {
                 mem,
                 gpu,
                 disk,
+                from_image,
+                rootfs_size,
             } => vessels::new(vessels::NewOpts {
                 name,
                 cpus,
                 mem,
                 gpu,
                 data_gib: disk,
+                from_image,
+                rootfs_mb: rootfs_size,
             }),
             VesselsAction::Ls => vessels::ls(),
             VesselsAction::Start { name } => vessels::start(&name),
             VesselsAction::Stop { name } => vessels::stop(&name),
             VesselsAction::Rm { name, force } => vessels::rm(&name, force),
+            VesselsAction::Snapshot { name, label } => vessels::snapshot(&name, &label),
+            VesselsAction::Snapshots { name } => vessels::snapshots(&name),
+            VesselsAction::SnapshotRm { name, label } => vessels::snapshot_rm(&name, &label),
+            VesselsAction::Restore { name, label } => vessels::restore(&name, &label),
+            VesselsAction::Branch {
+                name,
+                new_name,
+                snapshot,
+                count,
+            } => vessels::branch(&name, &new_name, snapshot.as_deref(), count),
             VesselsAction::Reset { name, wipe_data } => vessels::reset(&name, wipe_data),
             VesselsAction::Info { name } => vessels::info(&name),
             VesselsAction::Exec { name, cmd } => vessels::exec(&name, cmd),

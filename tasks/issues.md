@@ -39,6 +39,14 @@ limitations; routine TODOs live in code.)
 
 ## Needs discussion
 
+- **(2026-06-09, snapshots) Memory-state snapshots (live fork) — future.**
+  v1 vessel snapshots are disk-only at command boundaries (stop 0.2s →
+  APFS clone ~5-12ms → boot 0.1s), which fits the agent tree-search use
+  case (state lives in files). True suspend-to-disk exists in VZ
+  (saveMachineStateToURL, macOS 14+) for the engine vessel; libkrun would
+  need fork-level work for Firecracker-style snapshot/restore of sidecars.
+  Revisit if sub-100ms branch latency or in-memory state capture matters.
+
 - ~~Multi-instance seams~~ **RESOLVED (2026-06-09):** dns_zone/dns_port/
   k8s_port are per-instance config (guest learns the DNS port via kernel
   cmdline; kubeconfigs are written against the configured k8s port; clients
