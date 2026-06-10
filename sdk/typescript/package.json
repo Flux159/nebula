@@ -1,0 +1,19 @@
+{
+  "name": "@nebula-vm/sdk",
+  "version": "0.1.0",
+  "description": "Client SDK for Nebula — containers, Kubernetes, and microVMs on macOS",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/test/"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
+  },
+  "repository": "github:Flux159/nebula"
+}

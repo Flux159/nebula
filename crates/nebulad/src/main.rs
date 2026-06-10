@@ -3,6 +3,7 @@
 //! v0 lifecycle: start -> boot Vessel -> serve until `down` -> stop VM -> exit.
 //! Crash recovery / auto-restart hardening lands in Phase 6.
 
+mod api;
 mod balloon;
 mod config;
 mod net;

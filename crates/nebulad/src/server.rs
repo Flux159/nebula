@@ -34,6 +34,9 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
     // Elastic memory (Phase 4).
     let balloon = crate::balloon::start(vessel.clone());
 
+    // REST API for SDKs/UI (Phase 10).
+    crate::api::start(vessel.clone(), balloon.clone(), paths.docker_sock());
+
     // Watchdog: if the Vessel dies unexpectedly, exit the daemon so the next
     // `nebula up` (or launchd KeepAlive) gets a clean restart instead of a
     // zombie control socket.
