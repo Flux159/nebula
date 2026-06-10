@@ -420,9 +420,14 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
             let _ = std::fs::remove_file(&sock);
             // --one-off: passt exits when the VM closes the connection, so it
             // shares the worker's lifetime even though it daemonizes.
+            // -t/-u all: passt mirrors every port the GUEST binds onto the
+            // host — published container ports and the k3s API appear on
+            // localhost without separate host-side forwarders (the guest IP
+            // itself is not host-routable behind passt).
             Command::new(&passt)
                 .arg("--quiet")
                 .arg("--one-off")
+                .args(["-t", "all", "-u", "all"])
                 .arg("--socket")
                 .arg(&sock)
                 .spawn()

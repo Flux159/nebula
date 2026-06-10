@@ -83,7 +83,14 @@ fn spawn_docker_watcher(
                 st.published_tcp = ports.clone();
             }
 
-            // Reconcile forwarders.
+            // Reconcile forwarders. Linux: passt (-t all) already mirrors
+            // every guest-bound port onto the host, and the guest IP is not
+            // host-routable behind it — dialing forwarders would bind-fight
+            // passt and route nowhere. The state bookkeeping above still
+            // feeds status/DNS.
+            if cfg!(target_os = "linux") {
+                continue;
+            }
             let Some(ip) = guest_ip else { continue };
             forwarders.retain(|port, (stop, fwd_ip)| {
                 if ports.contains(port) && *fwd_ip == ip {
