@@ -29,7 +29,7 @@ done
 echo "--- context management"
 BEFORE_CTX=$(docker context show 2>/dev/null || echo "")
 cp ~/.docker/config.json /tmp/docker-config-before.json 2>/dev/null || echo "{}" > /tmp/docker-config-before.json
-check "use docker"                  "$NEBULA use docker"
+check "use docker"                  "$NEBULA setup docker"
 check "docker context is nebula"    "[ \"\$(docker context show)\" = nebula ]"
 
 echo "--- docker basics through the socket proxy"
@@ -66,7 +66,7 @@ echo "--- revert restores prior state exactly"
 check "revert docker"               "$NEBULA revert docker"
 AFTER_CTX=$(docker context show 2>/dev/null || echo "")
 check "context restored"            "[ \"$BEFORE_CTX\" = \"$AFTER_CTX\" ]"
-check "double use/revert idempotent" "$NEBULA use docker && $NEBULA use docker && $NEBULA revert docker && [ \"\$(docker context show)\" = \"$BEFORE_CTX\" ]"
+check "double use/revert idempotent" "$NEBULA setup docker && $NEBULA setup docker && $NEBULA revert docker && [ \"\$(docker context show)\" = \"$BEFORE_CTX\" ]"
 
 echo
 echo "phase 2: $PASS passed, $FAIL failed"

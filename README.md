@@ -13,12 +13,17 @@ stack only holds the RAM your workloads actually use.
 brew install … (packaging WIP — build from source below)
 
 nebula up                 # boots the Vessel (~0.6s to a healthy engine)
-nebula use docker         # point docker at Nebula (revert anytime)
+nebula setup docker       # point docker at Nebula (revert anytime)
 docker run -d -p 8080:80 nginx     # localhost:8080 just works
 docker run --platform linux/amd64 alpine uname -m   # x86_64 via Rosetta
 
-nebula use kubectl        # local k3s, prod-safe context switching
+nebula setup kubectl      # local k3s, prod-safe context switching
 kubectl get nodes
+
+# or one-off, without touching your contexts at all:
+nebula docker ps
+nebula kubectl get pods -A
+nebula helm install my-redis oci://registry-1.docker.io/bitnamicharts/redis
 
 nebula sandbox run -- uname -a     # isolated microVM, ~250ms total
 nebula sandbox run --gpu -- ls /dev/dri    # virtio-gpu (Venus)
@@ -35,10 +40,11 @@ nebula ui                 # open the desktop app (a client of the engine)
 - **Elastic memory.** Set a max; a balloon controller (deflate-fast,
   inflate-slow) returns idle RAM. A 32 GiB Vessel idles at ~1.1 GiB
   host-visible footprint.
-- **Out-of-the-box tooling.** `nebula use docker|nerdctl|kubectl` configures
+- **Out-of-the-box tooling.** `nebula setup docker|nerdctl|kubectl` configures
   the standard CLIs; `nebula revert` restores your previous contexts exactly
   (revert stack, loud warnings when switching away from anything that looks
-  like production).
+  like production). `nebula docker|kubectl|helm <cmd>` runs a single command
+  against Nebula via environment overrides — your contexts never change.
 - **amd64 via Rosetta.** The Vessel mounts Apple's Rosetta share — mixed
   arm64/amd64 compose stacks in one VM at near-native speed.
 - **Host-faithful DNS.** Guest and container DNS resolve through the Mac's own
@@ -52,6 +58,25 @@ nebula ui                 # open the desktop app (a client of the engine)
   CLI — close either and your containers keep running. `nebula autostart
   enable` installs a launchd agent (start at login + crash restart); the app
   offers a one-click "Start engine" when the daemon is down.
+
+## Benchmarks
+
+Measured on an M-series MacBook Pro (16 cores), release build, 2026-06:
+
+| What | Time / number |
+|---|---|
+| `nebula up` → healthy engine (wall clock) | **0.62 s** |
+| └ VZ virtual machine create→running | 80–96 ms |
+| └ kernel boot + init + agent ready (vsock) | 580–595 ms total |
+| `nebula sandbox run` boot→run→teardown (libkrun) | **~250 ms** |
+| Idle host footprint, 32 GiB max engine | **~1–2 GiB** (balloon holds ~30 GiB) |
+| Balloon resizes at steady state | 0/hour (one jump per workload change) |
+| virtiofs (`$HOME` share) sequential write | ~1.3 GB/s |
+| virtiofs small files (1000 creates) | 0.30 s |
+| virtio-blk (data disk) direct write | ~276 MB/s |
+| 50 concurrent containers started | 14–20 s |
+
+Reproduce with `scripts/test-phase*.sh`; details in `tasks/spike-notes.md`.
 
 ## Building from source
 

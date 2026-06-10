@@ -8,12 +8,39 @@ mod contexts;
 mod kube;
 mod sandbox;
 mod spike;
+mod wrap;
+
+const QUICKSTART: &str = "\
+\x1b[1mQUICKSTART\x1b[0m
+  Engine:
+    nebula up                          start the engine (~0.6s)
+    nebula autostart enable            start it at login instead
+
+  Docker:
+    nebula setup docker                point `docker` at Nebula (revert: nebula revert docker)
+    docker run -d -p 8080:80 nginx     then open http://localhost:8080
+    nebula docker ps                   …or one-off, without changing contexts
+
+  Kubernetes (k3s, started on demand):
+    nebula setup kubectl               point `kubectl` at Nebula (revert: nebula revert kubectl)
+    kubectl create deployment web --image=nginx
+    kubectl expose deployment web --port 80 --type NodePort
+    nebula kubectl get nodes           …or one-off, without changing contexts
+
+  Helm:
+    nebula helm install my-redis oci://registry-1.docker.io/bitnamicharts/redis
+
+  Isolated microVMs:
+    nebula sandbox run -- uname -a     boots, runs, and exits in ~250ms
+
+  See where you stand anytime: nebula status";
 
 #[derive(Parser)]
 #[command(
     name = "nebula",
     version,
-    about = "Containers, Kubernetes, and microVMs on macOS"
+    about = "Containers, Kubernetes, and microVMs on macOS",
+    after_help = QUICKSTART
 )]
 struct Cli {
     #[command(subcommand)]
@@ -57,10 +84,26 @@ enum Commands {
         #[arg(short, long)]
         follow: bool,
     },
-    /// Point a tool (docker, nerdctl) at Nebula. Revert with `nebula revert`.
-    Use {
+    /// Point a tool (docker, nerdctl, kubectl) at Nebula. Undo: nebula revert.
+    #[command(alias = "use")]
+    Setup {
         /// docker | nerdctl | kubectl
         tool: String,
+    },
+    /// Run one docker command against Nebula without changing any context.
+    Docker {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        args: Vec<String>,
+    },
+    /// Run one kubectl command against Nebula without changing any context.
+    Kubectl {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        args: Vec<String>,
+    },
+    /// Run one helm command against Nebula without changing any context.
+    Helm {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        args: Vec<String>,
     },
     /// Restore a tool's previous configuration (`--all` for every tool).
     Revert {
@@ -162,7 +205,10 @@ fn main() -> anyhow::Result<()> {
         Commands::Exec { cmd } => commands::exec(cmd),
         Commands::Shell => commands::shell(),
         Commands::Logs { follow } => commands::logs(follow),
-        Commands::Use { tool } => contexts::use_tool(&tool),
+        Commands::Setup { tool } => contexts::setup_tool(&tool),
+        Commands::Docker { args } => wrap::docker(args),
+        Commands::Kubectl { args } => wrap::kubectl(args),
+        Commands::Helm { args } => wrap::helm(args),
         Commands::Revert { tool } => contexts::revert_tool(&tool),
         Commands::Stats { watch } => commands::stats(watch),
         Commands::Autostart { action } => match action {

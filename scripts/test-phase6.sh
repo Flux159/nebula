@@ -20,7 +20,7 @@ check() {
 
 $NEBULA down --force >/dev/null 2>&1; sleep 1
 $NEBULA up >/dev/null || { echo "FATAL: up failed"; exit 1; }
-$NEBULA use docker >/dev/null
+$NEBULA setup docker >/dev/null
 for _ in $(seq 1 30); do docker version >/dev/null 2>&1 && break; sleep 1; done
 
 echo "--- crash recovery: kill -9 nebulad"

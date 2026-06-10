@@ -12,8 +12,10 @@ use crate::client;
 
 const CONTEXT_NAME: &str = "nebula";
 
-pub fn use_kubectl() -> anyhow::Result<()> {
-    // 1. Start k3s in the Vessel (persisted across boots).
+/// Bring k3s up (idempotent) and return the path of a standalone kubeconfig
+/// containing only the nebula cluster — used by `nebula kubectl|helm` and as
+/// the source for the `setup` merge.
+pub fn ensure_ready() -> anyhow::Result<std::path::PathBuf> {
     let resp = client::request(&DaemonRequest::Agent {
         request: AgentRequest::ServiceCtl {
             name: "k3s".into(),
@@ -23,27 +25,9 @@ pub fn use_kubectl() -> anyhow::Result<()> {
     if let DaemonResponse::Error { message } = resp {
         bail!("starting k3s: {message}");
     }
-    println!("k3s starting in the Vessel…");
 
-    // 2. Wait for its kubeconfig (first boot takes ~20-30s).
-    let kubeconfig = wait_for_guest_kubeconfig(Duration::from_secs(120))?;
-
-    // 3. Rewrite the server address to the guest IP (in the cert SANs via
-    //    --tls-san) and merge into ~/.kube/config as cluster/user/context
-    //    `nebula`, never touching other entries.
-    // Server is the host-side forward: stable across guest reboots (the
-    // guest IP changes with every DHCP lease; 127.0.0.1 is in k3s's SANs).
-    let merged = merge_kubeconfig(&kubeconfig, "127.0.0.1")?;
-    if let Some(prev) = merged {
-        println!("kubectl → nebula (was: {prev})");
-        if prev != CONTEXT_NAME && looks_remote(&prev) {
-            eprintln!("\n  ⚠ previous kubectl context `{prev}` looks like a real cluster.");
-            eprintln!("    `nebula revert kubectl` restores it exactly.\n");
-        }
-    }
-    // 4. Smoke check (guest-side Ready, then the host-side 6443 forward,
-    //    which nebulad's watcher brings up on its next tick).
-    println!("waiting for node to be Ready…");
+    // Guest kubeconfig (first boot takes ~20-30s), node Ready, host forward.
+    let guest_yaml = wait_for_guest_kubeconfig(Duration::from_secs(120))?;
     wait_node_ready(Duration::from_secs(120))?;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -59,6 +43,36 @@ pub fn use_kubectl() -> anyhow::Result<()> {
             bail!("host forward 127.0.0.1:6443 did not come up within 30s");
         }
         std::thread::sleep(Duration::from_millis(250));
+    }
+
+    // Standalone kubeconfig with the server pointed at the stable forward.
+    let mut doc: Value = serde_yaml::from_str(&guest_yaml)?;
+    doc["clusters"][0]["cluster"]["server"] = Value::String("https://127.0.0.1:6443".into());
+    doc["clusters"][0]["name"] = Value::String(CONTEXT_NAME.into());
+    doc["contexts"][0]["context"]["cluster"] = Value::String(CONTEXT_NAME.into());
+    doc["contexts"][0]["context"]["user"] = Value::String(CONTEXT_NAME.into());
+    doc["contexts"][0]["name"] = Value::String(CONTEXT_NAME.into());
+    doc["users"][0]["name"] = Value::String(CONTEXT_NAME.into());
+    doc["current-context"] = Value::String(CONTEXT_NAME.into());
+    let path = client::nebula_home()?.join("kubeconfig");
+    std::fs::write(&path, serde_yaml::to_string(&doc)?)?;
+    Ok(path)
+}
+
+pub fn setup_kubectl() -> anyhow::Result<()> {
+    println!("k3s starting in the Vessel…");
+    let standalone = ensure_ready()?;
+    let guest_yaml = std::fs::read_to_string(&standalone)?;
+
+    // Merge into ~/.kube/config as cluster/user/context `nebula`, never
+    // touching other entries; record the previous context for revert.
+    let merged = merge_kubeconfig(&guest_yaml, "127.0.0.1")?;
+    if let Some(prev) = merged {
+        println!("kubectl → nebula (was: {prev})");
+        if prev != CONTEXT_NAME && looks_remote(&prev) {
+            eprintln!("\n  ⚠ previous kubectl context `{prev}` looks like a real cluster.");
+            eprintln!("    `nebula revert kubectl` restores it exactly.\n");
+        }
     }
     println!("kubectl ready — try: kubectl get nodes");
     Ok(())

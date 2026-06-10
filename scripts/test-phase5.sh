@@ -35,7 +35,7 @@ restore_ctx() {
 trap restore_ctx EXIT
 
 echo "--- nebula use kubectl"
-check "use kubectl succeeds"           "$NEBULA use kubectl"
+check "use kubectl succeeds"           "$NEBULA setup kubectl"
 # HARD GATE: everything below mutates the cluster kubectl points at. If the
 # switch did not land on `nebula`, abort instead of touching the user's
 # (possibly production) context.

@@ -1,5 +1,5 @@
-//! `nebula use <tool>` / `nebula revert <tool>` — point docker/nerdctl (and
-//! later kubectl) at Nebula, and put them back *exactly* as they were.
+//! `nebula setup <tool>` / `nebula revert <tool>` — point docker/nerdctl/
+//! kubectl at Nebula, and put them back *exactly* as they were.
 //!
 //! Safety rules (these tools can target other VMs or production):
 //! - never delete or rewrite a user's pre-existing contexts/config beyond the
@@ -17,11 +17,11 @@ use crate::client;
 
 const DOCKER_CONTEXT_NAME: &str = "nebula";
 
-pub fn use_tool(tool: &str) -> anyhow::Result<()> {
+pub fn setup_tool(tool: &str) -> anyhow::Result<()> {
     match tool {
         "docker" => use_docker(),
         "nerdctl" => use_nerdctl(),
-        "kubectl" => crate::kube::use_kubectl(),
+        "kubectl" => crate::kube::setup_kubectl(),
         other => bail!("unknown tool `{other}` (expected docker, nerdctl, or kubectl)"),
     }
 }
@@ -179,7 +179,7 @@ fn use_nerdctl() -> anyhow::Result<()> {
     let addr = client::nebula_home()?.join("run/containerd.sock");
     std::fs::write(
         &path,
-        format!("# written by `nebula use nerdctl` — revert with `nebula revert nerdctl`\naddress = \"unix://{}\"\nnamespace = \"default\"\n", addr.display()),
+        format!("# written by `nebula setup nerdctl` — revert with `nebula revert nerdctl`\naddress = \"unix://{}\"\nnamespace = \"default\"\n", addr.display()),
     )?;
     println!("nerdctl config → nebula containerd ({})", path.display());
     println!("note: nerdctl runs inside the Vessel for now: `nebula exec nerdctl …`");
