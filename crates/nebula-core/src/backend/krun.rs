@@ -264,7 +264,7 @@ impl VmHandle for KrunVm {
     /// "connect to guest port N" = connect to the unix socket mapped to N.
     /// This is what lets nebulad's agent/socket proxies run unchanged on the
     /// krun backend (the Linux engine path).
-    fn vsock_connect(&self, port: u32) -> Result<std::os::unix::net::UnixStream> {
+    fn vsock_connect(&self, port: u32) -> Result<super::VsockStream> {
         let map = self
             .spec
             .vsock_ports

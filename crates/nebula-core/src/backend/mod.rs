@@ -9,8 +9,16 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::spec::VmSpec;
 
-#[cfg(feature = "libkrun")]
+#[cfg(all(feature = "libkrun", unix))]
 pub mod krun;
+
+/// Host-side stream for a guest vsock connection. Unix sockets on
+/// macOS/Linux; on Windows the WHP backend will map guest vsock ports to
+/// loopback TCP (what named-pipe-averse tooling expects anyway).
+#[cfg(unix)]
+pub type VsockStream = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+pub type VsockStream = std::net::TcpStream;
 #[cfg(all(target_os = "macos", feature = "vz"))]
 pub mod vz;
 
@@ -41,7 +49,7 @@ pub trait VmHandle: Send {
     fn balloon_set_guest_mib(&mut self, target_mib: u64) -> Result<()>;
 
     /// Open a host->guest vsock stream to `port`. Returns a connected socket.
-    fn vsock_connect(&self, _port: u32) -> Result<std::os::unix::net::UnixStream> {
+    fn vsock_connect(&self, _port: u32) -> Result<VsockStream> {
         Err(Error::backend(
             "vm",
             "vsock_connect not supported by this backend",
@@ -103,7 +111,7 @@ pub fn backend_by_name(name: &str) -> Result<Box<dyn VmmBackend>> {
     match name {
         #[cfg(all(target_os = "macos", feature = "vz"))]
         "vz" => Ok(Box::new(vz::VzBackend::new())),
-        #[cfg(feature = "libkrun")]
+        #[cfg(all(feature = "libkrun", unix))]
         "krun" => Ok(Box::new(krun::KrunBackend::new())),
         other => Err(Error::BackendUnavailable(
             "unknown",

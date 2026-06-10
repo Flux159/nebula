@@ -179,7 +179,7 @@ impl VmHandle for VzVm {
         }
     }
 
-    fn vsock_connect(&self, port: u32) -> Result<std::os::unix::net::UnixStream> {
+    fn vsock_connect(&self, port: u32) -> Result<super::VsockStream> {
         use std::os::fd::FromRawFd;
         let (tx, rx) = mpsc::channel::<std::result::Result<i32, String>>();
         self.on_queue(move |vm| {
