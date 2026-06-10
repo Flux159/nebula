@@ -9,6 +9,12 @@ name: Dev build
 on:
   workflow_dispatch:
 
+# The default token needs actions:read for `gh run list/download` (fetching
+# the guest-images artifacts) — without it the API answers 403.
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   mac-app:
     runs-on: macos-15 # arm64
