@@ -22,6 +22,28 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
+    // The krun backend re-execs the CURRENT binary as its VM worker
+    // (krun_start_enter takes over the process) — when the engine runs on
+    // krun (Linux), that binary is nebulad, so route the arg before clap.
+    {
+        let mut args = std::env::args().skip(1);
+        if args.next().as_deref() == Some("krun-worker") {
+            let spec = match (args.next().as_deref(), args.next()) {
+                (Some("--spec"), Some(json)) => json,
+                _ => {
+                    eprintln!("krun-worker: usage: nebulad krun-worker --spec <json>");
+                    std::process::exit(2);
+                }
+            };
+            match nebula_core::backend::krun::run_worker(&spec) {
+                Ok(never) => match never {},
+                Err(e) => {
+                    eprintln!("krun-worker: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
     let _ = Args::parse();
     let paths = paths::Paths::new()?;
     paths.ensure_dirs()?;
