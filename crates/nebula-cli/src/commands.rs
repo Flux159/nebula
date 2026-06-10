@@ -295,6 +295,10 @@ pub fn quickstart() -> anyhow::Result<()> {
     println!("   nebula ui                          open the app");
     println!("   nebula stats --watch               watch the memory balloon breathe");
     println!();
+    println!("{}", bold("7. Working with AI agents"));
+    println!("   nebula skill > SKILL.md            full machine-readable usage guide");
+    println!("                                      (vessels, snapshots, tree-search patterns)");
+    println!();
 
     let cli_st = crate::pathsetup::status();
     if !cli_st.missing_from_path.is_empty() && cli_st.bundle_dir.is_some() {

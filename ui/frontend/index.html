@@ -85,6 +85,41 @@
     .modal .secondary {
       background: transparent; color: var(--dim); border: 1px solid var(--border);
     }
+    nav { display: flex; flex-direction: column; gap: 2px; margin: 6px -8px 0; }
+    nav a {
+      color: var(--dim); text-decoration: none; padding: 7px 10px; border-radius: 6px;
+      font-size: 13px; display: flex; align-items: center; gap: 8px;
+    }
+    nav a:hover { background: rgba(122,162,255,0.08); color: var(--text); }
+    nav a.active { background: rgba(122,162,255,0.14); color: var(--text); font-weight: 600; }
+    .view { display: none; }
+    .view.active { display: block; }
+    .row-actions button {
+      background: transparent; color: var(--accent); border: 1px solid var(--border);
+      padding: 3px 9px; font-size: 12px; font-weight: 500;
+    }
+    .row-actions button:hover { background: rgba(122,162,255,0.1); }
+    pre.log {
+      background: #0a0d13; border: 1px solid var(--border); border-radius: 8px;
+      padding: 12px 14px; font: 11.5px/1.5 "SF Mono", ui-monospace, monospace;
+      white-space: pre-wrap; word-break: break-all; max-height: 60vh; overflow-y: auto;
+    }
+    .logs-modal { max-width: 760px; width: 86vw; }
+    .copy-line {
+      display: flex; align-items: center; gap: 8px; margin-top: 8px;
+      background: #0a0d13; border: 1px solid var(--border); border-radius: 6px;
+      padding: 7px 10px; font: 12px "SF Mono", ui-monospace, monospace;
+    }
+    .copy-line code { flex: 1; background: none; padding: 0; }
+    .copy-line button { padding: 3px 9px; font-size: 11px; }
+    .kube-kinds { display: flex; gap: 8px; margin: 4px 0 12px; }
+    .kube-kinds button {
+      background: transparent; color: var(--dim); border: 1px solid var(--border);
+      padding: 5px 12px; font-size: 12px; font-weight: 500;
+    }
+    .kube-kinds button.active { color: var(--text); border-color: var(--accent); background: rgba(122,162,255,0.1); }
+    .hint { color: var(--dim); font-size: 12px; margin: 8px 0; }
+    .hint code { background: #232a3a; border-radius: 4px; padding: 1px 5px; }
   </style>
 </head>
 <body>
@@ -93,6 +128,10 @@
       <h1>Nebula</h1>
       <span class="pill"><span class="dot" id="dot"></span><span id="engine-state">connecting…</span></span>
     </div>
+    <nav id="nav">
+      <a href="#containers" data-view="containers" class="active">Containers</a>
+      <a href="#kubernetes" data-view="kubernetes">Kubernetes</a>
+    </nav>
     <div class="gauge">
       <label>Guest memory</label>
       <div class="bar"><i class="mem" id="mem-bar" style="width:0%"></i></div>
@@ -116,9 +155,39 @@
     </div>
   </aside>
   <main>
-    <h2>Containers</h2>
-    <div id="containers"><div class="empty">loading…</div></div>
+    <section class="view active" id="view-containers">
+      <h2>Containers</h2>
+      <div id="containers"><div class="empty">loading…</div></div>
+    </section>
+    <section class="view" id="view-kubernetes">
+      <h2>Kubernetes</h2>
+      <div class="kube-kinds" id="kube-kinds">
+        <button data-kind="pods" class="active">Pods</button>
+        <button data-kind="deployments">Deployments</button>
+        <button data-kind="services">Services</button>
+        <button data-kind="nodes">Nodes</button>
+      </div>
+      <div id="kube-out"><div class="empty">select a resource…</div></div>
+      <div class="hint">First use starts k3s inside the engine (~20s, one time).
+        Full control from your terminal: <code>nebula kubectl get pods -A</code>
+        or <code>nebula setup kubectl</code> to point your own kubectl here.</div>
+    </section>
   </main>
+  <div class="modal-backdrop" id="logs-modal">
+    <div class="modal logs-modal">
+      <h3 id="logs-title">Logs</h3>
+      <pre class="log" id="logs-body">loading…</pre>
+      <div class="copy-line">
+        <code id="shell-cmd"></code>
+        <button id="shell-copy">Copy</button>
+      </div>
+      <div class="hint">Paste in a terminal for an interactive shell inside this container.</div>
+      <div class="actions">
+        <button class="secondary" id="logs-refresh">Refresh</button>
+        <button id="logs-close">Close</button>
+      </div>
+    </div>
+  </div>
   <div class="modal-backdrop" id="cli-modal">
     <div class="modal">
       <h3>Command-line tools</h3>

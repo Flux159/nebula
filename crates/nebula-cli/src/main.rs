@@ -105,6 +105,8 @@ enum Commands {
     Ui,
     /// Show short guides for getting started (engine, docker, k8s, helm).
     Quickstart,
+    /// Print the agent/LLM skill guide (markdown). Try: nebula skill > SKILL.md
+    Skill,
     /// Diagnose common setup problems.
     Doctor,
     /// Install guest images (kernel + rootfs) into ~/.nebula.
@@ -331,6 +333,11 @@ fn main() -> anyhow::Result<()> {
         },
         Commands::Ui => autostart::open_ui(),
         Commands::Quickstart => commands::quickstart(),
+        Commands::Skill => {
+            // Baked in at compile time so the binary is self-contained.
+            print!("{}", include_str!("../../../docs/SKILL.md"));
+            Ok(())
+        }
         Commands::Doctor => commands::doctor(),
         Commands::InstallImage {
             kernel,

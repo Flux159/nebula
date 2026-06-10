@@ -39,6 +39,15 @@ limitations; routine TODOs live in code.)
 
 ## Needs discussion
 
+- **(2026-06-10) `nebula sandbox` from the bundled app can't build its
+  initramfs.** Ephemeral sandboxes assemble an initramfs from the dev tree's
+  musl `vessel-init` binary, which isn't shipped in Nebula.app — so sandbox
+  (only) fails from a bundle install with "vessel-init (musl) not built".
+  Named vessels/engine are unaffected (they boot rootfs.img directly). Fix
+  options: ship a prebuilt `initramfs.cpio.gz` as an app resource +
+  `install-image` artifact, or extract /sbin/nebula-init from the installed
+  pristine rootfs at first sandbox use. Small, but needs a decision.
+
 - **(2026-06-10) Publish the Nebula base image to Docker Hub.** Agreed
   direction: push versioned `nebula/vessel-base:<ver>-<flavor>` images from
   the guest-images CI so embedders author rootfs customizations as plain

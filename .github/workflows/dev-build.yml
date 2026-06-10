@@ -1,0 +1,63 @@
+name: Dev build
+
+# Manual-dispatch installable builds: ad-hoc-signed Nebula.app DMG + embed
+# kit, built on a Mac runner from the latest guest-images artifacts. These
+# are DEV builds — on another Mac, right-click → Open once (or
+# `xattr -dr com.apple.quarantine /Applications/Nebula.app`). Signed +
+# notarized release builds land in release.yml once the Developer ID
+# secrets exist (see tasks/features.md "CI/CD & release pipeline").
+on:
+  workflow_dispatch:
+
+jobs:
+  mac-app:
+    runs-on: macos-15 # arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Brew deps (libkrun fork toolchain + GPU userspace)
+        run: |
+          brew tap slp/krunkit
+          brew install zig llvm virglrenderer molten-vk
+
+      - name: Tauri CLI
+        run: cargo install tauri-cli --locked
+
+      - name: Fetch latest guest images (built by guest-images.yml)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id=$(gh run list --workflow guest-images.yml --status success --limit 1 \
+                     --json databaseId -q '.[0].databaseId')
+          if [ -z "$run_id" ]; then
+            echo "::error::no successful guest-images run — dispatch that workflow first"
+            exit 1
+          fi
+          mkdir -p dist
+          gh run download "$run_id" --name guest-images --dir dist
+          ls -la dist
+          # embed-kit consumes the raw images from vessel/out
+          mkdir -p vessel/out
+          gzip -dc dist/kernel-Image.gz > vessel/out/Image
+          gzip -dc dist/rootfs.img.gz > vessel/out/rootfs.img
+
+      - name: Build Nebula.app + DMG (ad-hoc signed)
+        run: scripts/bundle-app.sh
+
+      - name: Build embed kit
+        run: |
+          scripts/embed-kit.sh --flavor full --out dist-embed
+          ditto -c -k dist-embed nebula-embed-kit.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nebula-dmg
+          path: ui/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nebula-embed-kit
+          path: nebula-embed-kit.zip

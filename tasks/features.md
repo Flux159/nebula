@@ -653,6 +653,75 @@ implementation starts, since it shapes the UI's information architecture.
   agent-orchestration system in ~/Projects/mystral) which embeds Nebula via
   the Phase 10 SDK.
 
+Update 2026-06-10 — direction sharpened in discussion; this is now the
+headline UI thesis:
+
+- **Synology-style app catalog for non-technical users.** The primitives are
+  all shipped: sub-second microVM boots, real docker/compose/k8s/helm,
+  per-vessel persistent data disks, snapshots (live memory ones on vz),
+  `*.nebula.local` DNS, ports on localhost. An "app" = a manifest pointing at
+  a compose file or helm chart + icon + defaults; install = one click; the
+  app's state lives on the engine data disk (or its own vessel for
+  VM-isolated apps). Snapshot-before-upgrade gives one-click rollback —
+  something even Synology doesn't do this cheaply (APFS clones).
+  Three audiences, one stack: non-technical users get the catalog UI;
+  technical users get the CLI/docker/kubectl underneath (same state, no
+  lock-in); agents get `nebula skill` (shipped — prints the machine-readable
+  usage guide incl. snapshot/MCTS patterns; `nebula skill > SKILL.md`).
+- **Vessel disk attach UX (small gap).** VmSpec already supports N disks but
+  the CLI only provisions rootfs+data; apps-in-vessels may want named extra
+  volumes (`vessels new --volume name:size`). Trivial plumbing when needed.
+- Current UI state (2026-06-10): sidebar nav with Containers and Kubernetes
+  views; container logs modal (tail 400 via sidecar) + copyable
+  `nebula docker exec -it <id> sh` line; Kubernetes view lists
+  pods/deployments/services/nodes via the sidecar kubectl (allow-listed
+  reads only). The app catalog builds on this skeleton.
+
+## CI/CD & release pipeline (active — owner prep needed)
+
+State today: `ci.yml` (macos-15: fmt/clippy/unit tests/musl guest cross-build)
+and `guest-images.yml` (ubuntu-24.04-arm: kernel+rootfs, attaches to releases
+on v* tags). Wanted: installable builds for a second Mac ASAP, Linux
+dev-track by end of week, signed/notarized release builds after that.
+
+**What Suyog needs to prepare (in order of need):**
+
+1. *(none — already possible)* **Unsigned dev DMG**: ad-hoc-signed bundles
+   build today (`scripts/bundle-app.sh`). On another Mac: right-click → Open
+   once, or `xattr -dr com.apple.quarantine /Applications/Nebula.app`.
+   `dev-build.yml` (workflow_dispatch) builds the same on a Mac runner.
+2. **Ubuntu dev machine access** (promised): ssh + scp creds, arm64 or x64
+   noted, KVM available (`ls /dev/kvm`). Linux work order: build the libkrun
+   fork on KVM → port nebulad seams (reflink instead of clonefile, systemd
+   instead of launchd, VMM RSS instead of XPC scan, TAP/bridge or TSI net) →
+   run test-vessels.sh equivalents → fold into CI as a linux job.
+3. **Apple Developer Program** (for signed/notarized builds):
+   - active membership; note the **Team ID**
+   - a **Developer ID Application** certificate, exported as .p12
+   - an **App Store Connect API key** (Issuer ID + Key ID + .p8) — preferred
+     for notarytool — or an app-specific password for the Apple ID
+   - GitHub Actions secrets to create:
+     `APPLE_CERT_P12_BASE64`, `APPLE_CERT_PASSWORD`, `APPLE_TEAM_ID`,
+     `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID`, `APPLE_API_KEY_P8`
+   - decision: keep bundle id `dev.nebula.ui` (register it to the team) or
+     change before first signed release
+4. **Repo/registry decisions**: Docker Hub org for `nebula/vessel-base`
+   (+ push token as an Actions secret), and a homebrew tap repo
+   (`Flux159/homebrew-nebula`) for the cask/formula job.
+
+**Pipeline plan:**
+
+- `dev-build.yml` (now): manual-dispatch Mac job → brew deps (zig, llvm,
+  slp/krunkit tap for virglrenderer/molten-vk) → build fork dylib →
+  bundle-app.sh → upload DMG artifact (+ embed-kit zip). Ad-hoc signed.
+- `release.yml` (after #3): on v* tags — guest images (existing) + signed
+  DMG (Developer ID, hardened runtime + virtualization/hypervisor
+  entitlements, notarized + stapled) + CLI zip (`bin/ lib/ images/`) +
+  SHA256SUMS; brew cask points at the DMG, formula at the CLI zip.
+- Linux CI job (after #2 spike): build + clippy + unit tests on
+  ubuntu-24.04-arm; KVM acceptance subset where /dev/kvm exists.
+- MAS remains out of scope (vmnet entitlement gymnastics; documented in 9.4).
+
 ## Cross-cutting risks (watch from day 1)
 
 1. **Elastic memory on VZ's balloon device** (Phase 4.1). Lower risk than before

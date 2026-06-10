@@ -101,10 +101,59 @@ fn setup_cli_tools() -> Result<String, String> {
     run_cli(&["setup", "path", "--yes"])
 }
 
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 80
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+/// Tail a container's logs through the sidecar (`nebula docker logs`).
+/// docker writes the container's stderr stream to stderr, so both streams
+/// are returned regardless of exit status.
+#[tauri::command]
+fn container_logs(id: String) -> Result<String, String> {
+    if !valid_id(&id) {
+        return Err("invalid container id".into());
+    }
+    for bin in nebula_cli() {
+        match Command::new(&bin)
+            .args(["docker", "logs", "--tail", "400", "--timestamps", &id])
+            .output()
+        {
+            Ok(out) => {
+                let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
+                s.push_str(&String::from_utf8_lossy(&out.stderr));
+                return Ok(s);
+            }
+            Err(_) => continue,
+        }
+    }
+    Err("nebula CLI not found".into())
+}
+
+/// One kubectl read through the sidecar (`nebula kubectl get …`), allow-listed
+/// so the UI can't be talked into arbitrary cluster mutations.
+#[tauri::command]
+fn kube_get(kind: String) -> Result<String, String> {
+    const ALLOWED: &[&str] = &["pods", "deployments", "services", "nodes", "namespaces"];
+    if !ALLOWED.contains(&kind.as_str()) {
+        return Err(format!("kind must be one of {ALLOWED:?}"));
+    }
+    run_cli(&["kubectl", "get", &kind, "-A", "-o", "wide"])
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![start_engine, cli_tools_status, setup_cli_tools])
+        .invoke_handler(tauri::generate_handler![
+            start_engine,
+            cli_tools_status,
+            setup_cli_tools,
+            container_logs,
+            kube_get
+        ])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
