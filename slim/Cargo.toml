@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/slim-api",
+    "crates/slim-http",
+    "crates/slim-image",
+    "crates/slim-runtime",
+    "crates/slim-net",
+    "crates/slim-build",
+    "crates/slim-client",
+    "crates/slim-kube",
+    "crates/slim-helm",
+    "crates/slim-tmpl",
+    "crates/slimd",
+    "crates/docker-slim",
+    "crates/kubectl-slim",
+    "crates/helm-slim",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+libc = "0.2"
+httparse = "1.9"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
+sha2 = "0.10"
+hex = "0.4"
+ureq = { version = "2.10", default-features = false, features = ["tls", "json", "gzip"] }
+
+slim-api = { path = "crates/slim-api" }
+slim-http = { path = "crates/slim-http" }
+slim-image = { path = "crates/slim-image" }
+slim-runtime = { path = "crates/slim-runtime" }
+slim-net = { path = "crates/slim-net" }
+slim-build = { path = "crates/slim-build" }
+slim-client = { path = "crates/slim-client" }
+slim-kube = { path = "crates/slim-kube" }
+slim-helm = { path = "crates/slim-helm" }
+slim-tmpl = { path = "crates/slim-tmpl" }
+
+# Size is a product feature: every release artifact ships stripped, size-opt,
+# abort-on-panic. Perf-sensitive paths (sha256, gzip) get opt-level bumps in
+# their own crates if profiling demands it.
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

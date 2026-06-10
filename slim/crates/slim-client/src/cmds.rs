@@ -1,0 +1,1324 @@
+//! docker subcommand implementations against the slim Engine API.
+
+use crate::args::{self, Parsed};
+use crate::format as fmt;
+use crate::http::{demux_stdcopy, Client};
+use crate::tty;
+use serde_json::{json, Value};
+use std::io::{Read, Write};
+
+/// URL-encode a query value (kept local to avoid a slim-http dep).
+fn url_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+pub enum CmdError {
+    /// Already printed something; exit with this code.
+    Handled(i32),
+    /// Print "Error: {msg}" and exit 1.
+    Msg(String),
+}
+pub type CmdResult = Result<(), CmdError>;
+
+fn msg(s: impl Into<String>) -> CmdError {
+    CmdError::Msg(s.into())
+}
+impl From<crate::http::ApiError> for CmdError {
+    fn from(e: crate::http::ApiError) -> Self {
+        CmdError::Msg(e.message)
+    }
+}
+impl From<std::io::Error> for CmdError {
+    fn from(e: std::io::Error) -> Self {
+        CmdError::Msg(e.to_string())
+    }
+}
+
+const V: &str = "/v1.43";
+
+// ---------- system ----------
+
+pub fn version(client: &Client) -> CmdResult {
+    let v: slim_api::system::VersionResponse = client.json("GET", &format!("{V}/version"), None)?;
+    println!("Client: docker-slim");
+    println!(" Version:    slim-0.1.0");
+    println!(" API version: {}", v.api_version);
+    println!();
+    println!("Server: nebula-slim");
+    println!(" Engine:");
+    println!("  Version:    {}", v.version);
+    println!("  API version: {} (minimum {})", v.api_version, v.min_api_version);
+    println!("  OS/Arch:    {}/{}", v.os, v.arch);
+    Ok(())
+}
+
+pub fn info(client: &Client) -> CmdResult {
+    let i: slim_api::system::InfoResponse = client.json("GET", &format!("{V}/info"), None)?;
+    println!("Client:");
+    println!(" Version: slim-0.1.0");
+    println!();
+    println!("Server:");
+    println!(" Containers: {}", i.containers);
+    println!("  Running: {}", i.containers_running);
+    println!("  Stopped: {}", i.containers_stopped);
+    println!(" Images: {}", i.images);
+    println!(" Server Version: {}", i.server_version);
+    println!(" Storage Driver: {}", i.driver);
+    println!(" Operating System: {}", i.operating_system);
+    println!(" OSType: {}", i.os_type);
+    println!(" Architecture: {}", i.architecture);
+    println!(" CPUs: {}", i.ncpu);
+    println!(" Total Memory: {}", fmt::human_size(i.mem_total));
+    println!(" Name: {}", i.name);
+    Ok(())
+}
+
+// ---------- images ----------
+
+pub fn pull(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &[], &[], &[], false)?;
+    let image = p.positional.first().ok_or_else(|| msg("\"pull\" requires exactly 1 argument"))?;
+    pull_image(client, image)?;
+    println!("{image}");
+    Ok(())
+}
+
+/// Shared image pull with progress, used by pull/run.
+pub fn pull_image(client: &Client, image: &str) -> CmdResult {
+    let (from, tag) = split_image_tag(image);
+    let path = format!("{V}/images/create?fromImage={}&tag={}", url_encode(&from), url_encode(&tag));
+    let mut resp = client.request("POST", &path, &[("X-Registry-Auth", &auth_header(&from))], Some(b""))?;
+    if !(200..300).contains(&resp.status) {
+        let body = resp.read_body().unwrap_or_default();
+        return Err(msg(String::from_utf8_lossy(&body).into_owned()));
+    }
+    let mut buf = Vec::new();
+    let mut failed = None;
+    resp.stream_body(|chunk| buf.extend_from_slice(chunk))?;
+    for line in buf.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        if let Ok(m) = serde_json::from_slice::<slim_api::ProgressMessage>(line) {
+            if let Some(e) = m.error {
+                failed = Some(e);
+            } else if let Some(s) = m.status {
+                match m.id {
+                    Some(id) => println!("{id}: {s}"),
+                    None => println!("{s}"),
+                }
+            }
+        }
+    }
+    if let Some(e) = failed {
+        return Err(msg(e));
+    }
+    Ok(())
+}
+
+pub fn push(_client: &Client, _cargs: &[String]) -> CmdResult {
+    Err(msg("push is not yet supported by the slim engine"))
+}
+
+pub fn images(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &["-q", "--all", "--no-trunc"], &["--format", "--filter"],
+        &[("-q", "--quiet"), ("-a", "--all"), ("-f", "--filter")], false)?;
+    let list: Vec<slim_api::image::ImageSummary> = client.json("GET", &format!("{V}/images/json"), None)?;
+    if let Some(f) = p.first("format") {
+        for img in &list {
+            let v = serde_json::to_value(img).unwrap_or(Value::Null);
+            println!("{}", fmt::apply_format(f, &v).map_err(msg)?);
+        }
+        return Ok(());
+    }
+    if p.flag("quiet") {
+        for img in &list {
+            println!("{}", fmt::short_id(&img.id));
+        }
+        return Ok(());
+    }
+    let mut rows = Vec::new();
+    for img in &list {
+        for tag in img.repo_tags.iter().filter(|t| !t.is_empty()) {
+            let (repo, t) = tag.rsplit_once(':').unwrap_or((tag.as_str(), "latest"));
+            rows.push(vec![
+                repo.to_string(),
+                t.to_string(),
+                fmt::short_id(&img.id),
+                fmt::relative_time(img.created),
+                fmt::human_size(img.size),
+            ]);
+        }
+    }
+    print!("{}", fmt::table(&["REPOSITORY", "TAG", "IMAGE ID", "CREATED", "SIZE"], &rows));
+    Ok(())
+}
+
+pub fn tag(client: &Client, cargs: &[String]) -> CmdResult {
+    if cargs.len() < 2 {
+        return Err(msg("\"tag\" requires exactly 2 arguments"));
+    }
+    let (repo, t) = split_image_tag(&cargs[1]);
+    let path = format!("{V}/images/{}/tag?repo={}&tag={}", cargs[0], url_encode(&repo), url_encode(&t));
+    client.action("POST", &path, None)?;
+    Ok(())
+}
+
+pub fn rmi(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &["--force"], &[], &[("-f", "--force")], false)?;
+    let force = p.flag("force");
+    for name in &p.positional {
+        let path = format!("{V}/images/{name}?force={force}");
+        let resp: Vec<slim_api::image::ImageDeleteResponse> = client.json("DELETE", &path, None)?;
+        for r in resp {
+            if let Some(u) = r.untagged {
+                println!("Untagged: {u}");
+            }
+            if let Some(d) = r.deleted {
+                println!("Deleted: {d}");
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn image_sub(client: &Client, cargs: &[String]) -> CmdResult {
+    match cargs.first().map(|s| s.as_str()) {
+        Some("ls") | Some("list") | None => images(client, &cargs.get(1..).unwrap_or(&[]).to_vec()),
+        Some("pull") => pull(client, &cargs[1..].to_vec()),
+        Some("rm") => rmi(client, &cargs[1..].to_vec()),
+        Some("inspect") => inspect(client, &cargs[1..].to_vec()),
+        Some("tag") => tag(client, &cargs[1..].to_vec()),
+        Some(o) => Err(msg(format!("unknown image command: {o}"))),
+    }
+}
+
+// ---------- container lifecycle ----------
+
+pub fn create(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse_run_flags(cargs)?;
+    let (id, _) = do_create(client, &p, true)?;
+    println!("{id}");
+    Ok(())
+}
+
+pub fn run(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse_run_flags(cargs)?;
+    let detach = p.flag("detach");
+    let interactive = p.flag("interactive");
+    let tty_mode = p.flag("tty");
+    let auto_rm = p.flag("rm");
+
+    let (id, _) = do_create(client, &p, true)?;
+
+    if detach {
+        client.action("POST", &format!("{V}/containers/{id}/start"), None)?;
+        println!("{id}");
+        return Ok(());
+    }
+
+    let code = if interactive || tty_mode {
+        attach_and_run(client, &id, interactive, tty_mode)?
+    } else {
+        // Non-interactive: start, then stream logs to EOF, then read exit code.
+        client.action("POST", &format!("{V}/containers/{id}/start"), None)?;
+        stream_logs(client, &id, true, false)?;
+        wait_code(client, &id)?
+    };
+
+    if auto_rm {
+        let _ = client.action("DELETE", &format!("{V}/containers/{id}?force=true&v=true"), None);
+    }
+    if code != 0 {
+        return Err(CmdError::Handled(code));
+    }
+    Ok(())
+}
+
+fn attach_and_run(client: &Client, id: &str, interactive: bool, tty_mode: bool) -> Result<i32, CmdError> {
+    let path = format!(
+        "{V}/containers/{id}/attach?stream=1&stdout=1&stderr=1&stdin={}&logs=0",
+        if interactive { 1 } else { 0 }
+    );
+    let mut sock = client.hijack("POST", &path, None)?;
+    let _raw = if tty_mode { tty::enter_raw() } else { None };
+
+    // Start after the attach is connected so no early output is lost.
+    client.action("POST", &format!("{V}/containers/{id}/start"), None)?;
+
+    // socket -> stdout (demux for non-tty)
+    let mut read_sock = sock.try_clone()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        let mut out = std::io::stdout();
+        let mut err = std::io::stderr();
+        loop {
+            match read_sock.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tty_mode {
+                        let _ = out.write_all(&buf[..n]);
+                        let _ = out.flush();
+                    } else {
+                        demux_stdcopy(
+                            &buf[..n],
+                            |o| {
+                                let _ = out.write_all(o);
+                                let _ = out.flush();
+                            },
+                            |e| {
+                                let _ = err.write_all(e);
+                                let _ = err.flush();
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    });
+
+    // stdin -> socket
+    if interactive {
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; 8192];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if sock.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    let _ = reader.join();
+    wait_code(client, id)
+}
+
+fn wait_code(client: &Client, id: &str) -> Result<i32, CmdError> {
+    let w: slim_api::container::WaitResponse =
+        client.json("POST", &format!("{V}/containers/{id}/wait"), None)?;
+    Ok(w.status_code as i32)
+}
+
+pub fn start(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &["-a", "-i"], &[], &[("--attach", "-a"), ("--interactive", "-i")], false)?;
+    for name in &p.positional {
+        client.action("POST", &format!("{V}/containers/{name}/start"), None)?;
+        println!("{name}");
+    }
+    Ok(())
+}
+
+pub fn stop(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &[], &["-t", "--time"], &[("-t", "--time")], false)?;
+    let t = p.first("time").unwrap_or("10");
+    for name in &p.positional {
+        client.action("POST", &format!("{V}/containers/{name}/stop?t={t}"), None)?;
+        println!("{name}");
+    }
+    Ok(())
+}
+
+pub fn restart(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &[], &["-t", "--time"], &[("-t", "--time")], false)?;
+    let t = p.first("time").unwrap_or("10");
+    for name in &p.positional {
+        client.action("POST", &format!("{V}/containers/{name}/restart?t={t}"), None)?;
+        println!("{name}");
+    }
+    Ok(())
+}
+
+pub fn kill(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &[], &["-s", "--signal"], &[("-s", "--signal")], false)?;
+    let sig = p.first("signal").unwrap_or("KILL");
+    for name in &p.positional {
+        client.action("POST", &format!("{V}/containers/{name}/kill?signal={sig}"), None)?;
+        println!("{name}");
+    }
+    Ok(())
+}
+
+pub fn rm(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &["-f", "-v"], &[], &[("--force", "-f"), ("--volumes", "-v")], false)?;
+    let q = format!("force={}&v={}", p.flag("-f"), p.flag("-v"));
+    for name in &p.positional {
+        client.action("DELETE", &format!("{V}/containers/{name}?{q}"), None)?;
+        println!("{name}");
+    }
+    Ok(())
+}
+
+pub fn wait(client: &Client, cargs: &[String]) -> CmdResult {
+    for name in cargs {
+        let code = wait_code(client, name)?;
+        println!("{code}");
+    }
+    Ok(())
+}
+
+pub fn container_sub(client: &Client, cargs: &[String]) -> CmdResult {
+    match cargs.first().map(|s| s.as_str()) {
+        Some("ls") | Some("list") | None => ps(client, &cargs.get(1..).unwrap_or(&[]).to_vec()),
+        Some("run") => run(client, &cargs[1..].to_vec()),
+        Some("rm") => rm(client, &cargs[1..].to_vec()),
+        Some("start") => start(client, &cargs[1..].to_vec()),
+        Some("stop") => stop(client, &cargs[1..].to_vec()),
+        Some("inspect") => inspect(client, &cargs[1..].to_vec()),
+        Some("logs") => logs(client, &cargs[1..].to_vec()),
+        Some("exec") => exec(client, &cargs[1..].to_vec()),
+        Some(o) => Err(msg(format!("unknown container command: {o}"))),
+    }
+}
+
+// ---------- ps ----------
+
+pub fn ps(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &["-a", "-q", "--no-trunc"], &["--format", "--filter"],
+        &[("--all", "-a"), ("--quiet", "-q"), ("-f", "--filter")], false)?;
+    let all = p.flag("-a");
+    let mut path = format!("{V}/containers/json?all={all}");
+    if let Some(f) = p.first("filter") {
+        // Convert repeated --filter k=v into the server's filters json.
+        let mut map = std::collections::BTreeMap::<String, Vec<String>>::new();
+        for spec in p.all("filter") {
+            if let Some((k, v)) = spec.split_once('=') {
+                map.entry(k.to_string()).or_default().push(v.to_string());
+            }
+        }
+        let _ = f;
+        path.push_str(&format!("&filters={}", url_encode(&serde_json::to_string(&map).unwrap())));
+    }
+    let list: Vec<slim_api::container::ContainerSummary> = client.json("GET", &path, None)?;
+
+    if let Some(f) = p.first("format") {
+        for c in &list {
+            let v = serde_json::to_value(c).unwrap_or(Value::Null);
+            println!("{}", fmt::apply_format(f, &v).map_err(msg)?);
+        }
+        return Ok(());
+    }
+    if p.flag("-q") {
+        for c in &list {
+            println!("{}", fmt::short_id(&c.id));
+        }
+        return Ok(());
+    }
+    let mut rows = Vec::new();
+    for c in &list {
+        let name = c.names.first().map(|n| n.trim_start_matches('/')).unwrap_or("");
+        rows.push(vec![
+            fmt::short_id(&c.id),
+            c.image.clone(),
+            truncate_cmd(&c.command),
+            fmt::relative_time(c.created),
+            c.status.clone(),
+            ports_summary(c),
+            name.to_string(),
+        ]);
+    }
+    print!(
+        "{}",
+        fmt::table(&["CONTAINER ID", "IMAGE", "COMMAND", "CREATED", "STATUS", "PORTS", "NAMES"], &rows)
+    );
+    Ok(())
+}
+
+fn ports_summary(c: &slim_api::container::ContainerSummary) -> String {
+    let mut parts = Vec::new();
+    for p in &c.ports {
+        if p.public_port != 0 {
+            parts.push(format!("0.0.0.0:{}->{}/{}", p.public_port, p.private_port, p.typ));
+        } else {
+            parts.push(format!("{}/{}", p.private_port, p.typ));
+        }
+    }
+    parts.join(", ")
+}
+
+// ---------- logs ----------
+
+pub fn logs(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &["-f", "-t"], &["--tail", "--since", "--until"],
+        &[("--follow", "-f"), ("--timestamps", "-t")], false)?;
+    let id = p.positional.first().ok_or_else(|| msg("\"logs\" requires exactly 1 argument"))?;
+    let follow = p.flag("-f");
+    let tail = p.first("tail").unwrap_or("all");
+    // determine tty
+    let tty_mode = container_is_tty(client, id).unwrap_or(false);
+    let extra = format!("&tail={tail}&timestamps={}", p.flag("-t"));
+    stream_logs_full(client, id, follow, tty_mode, &extra)?;
+    Ok(())
+}
+
+fn stream_logs(client: &Client, id: &str, follow: bool, _ts: bool) -> CmdResult {
+    let tty_mode = container_is_tty(client, id).unwrap_or(false);
+    stream_logs_full(client, id, follow, tty_mode, "&tail=all")
+}
+
+fn stream_logs_full(client: &Client, id: &str, follow: bool, tty_mode: bool, extra: &str) -> CmdResult {
+    let path = format!("{V}/containers/{id}/logs?stdout=1&stderr=1&follow={}{extra}", follow);
+    let mut resp = client.request("GET", &path, &[], None)?;
+    if resp.status == 404 {
+        return Err(msg(format!("No such container: {id}")));
+    }
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
+    resp.stream_body(|chunk| {
+        if tty_mode {
+            let _ = out.write_all(chunk);
+            let _ = out.flush();
+        } else {
+            demux_stdcopy(
+                chunk,
+                |o| {
+                    let _ = out.write_all(o);
+                    let _ = out.flush();
+                },
+                |e| {
+                    let _ = err.write_all(e);
+                    let _ = err.flush();
+                },
+            );
+        }
+    })?;
+    Ok(())
+}
+
+// ---------- exec ----------
+
+pub fn exec(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &["-i", "-t", "-d"], &["-e", "--env", "-w", "--workdir", "-u", "--user"],
+        &[("--interactive", "-i"), ("--tty", "-t"), ("--detach", "-d"),
+          ("--env", "-e"), ("--workdir", "-w"), ("--user", "-u")], true)?;
+    if p.positional.is_empty() {
+        return Err(msg("\"exec\" requires at least 2 arguments"));
+    }
+    let id = &p.positional[0];
+    let cmd: Vec<String> = p.positional[1..].to_vec();
+    if cmd.is_empty() {
+        return Err(msg("\"exec\" requires a command to run"));
+    }
+    let tty_mode = p.flag("-t");
+    let interactive = p.flag("-i");
+    let detach = p.flag("-d");
+
+    let body = json!({
+        "AttachStdin": interactive,
+        "AttachStdout": true,
+        "AttachStderr": true,
+        "Tty": tty_mode,
+        "Cmd": cmd,
+        "Env": p.all("-e"),
+        "WorkingDir": p.first("-w").unwrap_or(""),
+        "User": p.first("-u").unwrap_or(""),
+    });
+    let created: slim_api::exec::ExecCreateResponse =
+        client.json("POST", &format!("{V}/containers/{id}/exec"), Some(&body))?;
+    let exec_id = created.id;
+
+    if detach {
+        client.action("POST", &format!("{V}/exec/{exec_id}/start"), Some(&json!({"Detach": true})))?;
+        return Ok(());
+    }
+
+    let start_body = json!({"Detach": false, "Tty": tty_mode});
+    let mut sock = client.hijack("POST", &format!("{V}/exec/{exec_id}/start"), Some(&start_body))?;
+    let _raw = if tty_mode { tty::enter_raw() } else { None };
+
+    let mut read_sock = sock.try_clone()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        let mut out = std::io::stdout();
+        let mut err = std::io::stderr();
+        loop {
+            match read_sock.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tty_mode {
+                        let _ = out.write_all(&buf[..n]);
+                        let _ = out.flush();
+                    } else {
+                        demux_stdcopy(&buf[..n],
+                            |o| { let _ = out.write_all(o); let _ = out.flush(); },
+                            |e| { let _ = err.write_all(e); let _ = err.flush(); });
+                    }
+                }
+            }
+        }
+    });
+    if interactive {
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = stdin.read(&mut buf) {
+                if n == 0 || sock.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    let _ = reader.join();
+
+    let ins: slim_api::exec::ExecInspect = client.json("GET", &format!("{V}/exec/{exec_id}/json"), None)?;
+    let code = ins.exit_code.unwrap_or(0) as i32;
+    if code != 0 {
+        return Err(CmdError::Handled(code));
+    }
+    Ok(())
+}
+
+// ---------- inspect ----------
+
+pub fn inspect(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &["-s"], &["-f", "--format", "--type"],
+        &[("--format", "-f"), ("--size", "-s")], false)?;
+    let format = p.first("-f").map(|s| s.to_string());
+    let mut results = Vec::new();
+    let mut any_err = false;
+    for name in &p.positional {
+        // Try container, then image, then network, then volume.
+        let v = inspect_one(client, name);
+        match v {
+            Some(v) => results.push(v),
+            None => {
+                eprintln!("Error: No such object: {name}");
+                any_err = true;
+            }
+        }
+    }
+    if let Some(f) = format {
+        for v in &results {
+            println!("{}", fmt::apply_format(&f, v).map_err(msg)?);
+        }
+    } else {
+        let arr = Value::Array(results);
+        println!("{}", serde_json::to_string_pretty(&arr).unwrap_or_default());
+    }
+    if any_err {
+        return Err(CmdError::Handled(1));
+    }
+    Ok(())
+}
+
+fn inspect_one(client: &Client, name: &str) -> Option<Value> {
+    for path in [
+        format!("{V}/containers/{name}/json"),
+        format!("{V}/images/{name}/json"),
+        format!("{V}/networks/{name}"),
+        format!("{V}/volumes/{name}"),
+    ] {
+        if let Ok((200, body)) = client.call("GET", &path, &[], None) {
+            if let Ok(v) = serde_json::from_slice::<Value>(&body) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+// ---------- cp ----------
+
+pub fn cp(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &["-a", "-L"], &[], &[], false)?;
+    if p.positional.len() != 2 {
+        return Err(msg("\"cp\" requires exactly 2 arguments"));
+    }
+    let (src, dst) = (&p.positional[0], &p.positional[1]);
+    let src_remote = src.contains(':') && !src.starts_with('.') && !src.starts_with('/');
+    let dst_remote = dst.contains(':') && !dst.starts_with('.') && !dst.starts_with('/');
+
+    if src_remote && !dst_remote {
+        // container:path -> host path
+        let (id, cpath) = src.split_once(':').unwrap();
+        let path = format!("{V}/containers/{id}/archive?path={}", url_encode(cpath));
+        let mut resp = client.request("GET", &path, &[], None)?;
+        if resp.status != 200 {
+            let b = resp.read_body().unwrap_or_default();
+            return Err(msg(String::from_utf8_lossy(&b).into_owned()));
+        }
+        let mut buf = Vec::new();
+        resp.stream_body(|c| buf.extend_from_slice(c))?;
+        extract_cp_tar(&buf, dst, cpath)?;
+    } else if !src_remote && dst_remote {
+        // host path -> container:path
+        let (id, cpath) = dst.split_once(':').unwrap();
+        let tar = make_cp_tar(src)?;
+        let parent = parent_dir(cpath);
+        let path = format!("{V}/containers/{id}/archive?path={}", url_encode(&parent));
+        let (status, body) = client.call("PUT", &path, &[("Content-Type", "application/x-tar")], Some(&tar))?;
+        if !(200..300).contains(&status) {
+            return Err(msg(String::from_utf8_lossy(&body).into_owned()));
+        }
+    } else {
+        return Err(msg("one of the paths must be a container path (container:path)"));
+    }
+    Ok(())
+}
+
+fn extract_cp_tar(tar: &[u8], dst: &str, src_path: &str) -> CmdResult {
+    let dst_p = std::path::Path::new(dst);
+    let mut ar = tar::Archive::new(tar);
+    // If dst is an existing dir, extract into it; else the single entry maps
+    // to dst (rename). docker semantics simplified.
+    if dst_p.is_dir() {
+        ar.unpack(dst_p).map_err(|e| msg(e.to_string()))?;
+    } else {
+        let base = std::path::Path::new(src_path).file_name().and_then(|n| n.to_str()).unwrap_or("");
+        for entry in ar.entries().map_err(|e| msg(e.to_string()))? {
+            let mut entry = entry.map_err(|e| msg(e.to_string()))?;
+            let ep = entry.path().map_err(|e| msg(e.to_string()))?.into_owned();
+            let name = ep.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if ep.to_string_lossy() == base || name == base || ep.components().count() == 1 {
+                entry.unpack(dst_p).map_err(|e| msg(e.to_string()))?;
+                return Ok(());
+            }
+        }
+        // Fallback: extract into parent.
+        let mut ar2 = tar::Archive::new(tar);
+        if let Some(parent) = dst_p.parent() {
+            ar2.unpack(parent).map_err(|e| msg(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+fn make_cp_tar(src: &str) -> Result<Vec<u8>, CmdError> {
+    let src_p = std::path::Path::new(src);
+    let mut buf = Vec::new();
+    {
+        let mut b = tar::Builder::new(&mut buf);
+        let name = src_p.file_name().ok_or_else(|| msg("invalid source path"))?;
+        if src_p.is_dir() {
+            b.append_dir_all(name, src_p).map_err(|e| msg(e.to_string()))?;
+        } else {
+            let mut f = std::fs::File::open(src_p)?;
+            b.append_file(name, &mut f).map_err(|e| msg(e.to_string()))?;
+        }
+        b.finish().map_err(|e| msg(e.to_string()))?;
+    }
+    Ok(buf)
+}
+
+fn parent_dir(path: &str) -> String {
+    match path.rsplit_once('/') {
+        Some(("", _)) => "/".to_string(),
+        Some((p, _)) => p.to_string(),
+        None => ".".to_string(),
+    }
+}
+
+// ---------- build ----------
+
+pub fn build(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &["--no-cache", "-q", "--pull"],
+        &["-t", "--tag", "-f", "--file", "--target", "--build-arg", "--label"],
+        &[("--tag", "-t"), ("--file", "-f"), ("--quiet", "-q")], false)?;
+    let ctx = p.positional.first().map(|s| s.as_str()).unwrap_or(".");
+    let ctx_path = std::path::Path::new(ctx);
+    if !ctx_path.is_dir() {
+        return Err(msg(format!("unable to prepare context: path {ctx} not found")));
+    }
+    let dockerfile = p.first("-f").unwrap_or("Dockerfile");
+    // Dockerfile path relative to context (docker copies it into the context).
+    let df_rel = std::path::Path::new(dockerfile)
+        .strip_prefix(ctx_path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| dockerfile.to_string());
+
+    let tar = build_context_tar(ctx_path, dockerfile)?;
+
+    let mut q = format!("dockerfile={}", url_encode(&df_rel));
+    if let Some(t) = p.first("-t") {
+        q.push_str(&format!("&t={}", url_encode(t)));
+    }
+    if let Some(target) = p.first("target") {
+        q.push_str(&format!("&target={}", url_encode(target)));
+    }
+    if p.flag("--no-cache") {
+        q.push_str("&nocache=1");
+    }
+    let bargs: std::collections::BTreeMap<String, String> = p.all("--build-arg").iter()
+        .filter_map(|kv| kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+        .collect();
+    if !bargs.is_empty() {
+        q.push_str(&format!("&buildargs={}", url_encode(&serde_json::to_string(&bargs).unwrap())));
+    }
+
+    let path = format!("{V}/build?{q}");
+    let mut resp = client.request("POST", &path, &[("Content-Type", "application/x-tar")], Some(&tar))?;
+    if !(200..300).contains(&resp.status) {
+        let b = resp.read_body().unwrap_or_default();
+        return Err(msg(String::from_utf8_lossy(&b).into_owned()));
+    }
+    let mut pending = Vec::new();
+    let mut build_error = None;
+    resp.stream_body(|chunk| {
+        pending.extend_from_slice(chunk);
+        while let Some(nl) = pending.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = pending.drain(..=nl).collect();
+            if let Ok(m) = serde_json::from_slice::<slim_api::ProgressMessage>(&line[..line.len() - 1]) {
+                if let Some(s) = m.stream {
+                    print!("{s}");
+                    let _ = std::io::stdout().flush();
+                }
+                if let Some(e) = m.error {
+                    build_error = Some(e);
+                }
+            }
+        }
+    })?;
+    if let Some(e) = build_error {
+        return Err(msg(e));
+    }
+    Ok(())
+}
+
+fn build_context_tar(ctx: &std::path::Path, _dockerfile: &str) -> Result<Vec<u8>, CmdError> {
+    // Honor .dockerignore lightly client-side? The server also applies it, so
+    // we send everything except .git for size.
+    let mut buf = Vec::new();
+    {
+        let mut b = tar::Builder::new(&mut buf);
+        append_dir(&mut b, ctx, ctx).map_err(|e| msg(e.to_string()))?;
+        b.finish().map_err(|e| msg(e.to_string()))?;
+    }
+    Ok(buf)
+}
+
+fn append_dir<W: Write>(b: &mut tar::Builder<W>, base: &std::path::Path, dir: &std::path::Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        if name == ".git" {
+            continue;
+        }
+        let rel = path.strip_prefix(base).unwrap_or(&path);
+        let meta = entry.metadata()?;
+        if meta.is_dir() {
+            append_dir(b, base, &path)?;
+        } else {
+            let mut f = std::fs::File::open(&path)?;
+            b.append_file(rel, &mut f)?;
+        }
+    }
+    Ok(())
+}
+
+// ---------- port / stats / events ----------
+
+pub fn port(client: &Client, cargs: &[String]) -> CmdResult {
+    let id = cargs.first().ok_or_else(|| msg("\"port\" requires at least 1 argument"))?;
+    let c: slim_api::container::ContainerInspect = client.json("GET", &format!("{V}/containers/{id}/json"), None)?;
+    for (port, binds) in &c.network_settings.ports {
+        if let Some(binds) = binds {
+            for b in binds {
+                println!("{port} -> {}:{}", if b.host_ip.is_empty() { "0.0.0.0" } else { &b.host_ip }, b.host_port);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn stats(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &["--no-stream", "-a", "--all"], &["--format"], &[("--all", "-a")], false)?;
+    let names = if p.positional.is_empty() {
+        client
+            .json::<Vec<slim_api::container::ContainerSummary>>("GET", &format!("{V}/containers/json"), None)?
+            .into_iter()
+            .map(|c| c.id)
+            .collect()
+    } else {
+        p.positional.clone()
+    };
+    println!("{}", fmt::table(&["NAME", "CPU %", "MEM USAGE / LIMIT", "PIDS"], &[]).trim_end());
+    for name in &names {
+        let path = format!("{V}/containers/{name}/stats?stream=false");
+        if let Ok(s) = client.json::<slim_api::container::StatsResponse>("GET", &path, None) {
+            let mem = format!("{} / {}", fmt::human_size(s.memory_stats.usage as i64), fmt::human_size(s.memory_stats.limit as i64));
+            println!("{:<20} {:<8} {:<20} {}", s.name.trim_start_matches('/'), "0.00%", mem, s.pids_stats.current);
+        }
+    }
+    Ok(())
+}
+
+pub fn events(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &[], &["--since", "--until", "--filter", "--format"], &[], false)?;
+    let _ = &p;
+    let mut resp = client.request("GET", &format!("{V}/events"), &[], None)?;
+    let mut out = std::io::stdout();
+    resp.stream_body(|chunk| {
+        let _ = out.write_all(chunk);
+        let _ = out.flush();
+    })?;
+    Ok(())
+}
+
+// ---------- login/logout ----------
+
+pub fn login(_client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(cargs, &["--password-stdin"], &["-u", "--username", "-p", "--password"],
+        &[("--username", "-u"), ("--password", "-p")], false)?;
+    let server = p.positional.first().cloned().unwrap_or_else(|| "https://index.docker.io/v1/".into());
+    let user = p.first("-u").unwrap_or("").to_string();
+    let mut pass = p.first("-p").unwrap_or("").to_string();
+    if p.flag("--password-stdin") {
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s).ok();
+        pass = s.trim().to_string();
+    }
+    save_cred(&server, &user, &pass)?;
+    println!("Login Succeeded");
+    Ok(())
+}
+
+pub fn logout(cargs: &[String]) -> CmdResult {
+    let server = cargs.first().cloned().unwrap_or_else(|| "https://index.docker.io/v1/".into());
+    let path = cred_path();
+    if let Ok(bytes) = std::fs::read(&path) {
+        if let Ok(mut v) = serde_json::from_slice::<Value>(&bytes) {
+            if let Some(auths) = v.get_mut("auths").and_then(|a| a.as_object_mut()) {
+                auths.remove(&server);
+            }
+            let _ = std::fs::write(&path, serde_json::to_vec_pretty(&v).unwrap_or_default());
+        }
+    }
+    println!("Removing login credentials for {server}");
+    Ok(())
+}
+
+// ---------- volume ----------
+
+pub fn volume(client: &Client, cargs: &[String]) -> CmdResult {
+    match cargs.first().map(|s| s.as_str()) {
+        Some("create") => {
+            let name = cargs.get(1).cloned().unwrap_or_default();
+            let v: slim_api::volume::Volume = client.json("POST", &format!("{V}/volumes/create"), Some(&json!({"Name": name})))?;
+            println!("{}", v.name);
+            Ok(())
+        }
+        Some("ls") | Some("list") | None => {
+            let resp: slim_api::volume::VolumeListResponse = client.json("GET", &format!("{V}/volumes"), None)?;
+            let rows: Vec<Vec<String>> = resp.volumes.iter().map(|v| vec![v.driver.clone(), v.name.clone()]).collect();
+            print!("{}", fmt::table(&["DRIVER", "VOLUME NAME"], &rows));
+            Ok(())
+        }
+        Some("rm") => {
+            for name in &cargs[1..] {
+                client.action("DELETE", &format!("{V}/volumes/{name}"), None)?;
+                println!("{name}");
+            }
+            Ok(())
+        }
+        Some("inspect") => {
+            let mut arr = Vec::new();
+            for name in &cargs[1..] {
+                let v: Value = client.json("GET", &format!("{V}/volumes/{name}"), None)?;
+                arr.push(v);
+            }
+            println!("{}", serde_json::to_string_pretty(&Value::Array(arr)).unwrap_or_default());
+            Ok(())
+        }
+        Some(o) => Err(msg(format!("unknown volume command: {o}"))),
+    }
+}
+
+// ---------- network ----------
+
+pub fn network(client: &Client, cargs: &[String]) -> CmdResult {
+    match cargs.first().map(|s| s.as_str()) {
+        Some("create") => {
+            let p = parse(&cargs[1..].to_vec(), &["--internal"], &["-d", "--driver"], &[("-d", "--driver")], false)?;
+            let name = p.positional.first().ok_or_else(|| msg("network create requires a name"))?;
+            let r: slim_api::network::NetworkCreateResponse =
+                client.json("POST", &format!("{V}/networks/create"),
+                    Some(&json!({"Name": name, "Internal": p.flag("--internal")})))?;
+            println!("{}", r.id);
+            Ok(())
+        }
+        Some("ls") | Some("list") | None => {
+            let nets: Vec<slim_api::network::NetworkInspect> = client.json("GET", &format!("{V}/networks"), None)?;
+            let rows: Vec<Vec<String>> = nets.iter().map(|n| vec![
+                fmt::short_id(&n.id), n.name.clone(), n.driver.clone(), n.scope.clone(),
+            ]).collect();
+            print!("{}", fmt::table(&["NETWORK ID", "NAME", "DRIVER", "SCOPE"], &rows));
+            Ok(())
+        }
+        Some("rm") => {
+            for name in &cargs[1..] {
+                client.action("DELETE", &format!("{V}/networks/{name}"), None)?;
+                println!("{name}");
+            }
+            Ok(())
+        }
+        Some("inspect") => {
+            let mut arr = Vec::new();
+            for name in &cargs[1..] {
+                arr.push(client.json::<Value>("GET", &format!("{V}/networks/{name}"), None)?);
+            }
+            println!("{}", serde_json::to_string_pretty(&Value::Array(arr)).unwrap_or_default());
+            Ok(())
+        }
+        Some("connect") | Some("disconnect") => {
+            let verb = cargs[0].clone();
+            if cargs.len() < 3 {
+                return Err(msg(format!("network {verb} requires NETWORK and CONTAINER")));
+            }
+            let (net, container) = (&cargs[1], &cargs[2]);
+            client.action("POST", &format!("{V}/networks/{net}/{verb}"), Some(&json!({"Container": container})))?;
+            Ok(())
+        }
+        Some(o) => Err(msg(format!("unknown network command: {o}"))),
+    }
+}
+
+pub fn system(client: &Client, cargs: &[String]) -> CmdResult {
+    match cargs.first().map(|s| s.as_str()) {
+        Some("info") => info(client),
+        Some("df") => {
+            let v: Value = client.json("GET", &format!("{V}/system/df"), None)?;
+            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+            Ok(())
+        }
+        Some("prune") => {
+            client.action("POST", &format!("{V}/system/prune"), None)?;
+            println!("Total reclaimed space: 0B");
+            Ok(())
+        }
+        _ => info(client),
+    }
+}
+
+// ---------- create body builder ----------
+
+fn parse_run_flags(cargs: &[String]) -> Result<Parsed, CmdError> {
+    parse(
+        cargs,
+        &["-d", "-i", "-t", "--rm", "-P", "--privileged", "--init", "--read-only"],
+        &["--name", "-p", "-v", "-e", "--env-file", "-w", "-u", "--network", "--restart",
+          "--entrypoint", "-h", "-l", "-m", "--cpus", "--add-host", "--pid", "--ipc", "--shm-size",
+          "--pull", "--stop-signal", "--memory-swap", "--cpu-shares"],
+        &[
+            ("-d", "--detach"), ("-i", "--interactive"), ("-t", "--tty"),
+            ("-p", "--publish"), ("-v", "--volume"), ("-e", "--env"),
+            ("-w", "--workdir"), ("-u", "--user"), ("--net", "--network"),
+            ("-h", "--hostname"), ("-l", "--label"), ("-m", "--memory"),
+            ("-P", "--publish-all"),
+        ],
+        true,
+    )
+}
+
+/// Create a container from parsed run flags. `auto_pull` pulls the image if
+/// it isn't present locally.
+fn do_create(client: &Client, p: &Parsed, auto_pull: bool) -> Result<(String, bool), CmdError> {
+    if p.positional.is_empty() {
+        return Err(msg("requires at least 1 argument (the image)"));
+    }
+    let image = &p.positional[0];
+    let cmd: Vec<String> = p.positional[1..].to_vec();
+
+    let body = build_create_body(p, image, &cmd)?;
+    let name_q = p.first("name").map(|n| format!("?name={}", url_encode(n))).unwrap_or_default();
+    let path = format!("{V}/containers/create{name_q}");
+
+    let created: Result<slim_api::container::ContainerCreateResponse, _> =
+        client.json("POST", &path, Some(&body));
+    match created {
+        Ok(c) => Ok((c.id, false)),
+        Err(e) if e.message.contains("No such image") && auto_pull => {
+            eprintln!("Unable to find image '{image}' locally");
+            pull_image(client, image)?;
+            let c: slim_api::container::ContainerCreateResponse = client.json("POST", &path, Some(&body))?;
+            Ok((c.id, true))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn build_create_body(p: &Parsed, image: &str, cmd: &[String]) -> Result<Value, CmdError> {
+    let tty = p.flag("-t");
+    let interactive = p.flag("-i");
+
+    // env: -e KEY=VAL or KEY (inherit), --env-file
+    let mut env = Vec::new();
+    for e in p.all("-e") {
+        if e.contains('=') {
+            env.push(e);
+        } else if let Ok(v) = std::env::var(&e) {
+            env.push(format!("{e}={v}"));
+        }
+    }
+    for f in p.all("env-file") {
+        if let Ok(content) = std::fs::read_to_string(&f) {
+            for line in content.lines() {
+                let line = line.trim();
+                if !line.is_empty() && !line.starts_with('#') {
+                    env.push(line.to_string());
+                }
+            }
+        }
+    }
+
+    // ports
+    let (port_bindings, exposed) = parse_ports(&p.all("-p"));
+
+    // labels
+    let mut labels = serde_json::Map::new();
+    for l in p.all("-l") {
+        let (k, v) = l.split_once('=').unwrap_or((l.as_str(), ""));
+        labels.insert(k.to_string(), Value::String(v.to_string()));
+    }
+
+    // restart
+    let (restart_name, restart_max) = parse_restart(p.first("restart").unwrap_or(""));
+
+    let mut host_config = json!({
+        "Binds": p.all("-v"),
+        "PortBindings": port_bindings,
+        "PublishAllPorts": p.flag("-P"),
+        "NetworkMode": p.first("network").unwrap_or("bridge"),
+        "RestartPolicy": {"Name": restart_name, "MaximumRetryCount": restart_max},
+        "Privileged": p.flag("--privileged"),
+        "ReadonlyRootfs": p.flag("--read-only"),
+        "ExtraHosts": p.all("add-host"),
+        "ShmSize": parse_size(p.first("shm-size").unwrap_or("0")),
+        "Memory": parse_size(p.first("-m").unwrap_or("0")),
+    });
+    if let Some(cpus) = p.first("cpus") {
+        if let Ok(c) = cpus.parse::<f64>() {
+            host_config["NanoCpus"] = json!((c * 1e9) as i64);
+        }
+    }
+    if let Some(init) = p.flag("--init").then_some(true) {
+        host_config["Init"] = json!(init);
+    }
+    if let Some(pid) = p.first("pid") {
+        host_config["Pid"] = json!(pid);
+    }
+
+    let mut config = json!({
+        "Image": image,
+        "Cmd": cmd,
+        "Env": env,
+        "Tty": tty,
+        "OpenStdin": interactive,
+        "AttachStdin": interactive,
+        "AttachStdout": true,
+        "AttachStderr": true,
+        "Labels": labels,
+        "ExposedPorts": exposed,
+        "HostConfig": host_config,
+    });
+    if let Some(w) = p.first("-w") {
+        config["WorkingDir"] = json!(w);
+    }
+    if let Some(u) = p.first("-u") {
+        config["User"] = json!(u);
+    }
+    if let Some(h) = p.first("-h") {
+        config["Hostname"] = json!(h);
+    }
+    if let Some(ep) = p.first("entrypoint") {
+        // string form → wrap; docker accepts "" to reset.
+        config["Entrypoint"] = json!([ep]);
+    }
+    if let Some(sig) = p.first("stop-signal") {
+        config["StopSignal"] = json!(sig);
+    }
+    Ok(config)
+}
+
+fn parse_ports(specs: &[String]) -> (Value, Value) {
+    let mut bindings = serde_json::Map::new();
+    let mut exposed = serde_json::Map::new();
+    for spec in specs {
+        // [ip:][hostPort:]containerPort[/proto]
+        let (spec, proto) = match spec.rsplit_once('/') {
+            Some((s, p)) if p == "tcp" || p == "udp" => (s, p),
+            _ => (spec.as_str(), "tcp"),
+        };
+        let parts: Vec<&str> = spec.split(':').collect();
+        let (host_ip, host_port, cport) = match parts.as_slice() {
+            [c] => ("", "", *c),
+            [h, c] => ("", *h, *c),
+            [ip, h, c] => (*ip, *h, *c),
+            _ => continue,
+        };
+        let key = format!("{cport}/{proto}");
+        exposed.insert(key.clone(), json!({}));
+        bindings.insert(key, json!([{"HostIp": host_ip, "HostPort": host_port}]));
+    }
+    (Value::Object(bindings), Value::Object(exposed))
+}
+
+fn parse_restart(spec: &str) -> (String, i64) {
+    match spec.split_once(':') {
+        Some((name, max)) => (name.to_string(), max.parse().unwrap_or(0)),
+        None => (spec.to_string(), 0),
+    }
+}
+
+fn parse_size(s: &str) -> i64 {
+    let s = s.trim();
+    if s.is_empty() || s == "0" {
+        return 0;
+    }
+    let (num, mult) = if let Some(n) = s.strip_suffix(['b', 'B']) {
+        (n, 1i64)
+    } else if let Some(n) = s.strip_suffix(['k', 'K']) {
+        (n, 1024)
+    } else if let Some(n) = s.strip_suffix(['m', 'M']) {
+        (n, 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix(['g', 'G']) {
+        (n, 1024 * 1024 * 1024)
+    } else {
+        (s, 1)
+    };
+    num.trim().parse::<f64>().map(|v| (v * mult as f64) as i64).unwrap_or(0)
+}
+
+// ---------- credentials ----------
+
+fn cred_path() -> std::path::PathBuf {
+    let dir = std::env::var("DOCKER_CONFIG")
+        .unwrap_or_else(|_| format!("{}/.docker", std::env::var("HOME").unwrap_or_default()));
+    std::path::Path::new(&dir).join("config.json")
+}
+
+fn save_cred(server: &str, user: &str, pass: &str) -> Result<(), CmdError> {
+    let path = cred_path();
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    let mut v: Value = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_else(|| json!({}));
+    let auth = slim_b64(format!("{user}:{pass}").as_bytes());
+    v.as_object_mut().unwrap().entry("auths").or_insert_with(|| json!({}));
+    v["auths"][server] = json!({"auth": auth});
+    std::fs::write(&path, serde_json::to_vec_pretty(&v).unwrap_or_default())?;
+    Ok(())
+}
+
+fn auth_header(image: &str) -> String {
+    // Look up creds for the image's registry; send as X-Registry-Auth.
+    let registry = registry_of(image);
+    let server_keys = [
+        registry.clone(),
+        "https://index.docker.io/v1/".to_string(),
+        "registry-1.docker.io".to_string(),
+    ];
+    let creds = std::fs::read(cred_path()).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    if let Some(v) = creds {
+        for key in &server_keys {
+            if let Some(auth) = v["auths"].get(key).and_then(|a| a["auth"].as_str()) {
+                let decoded = slim_b64_decode(auth);
+                let s = String::from_utf8_lossy(&decoded);
+                if let Some((u, p)) = s.split_once(':') {
+                    let cfg = json!({"username": u, "password": p, "serveraddress": registry});
+                    return slim_b64(serde_json::to_string(&cfg).unwrap().as_bytes());
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+fn registry_of(image: &str) -> String {
+    let first = image.split('/').next().unwrap_or("");
+    if first.contains('.') || first.contains(':') || first == "localhost" {
+        first.to_string()
+    } else {
+        "docker.io".to_string()
+    }
+}
+
+// ---------- small helpers ----------
+
+fn parse(
+    cargs: &[String],
+    bools: &[&str],
+    valued: &[&str],
+    aliases: &[(&str, &str)],
+    stop: bool,
+) -> Result<Parsed, CmdError> {
+    args::parse(cargs, bools, valued, aliases, stop).map_err(msg)
+}
+
+fn split_image_tag(image: &str) -> (String, String) {
+    if let Some(at) = image.find('@') {
+        return (image[..at].to_string(), image[at + 1..].to_string());
+    }
+    match image.rsplit_once(':') {
+        Some((repo, tag)) if !tag.contains('/') => (repo.to_string(), tag.to_string()),
+        _ => (image.to_string(), "latest".to_string()),
+    }
+}
+
+fn truncate_cmd(cmd: &str) -> String {
+    let c = format!("\"{cmd}\"");
+    if c.len() > 22 {
+        format!("{}…", &c[..21])
+    } else {
+        c
+    }
+}
+
+fn container_is_tty(client: &Client, id: &str) -> Option<bool> {
+    let c: slim_api::container::ContainerInspect = client.json("GET", &format!("{V}/containers/{id}/json"), None).ok()?;
+    Some(c.config.tty)
+}
+
+// base64 (shared shape with slim-image, kept local to avoid a dep edge).
+fn slim_b64(data: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+fn slim_b64_decode(s: &str) -> Vec<u8> {
+    let inv = |c: u8| -> i8 {
+        match c {
+            b'A'..=b'Z' => (c - b'A') as i8,
+            b'a'..=b'z' => (c - b'a' + 26) as i8,
+            b'0'..=b'9' => (c - b'0' + 52) as i8,
+            b'+' => 62,
+            b'/' => 63,
+            _ => -1,
+        }
+    };
+    let mut out = Vec::new();
+    let mut acc = 0u32;
+    let mut bits = 0;
+    for &c in s.as_bytes() {
+        let v = inv(c);
+        if v < 0 {
+            continue;
+        }
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    out
+}

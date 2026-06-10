@@ -117,22 +117,14 @@ Rust 2021, same toolchain pins as the root workspace. Release profile:
 
 ## Size ledger (update every milestone; report in commits)
 
-| artifact | today (full) | slim target | current slim (measured) |
+| artifact | today (full) | slim target | current slim |
 |---|---|---|---|
-| guest daemons | dockerd 69 + containerd 40 + runc | slimd ≤ 8 MB stripped | **slimd 2.6 MB (1.4 MB gz)** ✅ |
-| k8s | k3s 67 | 0 (facade in slim-kube) | **0 in guest** ✅ |
-| rootfs gz | 117 MB (full) / 57 (docker) / 6 (minimal) | ≤ 15 MB (slim flavor) | **8.9 MB gz** (alpine+iproute2+slimd) ✅ |
-| kernel gz | 16 MB | 16 MB (trim = stretch S11) | 16 MB (unchanged) |
-| host sidecars | nebula+nebulad ~4.7 MB | unchanged | unchanged |
-| host CLIs | docker 39 / kubectl 55 / helm 59 | docker/kubectl/helm-slim ≤ 6 MB combined | **1.35 MB gz combined** (docker 0.9 / kubectl 0.8 / helm 0.9 MB) ✅ |
-
-**Status: S0–S9 code complete. Validated 32/32 end-to-end in the nebula
-microVM on macOS** (slimd in a privileged container = real Linux
-namespaces/overlayfs/cgroup2): docker-slim 18/18 (pull/run/logs/exec/stop/rm/
-inspect -f/volumes/build), kubectl-slim+helm-slim 14/14 (apply/get/scale/
-delete/ConfigMap-env, helm template/install/list/uninstall). Run
-`scripts/test-slim.sh`. Measured total embed ≈ 16 (kernel) + 8.9 (slim
-rootfs) + 1.35 (CLIs) ≈ **26 MB gz — roughly half the 50 MB target.**
+| guest daemons | dockerd 69 + containerd 40 + runc | slimd ≤ 8 MB stripped | — |
+| k8s | k3s 67 | 0 (facade in nebula-cli) | — |
+| rootfs gz | 117 MB (full) / 57 (docker) / 6 (minimal) | ≤ 15 MB (slim flavor) | — |
+| kernel gz | 16 MB | 16 MB (trim = stretch S11) | — |
+| host sidecars | nebula+nebulad ~4.7 MB | unchanged | — |
+| host CLIs | docker 39 / kubectl 55 / helm 59 | docker-slim + kubectl-slim + helm-slim, ≤ 6 MB combined stripped | — |
 | **total embed** | **~140 MB+** | **≤ 50 MB, aiming ~35** | — |
 
 ---

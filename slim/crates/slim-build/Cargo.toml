@@ -1,0 +1,17 @@
+[package]
+name = "slim-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+flate2.workspace = true
+tar.workspace = true
+sha2.workspace = true
+hex.workspace = true
+slim-api.workspace = true
+slim-image.workspace = true
+slim-runtime.workspace = true

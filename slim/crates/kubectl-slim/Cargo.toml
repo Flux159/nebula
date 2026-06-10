@@ -1,0 +1,14 @@
+[package]
+name = "kubectl-slim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kubectl-slim"
+path = "src/main.rs"
+
+[dependencies]
+slim-kube.workspace = true
+slim-client.workspace = true
+serde_json.workspace = true

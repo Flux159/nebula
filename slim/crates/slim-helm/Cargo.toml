@@ -1,0 +1,15 @@
+[package]
+name = "slim-helm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+flate2.workspace = true
+tar.workspace = true
+slim-tmpl.workspace = true
+slim-kube.workspace = true
+slim-client.workspace = true

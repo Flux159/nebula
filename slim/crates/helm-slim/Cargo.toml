@@ -1,0 +1,13 @@
+[package]
+name = "helm-slim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "helm-slim"
+path = "src/main.rs"
+
+[dependencies]
+slim-helm.workspace = true
+slim-client.workspace = true

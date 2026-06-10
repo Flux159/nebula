@@ -1,0 +1,12 @@
+[package]
+name = "docker-slim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "docker-slim"
+path = "src/main.rs"
+
+[dependencies]
+slim-client.workspace = true

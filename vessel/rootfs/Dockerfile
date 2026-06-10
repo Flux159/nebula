@@ -6,6 +6,11 @@
 #             CLIs: docker/kubectl/helm live on the HOST (bundled in the
 #             .app) and talk over the socket proxy / API forward.
 #   docker  — containerd + dockerd only (no k3s)
+#   slim    — nebula-slim engine (slimd) only: no dockerd/containerd/k3s, no Go
+#             binaries. Just iproute2+iptables for slimd's networking. The
+#             docker/kubectl/helm clients are the standalone *-slim host
+#             binaries (built from the slim workspace). Smallest functional
+#             container+k8s+helm image.
 #   minimal — agent only (clean Linux microVM; nebula vessels/sandbox use)
 FROM alpine:3.22 AS rootfs
 ARG FLAVOR=full
@@ -13,9 +18,19 @@ ARG FLAVOR=full
 RUN apk add --no-cache e2fsprogs ca-certificates \
     && mkdir -p /var/lib/nebula /run /tmp /etc/docker /etc/containerd /media/rosetta
 
-RUN if [ "$FLAVOR" != "minimal" ]; then \
+# slim needs only the networking userland slimd shells out to.
+RUN if [ "$FLAVOR" = "slim" ]; then \
+        apk add --no-cache iproute2 iptables ip6tables ca-certificates; \
+    elif [ "$FLAVOR" != "minimal" ]; then \
         apk add --no-cache docker-engine containerd containerd-ctr runc iptables ip6tables; \
     fi
+
+# slimd: the nebula-slim engine binary, staged into vessel/rootfs/bin by
+# build-rootfs.sh when FLAVOR=slim (built from ~/Projects/nebula-slim).
+# The .slimkeep anchor (always present) lets the slimd* wildcard match zero
+# files for non-slim flavors without erroring (canonical optional-COPY trick).
+COPY bin/.slimkeep bin/slimd* /usr/local/bin/
+RUN if [ -f /usr/local/bin/slimd ]; then chmod 755 /usr/local/bin/slimd; fi
 
 # k3s: full flavor only (it bundles its own kubectl for in-guest use).
 # Release asset name: k3s-arm64 for arm64; plain `k3s` for amd64.

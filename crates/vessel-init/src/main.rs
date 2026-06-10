@@ -410,22 +410,34 @@ mod init {
         );
 
         let agent_only = std::env::var_os("NEBULA_AGENT_ONLY").is_some();
-        let mut services = vec![
-            Service {
-                name: "vessel-agent",
-                cmd: AGENT_PATH,
+        // The slim flavor ships slimd instead of dockerd+containerd. slimd
+        // serves the same /var/run/docker.sock, so the host socket proxy and
+        // the docker/kubectl/helm clients work unchanged.
+        let slim = std::path::Path::new("/usr/local/bin/slimd").exists();
+        let mut services = vec![Service {
+            name: "vessel-agent",
+            cmd: AGENT_PATH,
+            args: &[],
+            wait_for: None,
+            pid: -1,
+        }];
+        if slim {
+            services.push(Service {
+                name: "slimd",
+                cmd: "/usr/local/bin/slimd",
                 args: &[],
-                wait_for: None,
+                wait_for: Some(DATA_MNT),
                 pid: -1,
-            },
-            Service {
+            });
+        } else {
+            services.push(Service {
                 name: "containerd",
                 cmd: "/usr/bin/containerd",
                 args: &["--config", "/etc/containerd/config.toml"],
                 wait_for: Some(DATA_MNT),
                 pid: -1,
-            },
-            Service {
+            });
+            services.push(Service {
                 name: "dockerd",
                 cmd: "/usr/bin/dockerd",
                 args: &[
@@ -434,8 +446,8 @@ mod init {
                 ],
                 wait_for: Some("/run/containerd/containerd.sock"),
                 pid: -1,
-            },
-        ];
+            });
+        }
         if agent_only {
             // Named vessels: a clean Linux VM with just the agent (the user
             // installs what they want; docker/k8s live in the engine vessel).

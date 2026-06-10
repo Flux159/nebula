@@ -1,0 +1,11 @@
+# Guest binaries (slimd) cross-build to aarch64 musl, same as the main repo's
+# vessel-init/vessel-agent. rust-lld covers pure-Rust crates; C deps (ring)
+# need a real cross cc — scripts/zigcc-aarch64-musl wraps `zig cc` for that
+# (same trick as the main repo's build-libkrun.sh).
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+CC_aarch64_unknown_linux_musl = { value = "scripts/zigcc-aarch64-musl", relative = true }
+AR_aarch64_unknown_linux_musl = { value = "scripts/zigar", relative = true }

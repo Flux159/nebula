@@ -1,0 +1,18 @@
+[package]
+name = "slimd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+flate2.workspace = true
+tar.workspace = true
+slim-api.workspace = true
+slim-http.workspace = true
+slim-image.workspace = true
+slim-runtime.workspace = true
+slim-net.workspace = true
+slim-build.workspace = true

@@ -44,6 +44,19 @@ if [ "${NEBULA_STRIP:-0}" = 1 ]; then
     scripts/strip-debug.sh vessel/rootfs/bin/vessel-init vessel/rootfs/bin/vessel-agent
 fi
 
+# slim flavor: stage slimd from the nebula-slim workspace (built separately;
+# see ~/Projects/nebula-slim/scripts/build-musl.sh). vessel-init starts it
+# instead of dockerd+containerd when /usr/local/bin/slimd is present.
+# .slimkeep is the always-present anchor for the optional-COPY in the
+# Dockerfile (so non-slim builds don't error on a missing slimd).
+rm -f vessel/rootfs/bin/slimd
+touch vessel/rootfs/bin/.slimkeep
+if [ "${FLAVOR:-full}" = "slim" ]; then
+    SLIMD_BIN="${SLIMD_BIN:-$HOME/Projects/nebula-slim/target/$MUSL_TARGET/release/slimd}"
+    test -f "$SLIMD_BIN" || { echo "ERROR: slimd not found at $SLIMD_BIN (build it: nebula-slim/scripts/build-musl.sh)" >&2; exit 1; }
+    cp "$SLIMD_BIN" vessel/rootfs/bin/slimd
+fi
+
 # Embedder hooks: OVERLAY=dir (copied over /), SETUP=script (runs in build).
 OVERLAY="${OVERLAY:-}"
 SETUP="${SETUP:-}"
@@ -69,6 +82,7 @@ FLAVOR="${FLAVOR:-full}"
 if [ "$FLAVOR" = "full" ]; then OUT_NAME=rootfs.img; else OUT_NAME="rootfs-$FLAVOR.img"; fi
 SIZE_MB="${ROOTFS_SIZE_MB:-2048}"
 [ "$FLAVOR" = "minimal" ] && SIZE_MB="${ROOTFS_SIZE_MB:-512}"
+[ "$FLAVOR" = "slim" ] && SIZE_MB="${ROOTFS_SIZE_MB:-1024}"
 docker build \
     --build-arg FLAVOR="$FLAVOR" \
     --build-arg ROOTFS_SIZE_MB="$SIZE_MB" \
