@@ -27,7 +27,8 @@ echo "--- crash recovery: kill -9 nebulad"
 DPID=$(cat ~/.nebula/run/nebulad.pid)
 kill -9 "$DPID"
 sleep 2
-check "stale state detected"            "! $NEBULA status | grep -q running"
+$NEBULA status > /tmp/p6-stale.txt 2>&1 || true
+check "stale state detected"            "! grep -q 'nebula: running' /tmp/p6-stale.txt"
 check "up recovers after daemon kill"   "$NEBULA up"
 for _ in $(seq 1 30); do docker version >/dev/null 2>&1 && break; sleep 1; done
 check "docker works after recovery"     "docker run --rm alpine true"
@@ -68,8 +69,16 @@ $NEBULA stats > /tmp/p6-stats.txt 2>&1 || true
 check "stats respond under load"        "grep -q 'host footprint' /tmp/p6-stats.txt"
 
 echo "--- teardown"
-docker rm -f $(docker ps -aq --filter label=nebula-p6) >/dev/null 2>&1
-check "bulk removal works"              "[ \$(docker ps -q --filter label=nebula-p6 | wc -l | tr -d ' ') = 0 ]"
+# Re-issue rm each round: parallel force-removes can race dockerd and
+# leave stragglers that a single shot never reaps.
+REMOVED=0
+for _ in $(seq 1 10); do
+    LEFT=$(docker ps -aq --filter label=nebula-p6)
+    [ -z "$LEFT" ] && { REMOVED=1; break; }
+    echo "$LEFT" | xargs docker rm -f >/dev/null 2>&1
+    sleep 2
+done
+check "bulk removal works"              "[ $REMOVED = 1 ]"
 
 $NEBULA revert docker >/dev/null
 echo
