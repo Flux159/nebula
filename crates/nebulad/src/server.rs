@@ -1,7 +1,7 @@
 //! Control socket server: JSON-lines over a unix socket, one request per
 //! connection (the `shell` op upgrades the connection to a raw byte bridge).
 
-use nebula_core::ipc::{self, IpcListener, IpcStream};
+use nebula_core::ipc::{self, IpcStream};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
