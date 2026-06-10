@@ -479,7 +479,7 @@ mod agent {
         // Allocate pty.
         let mut master: RawFd = -1;
         let mut slave: RawFd = -1;
-        let mut winsize = libc::winsize {
+        let winsize = libc::winsize {
             ws_row: open.rows,
             ws_col: open.cols,
             ws_xpixel: 0,
@@ -491,7 +491,8 @@ mod agent {
                 &mut slave,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut winsize,
+                // (immutable on linux-libc; mac's signature still accepts it)
+                &winsize as *const libc::winsize as *mut libc::winsize,
             )
         };
         if rc != 0 {
