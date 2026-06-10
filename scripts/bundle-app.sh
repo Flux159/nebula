@@ -42,6 +42,7 @@ mkdir -p ui/src-tauri/binaries ui/src-tauri/resources ui/src-tauri/frameworks
 cp target/release/nebula  "ui/src-tauri/binaries/nebula-$TRIPLE"
 cp target/release/nebulad "ui/src-tauri/binaries/nebulad-$TRIPLE"
 cp dist/kernel-Image.gz dist/rootfs.img.gz ui/src-tauri/resources/
+cp apps/catalog.json ui/src-tauri/resources/apps-catalog.json
 # -> Nebula.app/Contents/Frameworks (the nebula sidecar in Contents/MacOS
 #    resolves Frameworks/libkrun.dylib via its ancestor walk).
 cp dist/libkrun/*.dylib ui/src-tauri/frameworks/

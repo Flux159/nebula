@@ -129,6 +129,103 @@ async function loadKube(kind) {
   }
 }
 
+// --- apps catalog -----------------------------------------------------------
+let catalog = null;
+async function loadApps() {
+  const grid = $("apps-grid");
+  if (!window.__TAURI__) {
+    grid.innerHTML = `<div class="empty">Open the Nebula app to install apps (or use <code>nebula docker run …</code>).</div>`;
+    return;
+  }
+  try {
+    if (!catalog) catalog = await window.__TAURI__.core.invoke("apps_catalog");
+    const status = await window.__TAURI__.core.invoke("apps_status");
+    grid.innerHTML = catalog.apps.map((a) => appCard(a, status[a.id])).join("");
+    grid.querySelectorAll("button[data-app]").forEach((btn) => {
+      btn.onclick = () => appAction(btn.dataset.app, btn.dataset.action);
+    });
+  } catch (e) {
+    grid.innerHTML = `<div class="err">catalog failed: ${e}</div>`;
+  }
+}
+
+function appCard(a, st) {
+  const state = st?.state || "";
+  const running = state === "running";
+  const installed = !!st;
+  const links = running
+    ? a.ports
+        .map((p) => `<a href="http://localhost:${p.host}" target="_blank">${p.label} :${p.host}</a>`)
+        .join("")
+    : "";
+  const buttons = !installed
+    ? `<button class="primary" data-app="${a.id}" data-action="install">Install</button>`
+    : running
+      ? `<button data-app="${a.id}" data-action="logs">Logs</button>
+         <button data-app="${a.id}" data-action="stop">Stop</button>
+         <button data-app="${a.id}" data-action="uninstall">Uninstall</button>`
+      : `<button class="primary" data-app="${a.id}" data-action="start">Start</button>
+         <button data-app="${a.id}" data-action="logs">Logs</button>
+         <button data-app="${a.id}" data-action="uninstall">Uninstall</button>`;
+  return `<div class="app-card">
+    <div class="head"><span class="ico">${a.icon}</span><div>
+      <h3>${a.name}</h3>
+      <span class="state ${state}">${st ? st.status : "not installed"}</span>
+    </div></div>
+    <div class="desc">${a.description}</div>
+    <div class="actions">${buttons}${links}</div>
+  </div>`;
+}
+
+async function appAction(id, action) {
+  const app = catalog.apps.find((a) => a.id === id);
+  try {
+    if (action === "install") {
+      await window.__TAURI__.core.invoke("app_install", { spec: app });
+    } else if (action === "logs") {
+      openLogs(`nebula-app-${id}`, app.name, true);
+      return;
+    } else {
+      if (action === "uninstall" && !confirmUninstall(app.name)) return;
+      await window.__TAURI__.core.invoke("app_ctl", { id, action });
+    }
+  } catch (e) {
+    $("apps-grid").insertAdjacentHTML(
+      "afterbegin",
+      `<div class="err">${app.name}: ${String(e).slice(0, 300)}</div>`,
+    );
+  }
+  loadApps();
+}
+
+function confirmUninstall(name) {
+  // Data lives in named volumes and survives — this only removes the container.
+  return window.confirm
+    ? confirm(`Uninstall ${name}? Its data volumes are kept.`)
+    : true;
+}
+
+// --- run-command boxes -------------------------------------------------------
+function wireRunBox(btnId, inputId, outId, invoke, payload) {
+  const btn = $(btnId);
+  if (!btn) return;
+  btn.onclick = async () => {
+    if (!window.__TAURI__) return;
+    const out = $(outId);
+    out.style.display = "block";
+    out.textContent = "running…";
+    btn.disabled = true;
+    try {
+      const text = await window.__TAURI__.core.invoke(invoke, payload());
+      out.textContent = text.trim() || "(no output)";
+    } catch (e) {
+      out.textContent = String(e);
+    }
+    btn.disabled = false;
+    refresh();
+  };
+}
+
 // --- sidebar navigation ----------------------------------------------------
 function showView(view) {
   document.querySelectorAll("#nav a").forEach((a) =>
@@ -138,6 +235,7 @@ function showView(view) {
     v.classList.toggle("active", v.id === `view-${view}`),
   );
   if (view === "kubernetes" && !kubeKind) loadKube("pods");
+  if (view === "apps") loadApps();
 }
 
 async function refresh() {
@@ -248,6 +346,18 @@ $("shell-copy").onclick = async () => {
   }
 };
 
+wireRunBox("docker-cmd-run", "docker-cmd", "docker-cmd-out", "docker_command", () => ({
+  command: $("docker-cmd").value,
+}));
+wireRunBox("kube-apply", "kube-yaml", "kube-apply-out", "kube_apply", () => ({
+  yaml: $("kube-yaml").value,
+}));
+
 refresh();
 setInterval(refresh, 2000);
+setInterval(() => {
+  // Keep app cards fresh while the Apps view is visible.
+  if (document.querySelector("#view-apps.active") && catalog) loadApps();
+}, 5000);
 cliToolsCheck();
+loadApps();

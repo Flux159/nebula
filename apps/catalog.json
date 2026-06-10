@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "note": "Nebula app catalog. The UI fetches this from raw.githubusercontent.com (main) and falls back to the copy bundled in the app. Single-container apps only in v1 — compose/helm tiers come later.",
+  "apps": [
+    {
+      "id": "uptime-kuma",
+      "name": "Uptime Kuma",
+      "description": "Self-hosted uptime monitoring with a beautiful dashboard.",
+      "icon": "📈",
+      "image": "louislam/uptime-kuma:1",
+      "ports": [{ "host": 3201, "container": 3001, "label": "Web UI" }],
+      "volumes": [{ "name": "data", "container": "/app/data" }],
+      "env": {}
+    },
+    {
+      "id": "gitea",
+      "name": "Gitea",
+      "description": "Lightweight self-hosted Git service (GitHub-style UI).",
+      "icon": "🍵",
+      "image": "gitea/gitea:1",
+      "ports": [
+        { "host": 3202, "container": 3000, "label": "Web UI" },
+        { "host": 2222, "container": 22, "label": "SSH" }
+      ],
+      "volumes": [{ "name": "data", "container": "/data" }],
+      "env": {}
+    },
+    {
+      "id": "vaultwarden",
+      "name": "Vaultwarden",
+      "description": "Bitwarden-compatible password manager server.",
+      "icon": "🔐",
+      "image": "vaultwarden/server:latest",
+      "ports": [{ "host": 3203, "container": 80, "label": "Web UI" }],
+      "volumes": [{ "name": "data", "container": "/data" }],
+      "env": {}
+    },
+    {
+      "id": "n8n",
+      "name": "n8n",
+      "description": "Workflow automation (Zapier-style) you run yourself.",
+      "icon": "🔗",
+      "image": "n8nio/n8n:latest",
+      "ports": [{ "host": 3204, "container": 5678, "label": "Web UI" }],
+      "volumes": [{ "name": "data", "container": "/home/node/.n8n" }],
+      "env": {}
+    },
+    {
+      "id": "jellyfin",
+      "name": "Jellyfin",
+      "description": "Media server for movies, shows, and music.",
+      "icon": "🎬",
+      "image": "jellyfin/jellyfin:latest",
+      "ports": [{ "host": 3205, "container": 8096, "label": "Web UI" }],
+      "volumes": [
+        { "name": "config", "container": "/config" },
+        { "name": "media", "container": "/media" }
+      ],
+      "env": {}
+    },
+    {
+      "id": "postgres",
+      "name": "PostgreSQL",
+      "description": "The world's favorite relational database, ready on localhost:5432.",
+      "icon": "🐘",
+      "image": "postgres:16",
+      "ports": [{ "host": 5432, "container": 5432, "label": "Postgres" }],
+      "volumes": [{ "name": "data", "container": "/var/lib/postgresql/data" }],
+      "env": { "POSTGRES_PASSWORD": "nebula" }
+    },
+    {
+      "id": "redis",
+      "name": "Redis",
+      "description": "In-memory data store / cache, ready on localhost:6379.",
+      "icon": "⚡",
+      "image": "redis:7",
+      "ports": [{ "host": 6379, "container": 6379, "label": "Redis" }],
+      "volumes": [{ "name": "data", "container": "/data" }],
+      "env": {}
+    }
+  ]
+}

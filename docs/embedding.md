@@ -89,6 +89,18 @@ sidecar commands worth exposing as buttons — `nebula down && nebula up`
 (restart) and `nebula vessels reset vessel` (restore the engine OS to
 pristine while keeping container data; 0.9s). Your app stays the only UI.
 
+**Crash recovery — you should NOT hand-roll it.** `nebulad` hosts the engine
+VM in-process, so a daemon crash takes the engine with it. The supported
+answer is `nebula autostart enable` (per-instance launchd agent with
+`KeepAlive`): launchd relaunches nebulad within seconds, the engine reboots
+in ~0.6s, dockerd comes back up, and containers with restart policies
+(`--restart unless-stopped`) resume on their own; k3s workloads reconcile.
+Your app's only job is API-client hygiene: treat a refused/timed-out
+`/v1alpha1/status` as "engine restarting", retry with backoff for ~15s, and
+only surface an error (with a "Start engine" action that shells
+`nebula up`) past that. `nebula up` is idempotent — calling it when healthy
+is a no-op, so "ensure running" is always safe.
+
 **Lifecycle:** your app owns it. Spawn `nebula up` on launch (or lazily);
 either leave the engine running on quit (containers keep working) or
 `nebula down`. For start-at-login, `nebula autostart enable` works per
@@ -149,7 +161,7 @@ scripts/embed-kit.sh --vessel-image your/image                    # kit does bot
 
 Our static init/agent are injected at conversion in every case, so any arm64
 linux image (glibc included) becomes a snapshot-capable vessel. Planned next:
-a published `nebula` base image on Docker Hub so `FROM nebula/vessel-base`
+a published `nebula` base image on Docker Hub so `FROM flux159/nebula-base`
 Dockerfiles are the canonical authoring path (tracked in tasks/issues.md).
 
 ### Snapshots and tree-search (for agent orchestrators)

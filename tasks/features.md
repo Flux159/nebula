@@ -708,7 +708,7 @@ dev-track by end of week, signed/notarized release builds after that.
      `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID`, `APPLE_API_KEY_P8`
    - decision: keep bundle id `dev.nebula.ui` (register it to the team) or
      change before first signed release
-4. **Repo/registry decisions**: Docker Hub org for `nebula/vessel-base`
+4. **Repo/registry decisions**: Docker Hub org for `flux159/nebula-base`
    (+ push token as an Actions secret), and a homebrew tap repo
    (`Flux159/homebrew-nebula`) for the cask/formula job.
 
@@ -815,7 +815,7 @@ vessel-agent, symbolicate with `atos -o dist-debug/nebulad.dSYM/...` and
   `vessels convert-image <ref> --out f.img` produces a shippable rootfs file
   consumed offline by `vessels new --rootfs-img` (~100ms creates, engine-
   free); `embed-kit.sh --vessel-image <ref>` bundles it. Later: publish
-  `nebula/vessel-base` to Docker Hub (issues.md).
+  `flux159/nebula-base` to Docker Hub (issues.md).
 - **Embedding**: NEBULA_HOME isolation; per-instance dns_zone/dns_port/
   k8s_port/api_port; per-instance launchd labels; `scripts/embed-kit.sh`;
   rootfs customization hooks (OVERLAY= dir copied over /, SETUP= script run

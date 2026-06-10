@@ -75,9 +75,9 @@ limitations; routine TODOs live in code.)
   pristine rootfs at first sandbox use. Small, but needs a decision.
 
 - **(2026-06-10) Publish the Nebula base image to Docker Hub.** Agreed
-  direction: push versioned `nebula/vessel-base:<ver>-<flavor>` images from
+  direction: push versioned `flux159/nebula-base:<ver>-<flavor>` images from
   the guest-images CI so embedders author rootfs customizations as plain
-  `FROM nebula/vessel-base` Dockerfiles (standard tooling, layer caching)
+  `FROM flux159/nebula-base` Dockerfiles (standard tooling, layer caching)
   instead of overlay dirs; `vessels convert-image` / `--from-image` already
   handle the conversion, and init/agent injection at conversion keeps the
   boot contract ours. Needs: a Docker Hub org/repo decision, tag<->binary

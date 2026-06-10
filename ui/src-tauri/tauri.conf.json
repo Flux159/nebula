@@ -40,7 +40,8 @@
     "resources": [
       "resources/kernel-Image.gz",
       "resources/rootfs.img.gz",
-      "resources/bin"
+      "resources/bin",
+      "resources/apps-catalog.json"
     ],
     "macOS": {
       "frameworks": [
