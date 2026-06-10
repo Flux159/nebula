@@ -869,6 +869,7 @@ dependencies = [
  "krun-kernel",
  "krun-polly",
  "krun-utils",
+ "krun-whp",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
@@ -880,6 +881,7 @@ dependencies = [
  "tdx",
  "vm-memory",
  "vmm-sys-util 0.14.0",
+ "windows-sys",
  "zstd",
 ]
 

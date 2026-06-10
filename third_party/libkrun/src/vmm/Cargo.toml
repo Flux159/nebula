@@ -64,7 +64,7 @@ kvm-ioctls = "0.22"
 hvf = { package = "krun-hvf", version = "=0.1.0-1.18.0", path = "../hvf" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-whp = { path = "../whp" }
+whp = { package = "krun-whp", path = "../whp" }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_System_Hypervisor",
