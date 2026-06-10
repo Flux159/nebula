@@ -12,7 +12,7 @@
 #   images/rootfs.img.gz            guest rootfs (chosen flavor)
 #   config.toml.example             per-instance settings, ready to brand
 #   entitlements.plist              required for signing the sidecars
-#   EMBED.md                        the 5-step integration walkthrough
+#   EMBED.md                        the 6-step integration walkthrough
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,13 +20,15 @@ FLAVOR=full
 OUT=dist-embed
 OVERLAY=""
 SETUP=""
+VESSEL_IMAGE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --flavor) FLAVOR="$2"; shift 2 ;;
         --out) OUT="$2"; shift 2 ;;
         --overlay) OVERLAY="$2"; shift 2 ;;
         --setup) SETUP="$2"; shift 2 ;;
-        *) echo "usage: $0 [--flavor full|docker|minimal] [--out DIR] [--overlay DIR] [--setup SCRIPT]" >&2; exit 2 ;;
+        --vessel-image) VESSEL_IMAGE="$2"; shift 2 ;;
+        *) echo "usage: $0 [--flavor full|docker|minimal] [--out DIR] [--overlay DIR] [--setup SCRIPT] [--vessel-image DOCKER_REF]" >&2; exit 2 ;;
     esac
 done
 
@@ -53,6 +55,16 @@ cp dist/libkrun/*.dylib "$OUT/lib/"
 gzip -9 -c vessel/out/Image > "$OUT/images/kernel-Image.gz"
 gzip -9 -c "$IMG" > "$OUT/images/rootfs.img.gz"
 cp scripts/entitlements/dev.entitlements "$OUT/entitlements.plist"
+
+# Optional: pre-convert YOUR docker image (local or remote ref) into a vessel
+# rootfs the shipped app can boot offline (vessels new --rootfs-img …).
+if [ -n "$VESSEL_IMAGE" ]; then
+    echo "==> converting vessel image: $VESSEL_IMAGE (needs a running engine)"
+    TMPIMG="$(mktemp -d)/vessel-rootfs.img"
+    target/release/nebula vessels convert-image "$VESSEL_IMAGE" --out "$TMPIMG"
+    gzip -9 -c "$TMPIMG" > "$OUT/images/vessel-rootfs.img.gz"
+    rm -rf "$(dirname "$TMPIMG")"
+fi
 
 cat > "$OUT/config.toml.example" <<'EOF'
 # Per-instance Nebula settings — copy to $NEBULA_HOME/config.toml before the
@@ -93,11 +105,18 @@ cat > "$OUT/EMBED.md" <<'EOF'
        k8s      bin/nebula kubectl … / KUBECONFIG=$NEBULA_HOME/kubeconfig
                 (first call starts k3s in the engine; ~20s once)
 
-4. Repair surface for your UI:
+4. Your agents as microVMs (if the kit was built with --vessel-image):
+       bin/nebula vessels new agent --rootfs-img images/vessel-rootfs.img.gz
+   boots YOUR docker image as a snapshot-capable microVM, fully offline.
+   (Gunzip once at install time and point --rootfs-img at the raw .img for
+   instant ~10ms clone-based creates.) Without a prebuilt image:
+       bin/nebula vessels new agent --from-image your/image     # local or pulled
+
+5. Repair surface for your UI:
        bin/nebula down && bin/nebula up        # restart engine
        bin/nebula vessels reset vessel          # restore engine OS, keep data
 
-5. Autostart at login (per-instance launchd label, derived from NEBULA_HOME):
+6. Autostart at login (per-instance launchd label, derived from NEBULA_HOME):
        bin/nebula autostart enable
 
 Full guide: docs/embedding.md in the Nebula repo.

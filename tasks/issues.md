@@ -39,6 +39,16 @@ limitations; routine TODOs live in code.)
 
 ## Needs discussion
 
+- **(2026-06-10) Publish the Nebula base image to Docker Hub.** Agreed
+  direction: push versioned `nebula/vessel-base:<ver>-<flavor>` images from
+  the guest-images CI so embedders author rootfs customizations as plain
+  `FROM nebula/vessel-base` Dockerfiles (standard tooling, layer caching)
+  instead of overlay dirs; `vessels convert-image` / `--from-image` already
+  handle the conversion, and init/agent injection at conversion keeps the
+  boot contract ours. Needs: a Docker Hub org/repo decision, tag<->binary
+  version-compat policy (guest agent protocol vs shipped sidecars), CI push
+  credentials. Overlay/SETUP hooks stay as the offline path.
+
 - ~~Memory-state snapshots (live fork) — future~~ **SHIPPED for vz vessels
   (2026-06-09):** `vessels new --backend vz` + `vessels snapshot <v> <l>
   --memory` does pause → saveMachineStateToURL → APFS-clone disks → resume

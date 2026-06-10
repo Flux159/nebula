@@ -710,9 +710,15 @@ implementation starts, since it shapes the UI's information architecture.
   saveMachineStateToURL → clone disks → resume (~360ms, VM never stops,
   state ≈ touched pages). `restore` resumes mid-execution (~850ms incl.
   stop); `branch --snapshot L --count N` fans out N live clones (~600ms
-  each) — the MCTS/tree-search primitive. `vessels new --from-image <ref>`
-  turns any arm64 docker image into a managed, snapshot-capable microVM
-  (init/agent injected at conversion).
+  each) — the MCTS/tree-search primitive. Snapshots default to memory+disks
+  on running vz vessels (`--no-memory` opts out; krun/stopped fall back to
+  disk-only). `vessels new --from-image <ref>` turns any arm64 docker image
+  into a managed, snapshot-capable microVM (init/agent injected at
+  conversion); local-only images (docker build output) work too.
+  `vessels convert-image <ref> --out f.img` produces a shippable rootfs file
+  consumed offline by `vessels new --rootfs-img` (~100ms creates, engine-
+  free); `embed-kit.sh --vessel-image <ref>` bundles it. Later: publish
+  `nebula/vessel-base` to Docker Hub (issues.md).
 - **Embedding**: NEBULA_HOME isolation; per-instance dns_zone/dns_port/
   k8s_port/api_port; per-instance launchd labels; `scripts/embed-kit.sh`;
   rootfs customization hooks (OVERLAY= dir copied over /, SETUP= script run

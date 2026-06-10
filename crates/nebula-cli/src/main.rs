@@ -173,10 +173,14 @@ enum VesselsAction {
         /// Data disk size in GiB (sparse).
         #[arg(long, default_value_t = 16)]
         disk: u64,
-        /// Build the rootfs from a docker image (full VM isolation +
-        /// snapshots for a standard container image).
+        /// Build the rootfs from a docker image, local or remote (full VM
+        /// isolation + snapshots for a standard container image).
         #[arg(long)]
         from_image: Option<String>,
+        /// Clone the rootfs from a prebuilt image file (.img or .img.gz from
+        /// `vessels convert-image`) — offline, no engine needed.
+        #[arg(long, conflicts_with = "from_image")]
+        rootfs_img: Option<PathBuf>,
         /// Rootfs size in MiB when building from an image.
         #[arg(long, default_value_t = 4096)]
         rootfs_size: u64,
@@ -184,6 +188,17 @@ enum VesselsAction {
         /// (Virtualization.framework — enables live memory-state snapshots).
         #[arg(long, default_value = "krun")]
         backend: String,
+    },
+    /// Convert a docker image (local or remote) into a bootable vessel rootfs
+    /// file. Ship it with your app; create vessels offline via --rootfs-img.
+    ConvertImage {
+        image: String,
+        /// Output path for the rootfs image (gzip it for distribution).
+        #[arg(long)]
+        out: PathBuf,
+        /// Rootfs size in MiB.
+        #[arg(long, default_value_t = 4096)]
+        rootfs_size: u64,
     },
     /// List vessels (including the engine vessel).
     Ls,
@@ -336,6 +351,7 @@ fn main() -> anyhow::Result<()> {
                 gpu,
                 disk,
                 from_image,
+                rootfs_img,
                 rootfs_size,
                 backend,
             } => vessels::new(vessels::NewOpts {
@@ -345,9 +361,15 @@ fn main() -> anyhow::Result<()> {
                 gpu,
                 data_gib: disk,
                 from_image,
+                rootfs_img,
                 rootfs_mb: rootfs_size,
                 backend,
             }),
+            VesselsAction::ConvertImage {
+                image,
+                out,
+                rootfs_size,
+            } => vessels::convert_image(&image, &out, rootfs_size),
             VesselsAction::Ls => vessels::ls(),
             VesselsAction::Start { name } => vessels::start(&name),
             VesselsAction::Stop { name } => vessels::stop(&name),

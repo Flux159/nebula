@@ -131,9 +131,26 @@ Ordering and guarantees:
   appliance image) and feeds every consumer of the image: the engine vessel,
   named vessels, snapshots, branches.
 
-When your environment is already a Dockerfile, skip overlays entirely:
-`nebula vessels new x --from-image your/image` boots any arm64 docker image
-as a managed microVM (init/agent injected at conversion time).
+When your environment is already a Dockerfile, skip overlays entirely —
+three ways to get a docker image running as a managed microVM, by where the
+image lives:
+
+```bash
+# 1. Any ref the engine can pull, OR an image that only exists locally
+#    (docker build output, docker load'ed tarball — no registry needed):
+nebula vessels new x --from-image your/image
+
+# 2. Pre-converted at build time, booted offline at runtime (no engine docker
+#    work on user machines — this is what shipped apps should do):
+nebula vessels convert-image your/image --out vessel-rootfs.img   # build time
+nebula vessels new x --rootfs-img vessel-rootfs.img               # runtime, ~100ms
+scripts/embed-kit.sh --vessel-image your/image                    # kit does both
+```
+
+Our static init/agent are injected at conversion in every case, so any arm64
+linux image (glibc included) becomes a snapshot-capable vessel. Planned next:
+a published `nebula` base image on Docker Hub so `FROM nebula/vessel-base`
+Dockerfiles are the canonical authoring path (tracked in tasks/issues.md).
 
 ### Snapshots and tree-search (for agent orchestrators)
 

@@ -37,6 +37,9 @@ pub struct NewOpts {
     pub data_gib: u64,
     /// Build the vessel's rootfs from a docker image reference.
     pub from_image: Option<String>,
+    /// Clone the rootfs from a prebuilt image file (.img or .img.gz, made by
+    /// `vessels convert-image`) — offline, no engine needed.
+    pub rootfs_img: Option<PathBuf>,
     /// Rootfs size when building from an image (MiB).
     pub rootfs_mb: u64,
     /// VMM: `krun` (fastest boot, GPU) or `vz` (live memory snapshots).
@@ -93,6 +96,10 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
         !(opts.gpu && opts.backend == "vz"),
         "GPU passthrough (Venus) is libkrun-only — drop --backend vz or --gpu"
     );
+    anyhow::ensure!(
+        !(opts.from_image.is_some() && opts.rootfs_img.is_some()),
+        "--from-image and --rootfs-img are mutually exclusive"
+    );
     let dir = dir_of(&opts.name)?;
     anyhow::ensure!(
         !dir.exists(),
@@ -114,7 +121,7 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
         "guest kernel missing — run `nebula up` once first"
     );
     anyhow::ensure!(
-        opts.from_image.is_some() || base_rootfs.is_file(),
+        opts.from_image.is_some() || opts.rootfs_img.is_some() || base_rootfs.is_file(),
         "guest images missing — run `nebula up` once first"
     );
 
@@ -124,6 +131,14 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
         // (it has docker + e2fsprogs; our static init/agent are injected so
         // ANY arm64 linux image becomes a manageable vessel).
         build_rootfs_from_image(image, &opts.name, &dir, opts.rootfs_mb, opts.data_gib)?;
+    } else if let Some(src) = &opts.rootfs_img {
+        // Prebuilt rootfs file (vessels convert-image): offline, engine-free.
+        anyhow::ensure!(src.is_file(), "no rootfs image at {}", src.display());
+        let raw = crate::commands::maybe_gunzip(src, &dir.join("rootfs.img"))?;
+        if raw != dir.join("rootfs.img") {
+            clone_file(&raw, &dir.join("rootfs.img"))?;
+        }
+        create_data_disk(&dir, opts.data_gib)?;
     } else {
         // APFS copy-on-write clone: instant and space-shared with the base.
         clone_file(&base_rootfs, &dir.join("rootfs.img"))?;
@@ -432,12 +447,17 @@ fn build_rootfs_from_image(
             .args(args)
             .output()?)
     };
-    let pull = run_docker(&["pull", "-q", image])?;
-    anyhow::ensure!(
-        pull.status.success(),
-        "docker pull failed: {}",
-        String::from_utf8_lossy(&pull.stderr)
-    );
+    // Local images (docker build artifacts, loaded tarballs) work without a
+    // registry: only pull when the engine doesn't already have the ref.
+    let local = run_docker(&["image", "inspect", image])?.status.success();
+    if !local {
+        let pull = run_docker(&["pull", "-q", image])?;
+        anyhow::ensure!(
+            pull.status.success(),
+            "image `{image}` is not in the engine and could not be pulled: {}",
+            String::from_utf8_lossy(&pull.stderr)
+        );
+    }
     let create = run_docker(&["create", image, "/bin/true"])?;
     anyhow::ensure!(
         create.status.success(),
@@ -529,11 +549,78 @@ fn clone_file(from: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()
         .arg(from)
         .arg(to)
         .status()?;
-    anyhow::ensure!(
-        status.success(),
-        "clone {} -> {} failed",
-        from.display(),
-        to.display()
+    if !status.success() {
+        // clonefile only works within one APFS volume; fall back to a copy
+        // (e.g. --rootfs-img sources on another disk).
+        std::fs::copy(from, to)
+            .with_context(|| format!("clone/copy {} -> {} failed", from.display(), to.display()))?;
+    }
+    Ok(())
+}
+
+/// Create a vessel data disk. Foreign rootfs images may lack e2fsprogs (so
+/// the guest can't format it itself); when the engine is up, pre-format
+/// host-side through the $HOME share like --from-image does.
+fn create_data_disk(dir: &std::path::Path, data_gib: u64) -> anyhow::Result<()> {
+    if client::daemon_running() {
+        let host_home = std::env::var("HOME").context("HOME not set")?;
+        let stage = std::path::PathBuf::from(&host_home)
+            .join(".nebula-image-build")
+            .join(format!("data-{}", std::process::id()));
+        std::fs::create_dir_all(&stage)?;
+        let script = format!(
+            "set -e\ntruncate -s {}M '{stage}/data.img'\nmkfs.ext4 -q -L nebula-data '{stage}/data.img'\n",
+            data_gib * 1024,
+            stage = stage.display()
+        );
+        let formatted = engine_exec_long(&script).map(|r| r.exit_code == 0);
+        if let Ok(true) = formatted {
+            let dst = dir.join("data.img");
+            if std::fs::rename(stage.join("data.img"), &dst).is_err() {
+                std::fs::copy(stage.join("data.img"), &dst)?;
+            }
+            let _ = std::fs::remove_dir_all(&stage);
+            return Ok(());
+        }
+        let _ = std::fs::remove_dir_all(&stage);
+    }
+    eprintln!(
+        "note: data disk left unformatted (engine not running) — the guest \
+         formats it on first boot if it has e2fsprogs"
+    );
+    let data = std::fs::File::create(dir.join("data.img"))?;
+    data.set_len(data_gib * 1024 * 1024 * 1024)?;
+    Ok(())
+}
+
+/// `nebula vessels convert-image <ref> --out <file>`: produce a bootable
+/// vessel rootfs from a docker image (local or remote) WITHOUT creating a
+/// vessel. The output is what `vessels new --rootfs-img` and embed kits
+/// consume — apps ship it and create vessels offline, engine-free.
+pub fn convert_image(image: &str, out: &std::path::Path, rootfs_mb: u64) -> anyhow::Result<()> {
+    let tmp_name = format!("convert-{}", std::process::id());
+    let tmp = std::env::temp_dir().join(format!("nebula-{tmp_name}"));
+    std::fs::create_dir_all(&tmp)?;
+    // 1 GiB throwaway data disk: the builder formats one; we discard it.
+    let built = build_rootfs_from_image(image, &tmp_name, &tmp, rootfs_mb, 1);
+    if let Err(e) = built {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    if let Some(parent) = out.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let _ = std::fs::remove_file(out);
+    if std::fs::rename(tmp.join("rootfs.img"), out).is_err() {
+        std::fs::copy(tmp.join("rootfs.img"), out)?;
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    let mb = std::fs::metadata(out)?.len() / (1024 * 1024);
+    println!(
+        "converted `{image}` -> {} ({mb} MiB sparse; gzip for distribution)",
+        out.display()
     );
     Ok(())
 }
@@ -606,7 +693,9 @@ pub fn snapshot(name: &str, label: &str, mode: SnapMode) -> anyhow::Result<()> {
                      (nebula vessels new <name> --backend vz)"
                 );
             } else if !running {
-                println!("note: vessel is stopped — disk-only snapshot (start it to capture memory)");
+                println!(
+                    "note: vessel is stopped — disk-only snapshot (start it to capture memory)"
+                );
             }
             is_vz && running
         }

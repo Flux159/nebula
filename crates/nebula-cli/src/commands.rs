@@ -457,7 +457,7 @@ pub fn install_image(kernel: Option<PathBuf>, rootfs: Option<PathBuf>) -> anyhow
 }
 
 /// Decompress `src` to `dst` when it's gzip; otherwise return `src` as-is.
-fn maybe_gunzip(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<PathBuf> {
+pub fn maybe_gunzip(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<PathBuf> {
     let mut magic = [0u8; 2];
     use std::io::Read;
     std::fs::File::open(src)?.read_exact(&mut magic).ok();
