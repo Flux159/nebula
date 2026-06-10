@@ -67,13 +67,15 @@ as client) as the compatibility oracle.
 slimd is Linux-native (it *is* the guest). The portability surface is the
 **clients** and the **VMM host integration**:
 
-- **macOS (arm64): done** — VZ backend, validated above. (x86_64 macOS should
+- **macOS (arm64): done** — VZ backend; booted as a real microVM and driven by
+  the real Docker CLI. 32/32 (docker 18 + kube/helm 14). (x86_64 macOS should
   be a rebuild; untested.)
-- **Linux**: slimd already cross-builds to `x86_64`/`aarch64-musl`. Two modes:
-  (a) inside a KVM microVM (nebula's krun backend — the recent Linux/KVM boot
-  spike), or (b) potentially slimd directly on the host for the embedding case.
-  Client `docker-slim` builds for Linux host triples already. Next step: run
-  `scripts/test-slim.sh` on a Linux box.
+- **Linux (x86_64): done** — slimd + the three CLIs cross-built to
+  `x86_64-unknown-linux-musl` and validated on an Ubuntu 24 / kernel 6.8 box
+  (Docker 29, KVM present): **32/32** (docker 18 + kube/helm 14), same suites
+  as macOS. `aarch64-musl` also builds. So slimd is arch-portable; the
+  remaining Linux work is just choosing host integration (KVM microVM via the
+  krun backend, or slimd-direct for embedding).
 - **Windows**: the real target is **Hyper-V** (not WSL2 nested virt). Work
   needed: a Hyper-V backend in nebula-core, `docker-slim`/`kubectl-slim`/
   `helm-slim` built for `x86_64-pc-windows-msvc` (the clients are pure Rust +

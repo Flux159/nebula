@@ -1,0 +1,10 @@
+#!/bin/sh
+args=""
+for a in "$@"; do
+    case "$a" in
+        --target=*) ;;
+        *) args="$args \"$a\"" ;;
+    esac
+done
+eval set -- $args
+exec zig cc -target x86_64-linux-musl "$@"

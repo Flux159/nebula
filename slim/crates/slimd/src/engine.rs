@@ -648,6 +648,15 @@ impl Engine {
         }
         let _ = slim_runtime::kill_cgroup(&id);
         let _ = slim_runtime::signal_pid(pid, libc::SIGKILL);
+        // Wait for the waiter thread to mark it exited so a follow-up `rm`
+        // (docker stop && docker rm) doesn't race a still-"running" state.
+        let kill_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < kill_deadline {
+            if !entry.c.lock().unwrap().running() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         self.emit_event("container", "stop", &id, BTreeMap::new());
         Ok(())
     }
