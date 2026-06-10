@@ -4,6 +4,7 @@ use std::path::PathBuf;
 mod client;
 mod commands;
 mod contexts;
+mod kube;
 mod spike;
 
 #[derive(Parser)]
@@ -64,6 +65,12 @@ enum Commands {
         /// docker | nerdctl | kubectl | all
         tool: String,
     },
+    /// Live memory stats: guest usage, balloon, and host-visible footprint.
+    Stats {
+        /// Refresh continuously.
+        #[arg(short, long)]
+        watch: bool,
+    },
     /// Diagnose common setup problems.
     Doctor,
     /// Install guest images (kernel + rootfs) into ~/.nebula.
@@ -113,6 +120,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Logs { follow } => commands::logs(follow),
         Commands::Use { tool } => contexts::use_tool(&tool),
         Commands::Revert { tool } => contexts::revert_tool(&tool),
+        Commands::Stats { watch } => commands::stats(watch),
         Commands::Doctor => commands::doctor(),
         Commands::InstallImage { kernel, rootfs } => commands::install_image(kernel, rootfs),
         Commands::KrunWorker { spec } => match nebula_core::backend::krun::run_worker(&spec) {

@@ -36,6 +36,21 @@ pub enum AgentRequest {
     },
     /// Power off the guest cleanly.
     Shutdown,
+    /// Manage an agent-supervised guest service (currently: "k3s").
+    ServiceCtl {
+        name: String,
+        action: ServiceAction,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAction {
+    /// Start now and on every boot (persisted).
+    Start,
+    /// Stop now and stay off (persisted).
+    Stop,
+    Status,
 }
 
 fn default_exec_timeout_ms() -> u64 {
@@ -48,6 +63,7 @@ pub enum AgentResponse {
     Health(Health),
     MemStats(MemStats),
     Exec(ExecResult),
+    Service { running: bool, enabled: bool },
     Ok,
     Error { message: String },
 }
@@ -107,6 +123,8 @@ pub enum DaemonRequest {
     Balloon {
         target_mib: u64,
     },
+    /// Live memory stats (guest + balloon + host-visible footprint).
+    Stats,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +136,7 @@ pub enum DaemonResponse {
     },
     /// Shell accepted: the stream is now raw bytes both ways.
     ShellStarted,
+    Stats(StatsView),
     Ok,
     Error {
         message: String,
@@ -135,6 +154,17 @@ pub struct DaemonStatus {
     pub agent: Option<Health>,
     pub mem: Option<MemStats>,
     pub uptime_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsView {
+    pub guest: Option<MemStats>,
+    /// Memory the guest is currently allowed to keep (balloon target), MiB.
+    pub balloon_target_mib: u64,
+    /// Configured ceiling, MiB.
+    pub max_mib: u64,
+    /// What macOS actually charges the VM process for (phys_footprint), MiB.
+    pub host_footprint_mib: u64,
 }
 
 /// First line sent by the client on the shell stream.

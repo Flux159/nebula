@@ -4,5 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Elastic memory controller for the Nebula Vessel (virtio-balloon policy)"
 
 [dependencies]

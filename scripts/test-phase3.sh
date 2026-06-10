@@ -5,6 +5,9 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 NEBULA=target/debug/nebula
+# Builds invalidate ad-hoc signatures; always re-sign before touching the VM.
+cargo build -p nebula-cli -p nebulad >/dev/null 2>&1
+scripts/sign-dev.sh target/debug/nebula target/debug/nebulad >/dev/null
 PASS=0; FAIL=0
 check() {
     if eval "$2" >/dev/null 2>&1; then

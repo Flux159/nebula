@@ -8,6 +8,7 @@ description = "Nebula host daemon: owns the Vessel VM lifecycle and the control 
 
 [dependencies]
 nebula-core = { path = "../nebula-core" }
+nebula-balloon = { path = "../nebula-balloon" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -204,6 +204,39 @@ pub fn shell() -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn stats(watch: bool) -> anyhow::Result<()> {
+    loop {
+        match client::request(&DaemonRequest::Stats)? {
+            DaemonResponse::Stats(s) => {
+                let line = match &s.guest {
+                    Some(g) => format!(
+                        "guest {used}/{target} MiB used (avail {avail}) | balloon holds {balloon} MiB of {max} | host footprint {host} MiB{psi}",
+                        used = ((g.total_kib - g.available_kib) / 1024)
+                            .saturating_sub(s.max_mib - s.balloon_target_mib),
+                        target = s.balloon_target_mib,
+                        avail = g.available_kib / 1024,
+                        balloon = s.max_mib - s.balloon_target_mib,
+                        max = s.max_mib,
+                        host = s.host_footprint_mib,
+                        psi = g
+                            .psi_some_avg10
+                            .map(|p| format!(" | pressure {p:.1}%"))
+                            .unwrap_or_default(),
+                    ),
+                    None => "guest stats unavailable".to_string(),
+                };
+                println!("{line}");
+            }
+            DaemonResponse::Error { message } => bail!("stats failed: {message}"),
+            other => bail!("unexpected response: {other:?}"),
+        }
+        if !watch {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
 pub fn logs(follow: bool) -> anyhow::Result<()> {
     let console = client::nebula_home()?.join("logs/vessel-console.log");
     anyhow::ensure!(console.is_file(), "no console log at {}", console.display());
@@ -254,6 +287,17 @@ pub fn doctor() -> anyhow::Result<()> {
         "binary signed with virtualization entitlement",
         entitled,
         "run scripts/sign-dev.sh on the nebula + nebulad binaries",
+    );
+    let rosetta = std::path::Path::new("/Library/Apple/usr/share/rosetta").exists()
+        || std::process::Command::new("arch")
+            .args(["-x86_64", "/usr/bin/true"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    check(
+        "Rosetta installed (amd64 containers)",
+        rosetta,
+        "run: softwareupdate --install-rosetta --agree-to-license",
     );
     check(
         "daemon running",

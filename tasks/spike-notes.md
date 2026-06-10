@@ -64,3 +64,14 @@ Findings from the dual-backend bring-up (0.3/0.4). Living doc.
 - virtio-blk (data disk) direct write: ~276 MB/s
 - virtiofs small-file churn: 1000 creates in 0.30s (~3.3k/s)
 - Vessel cold boot to healthy agent: ~620ms; spike VMs: vz ~330ms, krun ~230ms
+
+## Phase 4: VZ balloon characterization (macOS 26)
+
+- `VZVirtioTraditionalMemoryBalloonDevice` works as hoped: with the guest
+  idle and the balloon holding ~19 GiB of a 32 GiB VM, the VM's
+  host-visible phys_footprint sat at ~1.1 GiB.
+- Guest memory is charged to a per-VM `com.apple.Virtualization.
+  VirtualMachine` XPC process, NOT the process that created the VM —
+  footprint must be measured there (proc_listallpids + proc_name match).
+- Guest /proc/meminfo keeps MemTotal at the configured max; balloon pages
+  vanish from MemAvailable, so workload use = total - available - balloon.

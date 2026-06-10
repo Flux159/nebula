@@ -23,6 +23,26 @@ limitations; routine TODOs live in code.)
 
 ## Needs discussion
 
+- **(2026-06-09, Phase 4) VZ balloon = high-water-mark semantics, not true
+  reclaim.** Characterized on macOS 26: `VZVirtioTraditionalMemoryBalloonDevice`
+  negotiates only MUST_TELL_HOST+DEFLATE_ON_OOM (no FREE_PAGE_HINT/REPORTING,
+  even though our kernel has PAGE_REPORTING=y). Consequences, measured:
+  * idle Vessel footprint **1.1 GiB** (untouched pages cost nothing) ✓
+  * under a 6 GiB workload footprint grows to ~7.2 GiB ✓, balloon deflates
+    instantly, no OOM ✓
+  * after the workload exits and the balloon re-inflates (24.9 GiB held),
+    footprint **stays at ~7.2 GiB** — VZ does not discard the dirty pages;
+    they remain "Dirty/app-specific tag 1" (presumably compressible by macOS
+    under real host pressure, unverified).
+  So: footprint ≈ high-water mark of touched memory, growth is bounded by the
+  balloon, but Activity Monitor won't show post-workload shrinkage. Options to
+  discuss: (a) accept + document (Docker Desktop behaves the same way),
+  (b) periodic planned Vessel reboot/"compaction" for long-lived setups,
+  (c) Apple feedback for free-page reporting, (d) note that on the **libkrun
+  side we own the VMM** — sidecars (and a hypothetical libkrun-primary mode)
+  can MADV_FREE on inflate for true reclaim, which VZ can't do. OrbStack
+  claims true shrinkage with their VMM — consistent with (d).
+
 - **(2026-06-09, Phase 2) nerdctl has no native macOS binary.** `nebula use
   nerdctl` writes the host config pointing at our containerd socket, and the
   guest image ships nerdctl (`nebula exec nerdctl …` works), but a first-class

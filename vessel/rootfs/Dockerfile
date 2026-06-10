@@ -8,6 +8,12 @@ RUN apk add --no-cache \
     iptables ip6tables \
     && mkdir -p /var/lib/nebula /run /tmp /etc/docker /etc/containerd /media/rosetta
 
+# k3s (started on demand by the agent; see `nebula use kubectl`).
+ARG K3S_VERSION=v1.35.5%2Bk3s1
+RUN wget -qO /usr/local/bin/k3s \
+    "https://github.com/k3s-io/k3s/releases/download/${K3S_VERSION}/k3s-arm64" \
+    && chmod 755 /usr/local/bin/k3s
+
 # Nebula guest binaries (cross-built on the host, passed via build context).
 COPY bin/vessel-init /sbin/nebula-init
 COPY bin/vessel-agent /usr/bin/vessel-agent

@@ -21,7 +21,7 @@ pub fn use_tool(tool: &str) -> anyhow::Result<()> {
     match tool {
         "docker" => use_docker(),
         "nerdctl" => use_nerdctl(),
-        "kubectl" => bail!("kubectl support lands with Kubernetes (Phase 5)"),
+        "kubectl" => crate::kube::use_kubectl(),
         other => bail!("unknown tool `{other}` (expected docker, nerdctl, or kubectl)"),
     }
 }
@@ -30,10 +30,11 @@ pub fn revert_tool(tool: &str) -> anyhow::Result<()> {
     match tool {
         "docker" => revert_docker(),
         "nerdctl" => revert_nerdctl(),
-        "kubectl" => bail!("kubectl support lands with Kubernetes (Phase 5)"),
+        "kubectl" => crate::kube::revert_kubectl(),
         "--all" | "all" => {
             revert_docker()?;
-            revert_nerdctl()
+            revert_nerdctl()?;
+            crate::kube::revert_kubectl()
         }
         other => bail!("unknown tool `{other}`"),
     }
@@ -202,6 +203,14 @@ fn revert_nerdctl() -> anyhow::Result<()> {
 }
 
 // --- revert stack -----------------------------------------------------------
+
+pub fn push_prev_pub(tool: &str, value: &Option<String>) -> anyhow::Result<()> {
+    push_prev(tool, value)
+}
+
+pub fn pop_prev_pub(tool: &str) -> anyhow::Result<Option<Option<String>>> {
+    pop_prev(tool)
+}
 
 fn stack_path(tool: &str) -> anyhow::Result<PathBuf> {
     let dir = client::nebula_home()?.join("contexts");

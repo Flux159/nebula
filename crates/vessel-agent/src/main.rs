@@ -63,6 +63,7 @@ mod agent {
 
     pub fn run() -> ! {
         eprintln!("vessel-agent {} starting", env!("CARGO_PKG_VERSION"));
+        k3s::autostart();
         std::thread::spawn(|| serve_loop("shell", VSOCK_PORT_SHELL, handle_shell));
         std::thread::spawn(|| serve_loop("docker-proxy", VSOCK_PORT_DOCKER, handle_docker_proxy));
         std::thread::spawn(|| {
@@ -283,6 +284,27 @@ mod agent {
                     message: e.to_string(),
                 },
             },
+            AgentRequest::ServiceCtl { name, action } => {
+                if name != "k3s" {
+                    return AgentResponse::Error {
+                        message: format!("unknown service `{name}`"),
+                    };
+                }
+                match action {
+                    ServiceAction::Start => {
+                        k3s::enable();
+                        AgentResponse::Ok
+                    }
+                    ServiceAction::Stop => {
+                        k3s::disable();
+                        AgentResponse::Ok
+                    }
+                    ServiceAction::Status => AgentResponse::Service {
+                        running: k3s::running(),
+                        enabled: k3s::enabled(),
+                    },
+                }
+            }
             AgentRequest::Shutdown => {
                 std::thread::spawn(|| {
                     std::thread::sleep(Duration::from_millis(150));
@@ -505,6 +527,98 @@ mod agent {
         unsafe {
             let mut status = 0;
             libc::waitpid(pid, &mut status, 0);
+        }
+    }
+
+    /// Agent-supervised k3s: started on demand, persisted across boots, and
+    /// restarted on crash while enabled. Uses k3s's embedded containerd for
+    /// now (shared-containerd unification is tracked in tasks/issues.md).
+    pub mod k3s {
+        use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+        use std::time::Duration;
+
+        const MARKER: &str = "/var/lib/nebula/k3s.enabled";
+        const K3S_BIN: &str = "/usr/local/bin/k3s";
+        static SUPERVISING: AtomicBool = AtomicBool::new(false);
+        static CHILD_PID: AtomicI32 = AtomicI32::new(-1);
+
+        pub fn enabled() -> bool {
+            std::path::Path::new(MARKER).exists()
+        }
+
+        pub fn running() -> bool {
+            let pid = CHILD_PID.load(Ordering::SeqCst);
+            pid > 0 && unsafe { libc::kill(pid, 0) == 0 }
+        }
+
+        pub fn autostart() {
+            if enabled() {
+                start_supervisor();
+            }
+        }
+
+        pub fn enable() {
+            let _ = std::fs::write(MARKER, b"");
+            start_supervisor();
+        }
+
+        pub fn disable() {
+            let _ = std::fs::remove_file(MARKER);
+            let pid = CHILD_PID.load(Ordering::SeqCst);
+            if pid > 0 {
+                unsafe { libc::kill(pid, libc::SIGTERM) };
+            }
+        }
+
+        fn start_supervisor() {
+            if SUPERVISING.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            std::thread::spawn(|| loop {
+                if !enabled() {
+                    SUPERVISING.store(false, Ordering::SeqCst);
+                    return;
+                }
+                let ip = super::eth0_ip().unwrap_or_default();
+                let log = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/var/log/k3s.log")
+                    .ok();
+                let mut cmd = std::process::Command::new(K3S_BIN);
+                cmd.args([
+                    "server",
+                    "--write-kubeconfig-mode",
+                    "644",
+                    "--disable",
+                    "traefik",
+                ]);
+                if !ip.is_empty() {
+                    cmd.args(["--tls-san", &ip]);
+                }
+                cmd.env(
+                    "PATH",
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                );
+                if let Some(log) = log {
+                    let l2 = log.try_clone().ok();
+                    cmd.stdout(log);
+                    if let Some(l2) = l2 {
+                        cmd.stderr(l2);
+                    }
+                }
+                match cmd.spawn() {
+                    Ok(mut child) => {
+                        CHILD_PID.store(child.id() as i32, Ordering::SeqCst);
+                        eprintln!("vessel-agent: k3s started (pid {})", child.id());
+                        let _ = child.wait();
+                        CHILD_PID.store(-1, Ordering::SeqCst);
+                        eprintln!("vessel-agent: k3s exited");
+                    }
+                    Err(e) => eprintln!("vessel-agent: k3s spawn failed: {e}"),
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            });
         }
     }
 }

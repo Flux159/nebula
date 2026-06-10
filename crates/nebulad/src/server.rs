@@ -31,15 +31,41 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
     // DNS resolver + dynamic port forwarding (Phase 3).
     let _net = crate::net::start(vessel.clone(), paths.docker_sock());
 
+    // Elastic memory (Phase 4).
+    let balloon = crate::balloon::start(vessel.clone());
+
+    // Watchdog: if the Vessel dies unexpectedly, exit the daemon so the next
+    // `nebula up` (or launchd KeepAlive) gets a clean restart instead of a
+    // zombie control socket.
+    {
+        let vessel = vessel.clone();
+        let shutdown = shutdown.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            if shutdown.load(Ordering::SeqCst) {
+                return;
+            }
+            let st = vessel.state();
+            if matches!(
+                st,
+                nebula_core::backend::VmState::Failed | nebula_core::backend::VmState::Stopped
+            ) {
+                tracing::error!(?st, "vessel died unexpectedly; exiting for clean restart");
+                std::process::exit(70); // EX_SOFTWARE; launchd restarts us
+            }
+        });
+    }
+
     for conn in listener.incoming() {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
         let Ok(conn) = conn else { continue };
         let vessel = vessel.clone();
+        let balloon = balloon.clone();
         let shutdown_for_conn = shutdown.clone();
         std::thread::spawn(move || {
-            if let Err(e) = handle(conn, &vessel, &shutdown_for_conn) {
+            if let Err(e) = handle(conn, &vessel, &balloon, &shutdown_for_conn) {
                 tracing::debug!("connection error: {e:#}");
             }
         });
@@ -55,7 +81,12 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle(conn: UnixStream, vessel: &Vessel, shutdown: &AtomicBool) -> anyhow::Result<()> {
+fn handle(
+    conn: UnixStream,
+    vessel: &Vessel,
+    balloon: &crate::balloon::BalloonState,
+    shutdown: &AtomicBool,
+) -> anyhow::Result<()> {
     let mut reader = BufReader::new(conn.try_clone()?);
     let mut writer = conn;
     let mut line = String::new();
@@ -118,6 +149,21 @@ fn handle(conn: UnixStream, vessel: &Vessel, shutdown: &AtomicBool) -> anyhow::R
                 },
             };
             respond(&mut writer, &resp)
+        }
+        DaemonRequest::Stats => {
+            let guest = match vessel.agent_request(&AgentRequest::MemStats) {
+                Ok(AgentResponse::MemStats(m)) => Some(m),
+                _ => None,
+            };
+            let view = StatsView {
+                guest,
+                balloon_target_mib: balloon
+                    .target_mib
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                max_mib: balloon.max_mib,
+                host_footprint_mib: crate::balloon::host_footprint_mib(),
+            };
+            respond(&mut writer, &DaemonResponse::Stats(view))
         }
         DaemonRequest::Balloon { target_mib } => {
             let resp = match vessel.balloon_set(target_mib) {
