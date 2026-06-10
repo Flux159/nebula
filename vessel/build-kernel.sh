@@ -22,9 +22,13 @@ fi
 docker version >/dev/null 2>&1 || { echo "ERROR: no working docker engine for the build" >&2; exit 1; }
 cd "$(dirname "$0")"
 KERNEL_VERSION="${KERNEL_VERSION:-6.12.58}"
+# ARCH=arm64 (raw Image, VZ/HVF) | x86_64 (ELF vmlinux, KVM/WHP).
+# Cross-compiles fine from either container arch.
+ARCH="${ARCH:-arm64}"
 docker build \
     --build-arg KERNEL_VERSION="$KERNEL_VERSION" \
+    --build-arg ARCH="$ARCH" \
     --target export \
     --output type=local,dest=out \
     kernel/
-ls -la out/Image
+ls -la out/Image out/vmlinux 2>/dev/null || true

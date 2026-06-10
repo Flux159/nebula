@@ -57,9 +57,18 @@ both behind a VMM-backend trait from day one.
 - Linux host support (libkrun already supports KVM).
 - Hosted/remote version of the same control plane ("run the hosted version for your
   company").
-- Windows is explicitly out of scope for now. Upstream libkrun is Linux/macOS only,
-  full Hyper-V is Pro/Server-only, and WSL2 nested virt is poor — but owning a libkrun
-  fork makes a **WHP backend** the credible long-term path (see 11.5).
+- Windows: **decided 2026-06-10 — WHP backend in our fork, phase 1, no QEMU
+  fallback.** Key correction to the old assumption: the Windows Hypervisor
+  Platform API (WHP) is available on Windows **Home** too — Pro/Server only
+  gates the Hyper-V *management* stack, not the raw vCPU API (VirtualBox/
+  QEMU accel and WSL2 ride WHP on Home). So one backend covers all editions
+  with virtualization enabled; machines with VT-x/SVM disabled in firmware
+  are simply unsupported in phase 1 (clear error + enablement docs, no slow
+  TCG tier). Guest images are x86_64-ready from the Linux port; the trait
+  seam is the same one KVM just proved out. Market validation: Claude
+  Desktop ships a 10 GB Hyper-V bundle to run bash safely
+  (anthropics/claude-code#29045 + HN 48479452) — "the embeddable VM layer
+  for AI apps" is the slot Nebula + nebula-slim (slim/BRIEF.md) target.
 
 ### x86/amd64 containers — decided approach (dual backend)
 
