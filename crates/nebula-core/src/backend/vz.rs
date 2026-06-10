@@ -304,9 +304,31 @@ fn build_config(spec: &VmSpec) -> Result<Retained<VZVirtualMachineConfiguration>
             config.setStorageDevices(&NSArray::from_retained_slice(&storage));
         }
 
-        // virtiofs shares.
-        if !spec.shares.is_empty() {
+        // virtiofs shares (incl. the Rosetta directory share).
+        if !spec.shares.is_empty() || spec.rosetta {
             let mut sharing: Vec<Retained<VZDirectorySharingDeviceConfiguration>> = Vec::new();
+            if spec.rosetta {
+                if VZLinuxRosettaDirectoryShare::availability()
+                    == VZLinuxRosettaAvailability::Installed
+                {
+                    let share = VZLinuxRosettaDirectoryShare::initWithError(
+                        VZLinuxRosettaDirectoryShare::alloc(),
+                    )
+                    .map_err(|e| Error::backend(BACKEND, format!("rosetta share: {e}")))?;
+                    let fs = VZVirtioFileSystemDeviceConfiguration::initWithTag(
+                        VZVirtioFileSystemDeviceConfiguration::alloc(),
+                        &NSString::from_str("rosetta"),
+                    );
+                    fs.setShare(Some(&share.into_super()));
+                    sharing.push(Retained::into_super(fs));
+                } else {
+                    // Not fatal: amd64 support degrades, arm64 still works.
+                    tracing::warn!(
+                        "Rosetta is not installed (run `softwareupdate --install-rosetta`); \
+                         amd64 containers will not work"
+                    );
+                }
+            }
             for s in &spec.shares {
                 let tag = NSString::from_str(&s.tag);
                 VZVirtioFileSystemDeviceConfiguration::validateTag_error(&tag)

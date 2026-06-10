@@ -23,6 +23,19 @@ limitations; routine TODOs live in code.)
 
 ## Needs discussion
 
+- **(2026-06-09, Phase 2) nerdctl has no native macOS binary.** `nebula use
+  nerdctl` writes the host config pointing at our containerd socket, and the
+  guest image ships nerdctl (`nebula exec nerdctl …` works), but a first-class
+  host UX needs either a lima-style wrapper script on PATH or a streaming exec
+  alias. Options to discuss; docker path is unaffected.
+
+- **(2026-06-09, Phase 2) VZ NAT gateway (192.168.64.1) does not serve DNS on
+  macOS 26** — guests get the gateway as DHCP nameserver but port 53 is refused
+  (outbound IP traffic works fine). Interim: nebula-init pins resolv.conf to
+  1.1.1.1/8.8.8.8, which breaks split-horizon/corp-VPN DNS. Proper fix in
+  Phase 3: nebulad-side DNS forwarder using macOS's resolver, guest pointed at
+  it (also the basis for *.nebula.local).
+
 - **(2026-06-09) Stray `package.json` in repo root.** Untracked file named `nebulas`
   with a placeholder build script predates implementation. Left untracked — delete it,
   or is it intentional (npm SDK placeholder)?

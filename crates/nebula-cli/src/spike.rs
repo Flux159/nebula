@@ -50,6 +50,7 @@ pub fn run(backend_name: &str, cpus: u32, mem: u64) -> anyhow::Result<()> {
         console: ConsoleSpec::File(console_log.clone()),
         balloon: backend_name == "vz",
         rng: true,
+        rosetta: false,
     };
 
     let backend = backend_by_name(backend_name)?;

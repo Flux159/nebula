@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 mod client;
 mod commands;
+mod contexts;
 mod spike;
 
 #[derive(Parser)]
@@ -53,6 +54,16 @@ enum Commands {
         #[arg(short, long)]
         follow: bool,
     },
+    /// Point a tool (docker, nerdctl) at Nebula. Revert with `nebula revert`.
+    Use {
+        /// docker | nerdctl | kubectl
+        tool: String,
+    },
+    /// Restore a tool's previous configuration (`--all` for every tool).
+    Revert {
+        /// docker | nerdctl | kubectl | all
+        tool: String,
+    },
     /// Diagnose common setup problems.
     Doctor,
     /// Install guest images (kernel + rootfs) into ~/.nebula.
@@ -71,6 +82,9 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Default SIGPIPE handling: `nebula status | grep -q …` should not panic
+    // when the reader closes early.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -97,6 +111,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Exec { cmd } => commands::exec(cmd),
         Commands::Shell => commands::shell(),
         Commands::Logs { follow } => commands::logs(follow),
+        Commands::Use { tool } => contexts::use_tool(&tool),
+        Commands::Revert { tool } => contexts::revert_tool(&tool),
         Commands::Doctor => commands::doctor(),
         Commands::InstallImage { kernel, rootfs } => commands::install_image(kernel, rootfs),
         Commands::KrunWorker { spec } => match nebula_core::backend::krun::run_worker(&spec) {

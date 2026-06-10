@@ -183,37 +183,171 @@ mod init {
         mount(DATA_DEV, DATA_MNT, "ext4", 0, None);
     }
 
+    /// Bring up eth0 via busybox udhcpc (writes resolv.conf via its default script).
+    fn setup_network() {
+        // busybox applets via the multicall binary (PATH/symlinks vary by image).
+        let bb = "/bin/busybox";
+        let _ = std::process::Command::new(bb)
+            .args(["ip", "link", "set", "lo", "up"])
+            .status();
+        let _ = std::process::Command::new(bb)
+            .args(["ip", "link", "set", "eth0", "up"])
+            .status();
+        // Background daemon: handles lease + renewals.
+        let _ = std::process::Command::new(bb)
+            .args(["udhcpc", "-i", "eth0", "-b", "-S"])
+            .spawn();
+        // The VZ NAT gateway doesn't serve DNS on current macOS, so the
+        // DHCP-provided nameserver is dead weight. Public resolvers until the
+        // Phase 3 host-backed resolver lands (see tasks/issues.md).
+        std::thread::spawn(|| {
+            let want = "nameserver 1.1.1.1\nnameserver 8.8.8.8\n";
+            for _ in 0..20 {
+                std::thread::sleep(Duration::from_millis(500));
+                let cur = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+                if cur != want {
+                    let _ = std::fs::write("/etc/resolv.conf", want);
+                }
+            }
+        });
+    }
+
+    /// Mount the Rosetta directory share (if the host attached one) and register
+    /// the x86_64 binfmt handler so amd64 binaries run transparently.
+    fn setup_rosetta() {
+        let target = "/media/rosetta";
+        let _ = std::fs::create_dir_all(target);
+        let mounted = std::process::Command::new("/bin/mount")
+            .args(["-t", "virtiofs", "rosetta", target])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !mounted || !std::path::Path::new("/media/rosetta/rosetta").exists() {
+            return;
+        }
+        let register = concat!(
+            ":rosetta:M::",
+            "\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\x3e\\x00",
+            ":",
+            "\\xff\\xff\\xff\\xff\\xff\\xfe\\xfe\\x00\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xfe\\xff\\xff\\xff",
+            ":/media/rosetta/rosetta:OCF"
+        );
+        match std::fs::write("/proc/sys/fs/binfmt_misc/register", register) {
+            Ok(()) => println!("nebula-init: rosetta binfmt registered"),
+            Err(e) => eprintln!("nebula-init: rosetta binfmt registration failed: {e}"),
+        }
+    }
+
+    struct Service {
+        name: &'static str,
+        cmd: &'static str,
+        args: &'static [&'static str],
+        /// Don't start until this path exists (cheap dependency ordering).
+        wait_for: Option<&'static str>,
+        pid: libc::pid_t,
+    }
+
+    fn spawn_service(svc: &Service) -> libc::pid_t {
+        if let Some(path) = svc.wait_for {
+            for _ in 0..100 {
+                if std::path::Path::new(path).exists() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(format!("/var/log/{}.log", svc.name))
+            .ok();
+        let mut cmd = std::process::Command::new(svc.cmd);
+        cmd.args(svc.args);
+        cmd.env(
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        );
+        cmd.env("HOME", "/root");
+        if let Some(log) = log {
+            let log2 = log.try_clone().ok();
+            cmd.stdout(log);
+            if let Some(l2) = log2 {
+                cmd.stderr(l2);
+            }
+        }
+        match cmd.spawn() {
+            Ok(child) => {
+                println!("nebula-init: started {} (pid {})", svc.name, child.id());
+                child.id() as libc::pid_t
+            }
+            Err(e) => {
+                eprintln!("nebula-init: failed to start {}: {e}", svc.name);
+                -1
+            }
+        }
+    }
+
     fn vessel_mode() -> ! {
         attach_console();
         let _ = std::fs::write("/proc/sys/kernel/hostname", "nebula");
+        let _ = std::fs::create_dir_all("/var/log");
         setup_data_disk();
+        setup_network();
+        setup_rosetta();
+        // dockerd requires forwarding for container NAT.
+        let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
         println!(
             "NEBULA_VESSEL_UP init={} uname={}",
             env!("CARGO_PKG_VERSION"),
             uname_line()
         );
 
-        // Supervise the agent; reap all zombies (we are PID 1).
-        let mut agent = spawn_agent();
+        let mut services = vec![
+            Service {
+                name: "vessel-agent",
+                cmd: AGENT_PATH,
+                args: &[],
+                wait_for: None,
+                pid: -1,
+            },
+            Service {
+                name: "containerd",
+                cmd: "/usr/bin/containerd",
+                args: &["--config", "/etc/containerd/config.toml"],
+                wait_for: Some(DATA_MNT),
+                pid: -1,
+            },
+            Service {
+                name: "dockerd",
+                cmd: "/usr/bin/dockerd",
+                args: &[
+                    "--host=unix:///var/run/docker.sock",
+                    "--containerd=/run/containerd/containerd.sock",
+                ],
+                wait_for: Some("/run/containerd/containerd.sock"),
+                pid: -1,
+            },
+        ];
+        // Stagger startup so wait_for dependencies resolve in order.
+        for svc in services.iter_mut() {
+            svc.pid = spawn_service(svc);
+        }
+
+        // Supervise: restart dead services; reap all zombies (we are PID 1).
         loop {
             let mut status: libc::c_int = 0;
             let pid = unsafe { libc::waitpid(-1, &mut status, 0) };
-            if pid == agent {
-                eprintln!("nebula-init: vessel-agent exited (status {status}), restarting");
-                std::thread::sleep(Duration::from_millis(250));
-                agent = spawn_agent();
-            } else if pid < 0 {
+            if pid > 0 {
+                if let Some(svc) = services.iter_mut().find(|s| s.pid == pid) {
+                    eprintln!(
+                        "nebula-init: {} exited (status {status}), restarting",
+                        svc.name
+                    );
+                    std::thread::sleep(Duration::from_millis(250));
+                    svc.pid = spawn_service(svc);
+                }
+            } else {
                 std::thread::sleep(Duration::from_millis(100));
-            }
-        }
-    }
-
-    fn spawn_agent() -> libc::pid_t {
-        match std::process::Command::new(AGENT_PATH).spawn() {
-            Ok(child) => child.id() as libc::pid_t,
-            Err(e) => {
-                eprintln!("nebula-init: failed to start agent: {e}");
-                -1
             }
         }
     }

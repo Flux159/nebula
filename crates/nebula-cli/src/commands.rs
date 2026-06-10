@@ -98,6 +98,10 @@ pub fn status() -> anyhow::Result<()> {
                 ),
                 None => println!("  agent:    UNREACHABLE"),
             }
+            let pointing = crate::contexts::pointing_at_nebula();
+            if !pointing.is_empty() {
+                println!("  contexts: {} → nebula", pointing.join(", "));
+            }
             if let Some(m) = s.mem {
                 println!(
                     "  guest mem: {} / {} MiB available{}",
@@ -155,8 +159,7 @@ pub fn shell() -> anyhow::Result<()> {
         rows,
     };
     let stream = client::connect()?;
-    let (resp, (mut reader, writer)) =
-        client::request_on(stream, &DaemonRequest::Shell { open })?;
+    let (resp, (mut reader, writer)) = client::request_on(stream, &DaemonRequest::Shell { open })?;
     match resp {
         DaemonResponse::ShellStarted => {}
         DaemonResponse::Error { message } => bail!("shell failed: {message}"),

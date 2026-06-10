@@ -27,6 +27,12 @@ impl Paths {
     pub fn pid_file(&self) -> PathBuf {
         self.run_dir().join("nebulad.pid")
     }
+    pub fn docker_sock(&self) -> PathBuf {
+        self.run_dir().join("docker.sock")
+    }
+    pub fn containerd_sock(&self) -> PathBuf {
+        self.run_dir().join("containerd.sock")
+    }
     pub fn logs_dir(&self) -> PathBuf {
         self.root.join("logs")
     }

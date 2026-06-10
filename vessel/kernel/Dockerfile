@@ -12,10 +12,16 @@ RUN curl -fsSL "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERS
     | tar -xJ --strip-components=1
 
 COPY nebula.fragment /src/kernel/configs/nebula.config
+COPY apply-fragment.py /src/apply-fragment.py
 
+# kconfig keeps the FIRST assignment per symbol, so the fragment must replace
+# base assignments, not just append after them.
 RUN make ARCH=arm64 defconfig \
-    && scripts/kconfig/merge_config.sh -m .config kernel/configs/nebula.config \
-    && make ARCH=arm64 olddefconfig
+    && python3 apply-fragment.py .config kernel/configs/nebula.config \
+    && make ARCH=arm64 olddefconfig \
+    && for opt in BRIDGE VETH VIRTIO_MMIO VIRTIO_FS VSOCKETS OVERLAY_FS BINFMT_MISC; do \
+         grep -q "^CONFIG_${opt}=y" .config || { echo "FATAL: CONFIG_${opt} not =y"; exit 1; }; \
+       done
 
 RUN make ARCH=arm64 -j"$(nproc)" Image
 

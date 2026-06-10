@@ -28,6 +28,10 @@ pub struct VmSpec {
     /// Attach an entropy (virtio-rng) device.
     #[serde(default = "default_true")]
     pub rng: bool,
+    /// Attach Apple's Rosetta directory share (VZ only) so the guest can run
+    /// amd64 binaries via binfmt_misc.
+    #[serde(default)]
+    pub rosetta: bool,
 }
 
 fn default_true() -> bool {
@@ -147,6 +151,7 @@ mod tests {
             console: ConsoleSpec::None,
             balloon: false,
             rng: true,
+            rosetta: false,
         }
     }
 

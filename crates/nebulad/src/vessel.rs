@@ -60,6 +60,7 @@ impl Vessel {
             console: ConsoleSpec::File(paths.console_log()),
             balloon: true,
             rng: true,
+            rosetta: true,
         };
 
         let backend = backend_by_name("vz")?;
@@ -97,6 +98,10 @@ impl Vessel {
 
     pub fn state(&self) -> VmState {
         self.vm.lock().unwrap().state()
+    }
+
+    pub fn vsock_connect(&self, port: u32) -> anyhow::Result<std::os::unix::net::UnixStream> {
+        Ok(self.vm.lock().unwrap().vsock_connect(port)?)
     }
 
     pub fn agent_request(&self, req: &AgentRequest) -> anyhow::Result<AgentResponse> {

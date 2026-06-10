@@ -64,7 +64,62 @@ mod agent {
     pub fn run() -> ! {
         eprintln!("vessel-agent {} starting", env!("CARGO_PKG_VERSION"));
         std::thread::spawn(|| serve_loop("shell", VSOCK_PORT_SHELL, handle_shell));
+        std::thread::spawn(|| serve_loop("docker-proxy", VSOCK_PORT_DOCKER, handle_docker_proxy));
+        std::thread::spawn(|| {
+            serve_loop(
+                "containerd-proxy",
+                VSOCK_PORT_CONTAINERD,
+                handle_containerd_proxy,
+            )
+        });
         serve_loop("control", VSOCK_PORT_CONTROL, handle_control)
+    }
+
+    fn handle_docker_proxy(conn: std::fs::File) {
+        forward_to_unix(conn, "/var/run/docker.sock");
+    }
+
+    fn handle_containerd_proxy(conn: std::fs::File) {
+        forward_to_unix(conn, "/run/containerd/containerd.sock");
+    }
+
+    /// Pump a vsock connection into a local unix socket (and back).
+    fn forward_to_unix(conn: std::fs::File, sock: &str) {
+        let Ok(unix) = std::os::unix::net::UnixStream::connect(sock) else {
+            return;
+        };
+        let mut conn_r = conn.try_clone().expect("clone conn");
+        let mut conn_w = conn;
+        let mut unix_r = unix.try_clone().expect("clone unix");
+        let mut unix_w = unix;
+
+        let t = std::thread::spawn(move || {
+            let mut buf = [0u8; 65536];
+            loop {
+                match conn_r.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if unix_w.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            let _ = unix_w.shutdown(std::net::Shutdown::Write);
+        });
+        let mut buf = [0u8; 65536];
+        loop {
+            match unix_r.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if conn_w.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        unsafe { libc::shutdown(conn_w.as_raw_fd(), libc::SHUT_RDWR) };
+        let _ = t.join();
     }
 
     fn serve_loop(name: &'static str, port: u32, handler: fn(std::fs::File)) -> ! {
@@ -206,6 +261,11 @@ mod agent {
     ) -> std::io::Result<ExecResult> {
         let mut child = std::process::Command::new(cmd)
             .args(args)
+            .env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            )
+            .env("HOME", "/root")
             .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())

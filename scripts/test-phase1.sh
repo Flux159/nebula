@@ -31,7 +31,8 @@ check "cold boot under 10s" "[ $((T1-T0)) -lt 10 ]"
 echo "--- status & agent"
 $NEBULA status > /tmp/status-debug.txt 2>&1 || echo "status exit=$?" >> /tmp/status-debug.txt
 check "status shows running"           "grep -q 'nebula: running' /tmp/status-debug.txt"
-check "agent healthy"                  "$NEBULA status | grep -q 'agent:.*healthy'"
+$NEBULA status > /tmp/status-agent.txt 2>&1 || true
+check "agent healthy"                  "grep -q 'agent:.*healthy' /tmp/status-agent.txt"
 check "exec uname"                     "$NEBULA exec uname -a | grep -q 'Linux nebula'"
 check "custom kernel"                  "$NEBULA exec uname -r | grep -q '6.12'"
 check "data disk mounted"              "$NEBULA exec df /var/lib/nebula | grep -q vdb"
@@ -47,9 +48,11 @@ check "doctor passes"                  "$NEBULA doctor"
 
 echo "--- restart cycle"
 $NEBULA down
-check "down stops daemon"              "! $NEBULA status | grep -q 'nebula: running'"
+$NEBULA status > /tmp/status-down.txt 2>&1 || true
+check "down stops daemon"              "! grep -q 'nebula: running' /tmp/status-down.txt"
 $NEBULA up >/dev/null
-check "second boot healthy"            "$NEBULA status | grep -q 'agent:.*healthy'"
+$NEBULA status > /tmp/status-second.txt 2>&1 || true
+check "second boot healthy"            "grep -q 'agent:.*healthy' /tmp/status-second.txt"
 check "data persists across restarts"  "$NEBULA exec ls /var/lib/nebula"
 $NEBULA down >/dev/null
 

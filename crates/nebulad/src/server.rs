@@ -20,6 +20,14 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
     let vessel = Arc::new(vessel);
     let shutdown = Arc::new(AtomicBool::new(false));
 
+    // Engine socket proxies: host unix socket <-> guest vsock <-> guest daemon.
+    spawn_unix_proxy(vessel.clone(), paths.docker_sock(), VSOCK_PORT_DOCKER);
+    spawn_unix_proxy(
+        vessel.clone(),
+        paths.containerd_sock(),
+        VSOCK_PORT_CONTAINERD,
+    );
+
     for conn in listener.incoming() {
         if shutdown.load(Ordering::SeqCst) {
             break;
@@ -130,6 +138,34 @@ fn handle(conn: UnixStream, vessel: &Vessel, shutdown: &AtomicBool) -> anyhow::R
             ),
         },
     }
+}
+
+/// Listen on a host unix socket and forward each connection to a guest vsock
+/// port (which the agent forwards to the matching guest unix socket).
+fn spawn_unix_proxy(vessel: Arc<Vessel>, sock_path: std::path::PathBuf, vsock_port: u32) {
+    std::thread::spawn(move || {
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = match UnixListener::bind(&sock_path) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!("proxy bind {} failed: {e}", sock_path.display());
+                return;
+            }
+        };
+        tracing::info!(sock = %sock_path.display(), port = vsock_port, "socket proxy ready");
+        for conn in listener.incoming() {
+            let Ok(conn) = conn else { continue };
+            let vessel = vessel.clone();
+            std::thread::spawn(move || match vessel.vsock_connect(vsock_port) {
+                Ok(vsock) => {
+                    let _ = bridge(BufReader::new(conn.try_clone().unwrap()), conn, vsock);
+                }
+                Err(e) => {
+                    tracing::debug!("proxy vsock:{vsock_port} connect failed: {e:#}");
+                }
+            });
+        }
+    });
 }
 
 fn respond(writer: &mut UnixStream, resp: &DaemonResponse) -> anyhow::Result<()> {

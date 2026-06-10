@@ -18,3 +18,5 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 libc.workspace = true
+serde = { workspace = true }
+sha2 = "0.10"
