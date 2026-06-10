@@ -2,13 +2,26 @@
 # Build the fully self-contained Nebula.app + DMG:
 #   UI + nebula/nebulad sidecars + guest images (gz) as resources.
 # Result: install the .app, open it, click Start — no downloads, no Docker.
+#
+# NEBULA_STRIP=1 (opt-in, see strip-debug.sh): build our binaries WITH line
+# tables, split the debug info into dist/debug-symbols/, ship stripped — and
+# strip the UI binary, dylibs, and bundled docker CLI too.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 TRIPLE=aarch64-apple-darwin
+STRIP="${NEBULA_STRIP:-0}"
 
 echo "==> release binaries"
-cargo build --release -p nebula-cli -p nebulad
+if [ "$STRIP" = 1 ]; then
+    # Override the workspace profile (strip=true, debug=0): keep line tables
+    # at link, then strip-debug.sh separates them so traces are recoverable.
+    CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=1 \
+        cargo build --release -p nebula-cli -p nebulad
+    scripts/strip-debug.sh target/release/nebula target/release/nebulad
+else
+    cargo build --release -p nebula-cli -p nebulad
+fi
 scripts/sign-dev.sh target/release/nebula target/release/nebulad
 
 echo "==> guest images"
@@ -22,7 +35,7 @@ echo "==> host CLIs (docker/kubectl/helm)"
 scripts/fetch-host-clis.sh
 
 echo "==> relocatable libkrun (sandbox/GPU/krun vessels on user machines)"
-scripts/package-libkrun.sh dist/libkrun
+NEBULA_STRIP="$STRIP" scripts/package-libkrun.sh dist/libkrun
 
 echo "==> staging sidecars + resources"
 mkdir -p ui/src-tauri/binaries ui/src-tauri/resources ui/src-tauri/frameworks
@@ -33,8 +46,19 @@ cp dist/kernel-Image.gz dist/rootfs.img.gz ui/src-tauri/resources/
 #    resolves Frameworks/libkrun.dylib via its ancestor walk).
 cp dist/libkrun/*.dylib ui/src-tauri/frameworks/
 
+if [ "$STRIP" = 1 ]; then
+    echo "==> stripping bundled host CLIs (kubectl/helm ship pre-stripped; docker doesn't)"
+    scripts/strip-debug.sh ui/src-tauri/resources/bin/docker
+fi
+
 echo "==> tauri bundle"
-(cd ui/src-tauri && cargo tauri build)
+# NEBULA_STRIP: cargo strips the UI binary at link (8.1 -> 6.5 MB). It's UI
+# glue — Rust panics in it are not the traces we need to recover.
+if [ "$STRIP" = 1 ]; then
+    (cd ui/src-tauri && CARGO_PROFILE_RELEASE_STRIP=symbols cargo tauri build)
+else
+    (cd ui/src-tauri && cargo tauri build)
+fi
 
 echo "==> done"
 ls -lh ui/src-tauri/target/release/bundle/dmg/*.dmg

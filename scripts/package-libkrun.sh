@@ -29,6 +29,11 @@ cp -L /opt/homebrew/opt/libepoxy/lib/libepoxy.0.dylib "$OUT/"
 cp -L /opt/homebrew/opt/molten-vk/lib/libMoltenVK.dylib "$OUT/"
 chmod 755 "$OUT"/*.dylib
 
+# Opt-in symbol stripping (unstripped copies land in dist/debug-symbols/).
+if [ "${NEBULA_STRIP:-0}" = 1 ]; then
+    scripts/strip-debug.sh "$OUT"/*.dylib
+fi
+
 for lib in "$OUT"/*.dylib; do
     install_name_tool -id "@loader_path/$(basename "$lib")" "$lib" 2>/dev/null
     # Repoint any brew dependency at the bundled copy beside it.

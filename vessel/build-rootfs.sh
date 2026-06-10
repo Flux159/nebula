@@ -21,11 +21,21 @@ fi
 docker version >/dev/null 2>&1 || { echo "ERROR: no working docker engine for the build" >&2; exit 1; }
 cd "$(dirname "$0")/.."
 
-cargo build -p vessel-init -p vessel-agent --release --target aarch64-unknown-linux-musl
+if [ "${NEBULA_STRIP:-0}" = 1 ]; then
+    # Opt-in (see scripts/strip-debug.sh): keep line tables at link, then
+    # objcopy-split them so guest panics stay symbolicatable.
+    CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=1 \
+        cargo build -p vessel-init -p vessel-agent --release --target aarch64-unknown-linux-musl
+else
+    cargo build -p vessel-init -p vessel-agent --release --target aarch64-unknown-linux-musl
+fi
 
 mkdir -p vessel/rootfs/bin
 cp target/aarch64-unknown-linux-musl/release/vessel-init vessel/rootfs/bin/
 cp target/aarch64-unknown-linux-musl/release/vessel-agent vessel/rootfs/bin/
+if [ "${NEBULA_STRIP:-0}" = 1 ]; then
+    scripts/strip-debug.sh vessel/rootfs/bin/vessel-init vessel/rootfs/bin/vessel-agent
+fi
 
 # Embedder hooks: OVERLAY=dir (copied over /), SETUP=script (runs in build).
 OVERLAY="${OVERLAY:-}"

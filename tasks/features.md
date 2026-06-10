@@ -725,6 +725,22 @@ dev-track by end of week, signed/notarized release builds after that.
   ubuntu-24.04-arm; KVM acceptance subset where /dev/kvm exists.
 - MAS remains out of scope (vmnet entitlement gymnastics; documented in 9.4).
 
+**Symbol stripping (`NEBULA_STRIP=1`, opt-in — NOT default until trace
+recovery is verified, per Suyog).** `scripts/strip-debug.sh` splits debug
+info out of shipped binaries into `dist-debug/` (Mach-O: dSYM + unstripped
+copy; ELF: objcopy `.debug` + gnu-debuglink); wired into bundle-app.sh,
+package-libkrun.sh, build-rootfs.sh. Measured 2026-06-10: ~12 MB raw
+(UI binary −21%, libkrun −15%, MoltenVK −27%, docker CLI −10%, guests now
+fully stripped WITH recoverable line tables — kubectl/helm ship pre-stripped
+upstream), but the DMG only drops 191→190 MB because UDZO was already
+compressing symbols to almost nothing. The real win is the recovery story:
+today's default builds (`strip=true` in the workspace profile) keep NO
+symbols anywhere; with the flag, panics stay symbolicatable. Runtime
+verified (stripped sidecar/libkrun/docker/guests all run). Before defaulting:
+verify an actual round-trip — induce a panic in a stripped nebulad +
+vessel-agent, symbolicate with `atos -o dist-debug/nebulad.dSYM/...` and
+`llvm-addr2line -e dist-debug/vessel-agent.debug`, confirm file:line.
+
 ## Cross-cutting risks (watch from day 1)
 
 1. **Elastic memory on VZ's balloon device** (Phase 4.1). Lower risk than before

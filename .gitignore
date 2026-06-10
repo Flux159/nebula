@@ -25,3 +25,4 @@ vessel/out/
 vessel/rootfs/bin/
 dist/
 ui/src-tauri/frameworks/
+dist-debug/
