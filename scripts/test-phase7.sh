@@ -3,7 +3,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-NEBULA=target/debug/nebula
+NEBULA="$PWD/target/debug/nebula"
 # Builds invalidate ad-hoc signatures; always re-sign before touching VMs.
 cargo build -p nebula-cli -p nebulad >/dev/null 2>&1
 cargo build -p vessel-init --release --target aarch64-unknown-linux-musl >/dev/null 2>&1
@@ -38,8 +38,8 @@ check "no vessel data visible"      "$NEBULA sandbox run -- ls / | grep -vq var/
 
 echo "--- cwd sharing (opt-in virtiofs)"
 TMPD=$(mktemp -d) && echo "p7-marker-$$" > "$TMPD/f.txt"
-check "shared cwd readable"         "cd $TMPD && $NEBULA sandbox run --share-cwd -- cat /workdir/f.txt | grep -q p7-marker"
-check "sandbox write reaches host"  "cd $TMPD && $NEBULA sandbox run --share-cwd -- sh -c 'echo from-sbx > /workdir/out.txt' && grep -q from-sbx $TMPD/out.txt"
+check "shared cwd readable"         "(cd $TMPD && $NEBULA sandbox run --share-cwd -- cat /workdir/f.txt | grep -q p7-marker)"
+check "sandbox write reaches host"  "(cd $TMPD && $NEBULA sandbox run --share-cwd -- sh -c 'echo from-sbx > /workdir/out.txt') && grep -q from-sbx $TMPD/out.txt"
 rm -rf "$TMPD"
 
 echo "--- concurrency (3 sidecars at once)"
