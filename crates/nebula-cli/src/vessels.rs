@@ -9,7 +9,10 @@
 //! Layout: ~/.nebula/vessels/<name>/{spec.json,pid,rootfs.img,data.img,
 //! console.log,agent.sock,shell.sock}
 
-use nebula_core::ipc::{self, IpcStream as UnixStream};
+use nebula_core::ipc;
+// Only the vz-worker control client (macOS) names the stream type directly.
+#[cfg(target_os = "macos")]
+use nebula_core::ipc::IpcStream as UnixStream;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
