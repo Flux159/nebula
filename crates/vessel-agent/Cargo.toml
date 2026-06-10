@@ -4,5 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Guest-side agent for the Nebula Vessel (vsock control + shell server)"
 
 [dependencies]
+nebula-core = { path = "../nebula-core", default-features = false }
+serde_json.workspace = true
+libc.workspace = true

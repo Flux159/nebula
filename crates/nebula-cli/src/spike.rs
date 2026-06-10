@@ -109,6 +109,11 @@ fn dirs_home() -> Option<PathBuf> {
 /// Download (once) and decompress the spike kernel. Returns the uncompressed
 /// arm64 `Image` path, which both VZLinuxBootLoader and krun_set_kernel accept.
 fn ensure_kernel(cache: &std::path::Path) -> anyhow::Result<PathBuf> {
+    if let Some(p) = std::env::var_os("NEBULA_SPIKE_KERNEL") {
+        let p = PathBuf::from(p);
+        anyhow::ensure!(p.is_file(), "NEBULA_SPIKE_KERNEL={} not found", p.display());
+        return Ok(p);
+    }
     let gz = cache.join("spike-vmlinuz-virt");
     let image = cache.join("spike-kernel-Image");
     if image.is_file() {

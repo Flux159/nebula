@@ -40,6 +40,14 @@ pub trait VmHandle: Send {
     /// Resize the balloon: target is the amount of memory the GUEST should keep.
     fn balloon_set_guest_mib(&mut self, target_mib: u64) -> Result<()>;
 
+    /// Open a host->guest vsock stream to `port`. Returns a connected socket.
+    fn vsock_connect(&self, _port: u32) -> Result<std::os::unix::net::UnixStream> {
+        Err(Error::backend(
+            "vm",
+            "vsock_connect not supported by this backend",
+        ))
+    }
+
     /// Block until the VM reaches `target` or `timeout` elapses.
     fn wait_for(&mut self, target: VmState, timeout: Duration) -> Result<()> {
         let start = Instant::now();

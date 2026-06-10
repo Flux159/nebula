@@ -9,6 +9,7 @@
 pub mod backend;
 pub mod error;
 pub mod initramfs;
+pub mod proto;
 pub mod spec;
 
 pub use backend::{VmHandle, VmState, VmmBackend};

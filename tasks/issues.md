@@ -6,16 +6,20 @@ limitations; routine TODOs live in code.)
 
 ## Open (being worked / next phase)
 
-- **(2026-06-09, Phase 0) Stock Alpine kernel panics at early boot under libkrun
-  (fork 1.18.0), boots fine under VZ.** Guest dies before any console exists
-  (libkrun has no earlycon/pl011, virtio-MMIO console needs `virtio_mmio` which
-  Alpine builds `=m`, and the panic precedes module load), so the panic message is
-  unobtainable with stock kernels. Verified initrd/FDT plumbing in the fork looks
-  correct (`linux,initrd-start/end` written, memory regions sized). Resolution path:
-  the Phase 1 **custom kernel** (VIRTIO_MMIO=y, VIRTIO_CONSOLE=y) gives us console
-  output during boot and is what the product needs anyway. Only gates the krun
-  sidecar engine (Phase 7), not the VZ Vessel (Phases 1–6). VZ spike passes
-  end-to-end (357ms boot→poweroff).
+- **(2026-06-09, Phase 1) libkrun console-to-file needs a fork patch eventually.**
+  With a non-tty output fd, libkrun sends guest hvc0 to its *log* and only a
+  secondary "krun-stdout" virtio port reaches our fd. Worked around by also
+  pointing the worker's stdout at the console file (sufficient for sidecars).
+  Fork TODO: an fd-direct console output mode.
+
+## Resolved
+
+- **(2026-06-09, Phase 0→1) Stock Alpine kernel panics at early boot under
+  libkrun.** Root cause never directly observed (no console that early), but
+  fully resolved by the Phase 1 custom kernel (6.12.58, VIRTIO_MMIO=y et al.):
+  the krun spike now passes end-to-end — **227ms boot→poweroff** on the fork
+  dylib, same kernel+initramfs as VZ (which passes in ~330ms). Both backends
+  boot the same image through the same `VmmBackend` trait.
 
 ## Needs discussion
 

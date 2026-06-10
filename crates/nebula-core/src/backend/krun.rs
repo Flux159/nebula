@@ -165,12 +165,23 @@ impl VmHandle for KrunVm {
             .or_else(|_| std::env::current_exe())?;
         let spec_json = serde_json::to_string(&self.spec)
             .map_err(|e| Error::backend(BACKEND, format!("spec serialize: {e}")))?;
+        // libkrun routes some guest console traffic to the worker's stdio, so
+        // aim the worker's stdout at the console file as well.
+        let stdout: std::process::Stdio = match &self.spec.console {
+            ConsoleSpec::File(path) => {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::File::create(path)?.into()
+            }
+            ConsoleSpec::None => std::process::Stdio::null(),
+        };
         let child = Command::new(worker)
             .arg("krun-worker")
             .arg("--spec")
             .arg(spec_json)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
+            .stdout(stdout)
             .stderr(std::process::Stdio::inherit())
             .spawn()?;
         *self.child.lock().unwrap() = Some(child);

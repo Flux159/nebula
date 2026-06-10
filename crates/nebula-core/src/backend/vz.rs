@@ -171,6 +171,52 @@ impl VmHandle for VzVm {
         }
     }
 
+    fn vsock_connect(&self, port: u32) -> Result<std::os::unix::net::UnixStream> {
+        use std::os::fd::FromRawFd;
+        let (tx, rx) = mpsc::channel::<std::result::Result<i32, String>>();
+        self.on_queue(move |vm| {
+            let devices = unsafe { vm.socketDevices() };
+            let Some(dev) = devices.firstObject() else {
+                let _ = tx.send(Err("VM has no vsock device".into()));
+                return;
+            };
+            let Ok(vsock) = dev.downcast::<VZVirtioSocketDevice>() else {
+                let _ = tx.send(Err("socket device is not virtio".into()));
+                return;
+            };
+            let block = RcBlock::new(
+                move |conn: *mut VZVirtioSocketConnection, err: *mut NSError| {
+                    let res = if conn.is_null() {
+                        let msg = if err.is_null() {
+                            "vsock connect failed".to_string()
+                        } else {
+                            unsafe { &*err }.localizedDescription().to_string()
+                        };
+                        Err(msg)
+                    } else {
+                        // Dup: VZ owns (and will close) the original descriptor.
+                        let fd = unsafe { libc::dup((*conn).fileDescriptor()) };
+                        if fd < 0 {
+                            Err("dup(vsock fd) failed".into())
+                        } else {
+                            Ok(fd)
+                        }
+                    };
+                    let _ = tx.send(res);
+                },
+            );
+            unsafe { vsock.connectToPort_completionHandler(port, &block) };
+        });
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(fd)) => Ok(unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) }),
+            Ok(Err(msg)) => Err(Error::backend(BACKEND, format!("vsock:{port}: {msg}"))),
+            Err(_) => Err(Error::backend(
+                BACKEND,
+                format!("vsock:{port}: connect timeout"),
+            )),
+        }
+    }
+
     fn balloon_set_guest_mib(&mut self, target_mib: u64) -> Result<()> {
         let ok = self.on_queue(move |vm| {
             let devices = unsafe { vm.memoryBalloonDevices() };
