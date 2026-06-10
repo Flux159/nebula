@@ -65,10 +65,45 @@ pub fn start(vessel: Arc<Vessel>) -> Arc<BalloonState> {
 /// What macOS actually charges for the VM, in MiB. Virtualization.framework
 /// runs guests in `com.apple.Virtualization.VirtualMachine` XPC processes, so
 /// the honest number is the phys_footprint of those processes (plus ours).
+#[cfg(target_os = "macos")]
 pub fn host_footprint_mib() -> u64 {
     footprint_of(std::process::id() as i32) + vm_xpc_footprint_mib()
 }
 
+/// On Linux the krun workers ARE the VMs: our RSS plus every child
+/// krun-worker's RSS (from /proc) is the whole story.
+#[cfg(target_os = "linux")]
+pub fn host_footprint_mib() -> u64 {
+    fn rss_mib(pid: u32) -> u64 {
+        std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()
+            .and_then(|s| {
+                s.lines().find_map(|l| {
+                    l.strip_prefix("VmRSS:")
+                        .and_then(|v| v.trim().trim_end_matches(" kB").parse::<u64>().ok())
+                })
+            })
+            .unwrap_or(0)
+            / 1024
+    }
+    let me = std::process::id();
+    let mut total = rss_mib(me);
+    if let Ok(rd) = std::fs::read_dir("/proc") {
+        for e in rd.flatten() {
+            let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+                continue;
+            };
+            let cmdline =
+                std::fs::read_to_string(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            if cmdline.contains("krun-worker") {
+                total += rss_mib(pid);
+            }
+        }
+    }
+    total
+}
+
+#[cfg(target_os = "macos")]
 fn vm_xpc_footprint_mib() -> u64 {
     let mut pids = vec![0i32; 4096];
     let bytes = unsafe {
@@ -106,6 +141,7 @@ fn vm_xpc_footprint_mib() -> u64 {
     total
 }
 
+#[cfg(target_os = "macos")]
 fn footprint_of(pid: i32) -> u64 {
     let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
     let rc = unsafe {

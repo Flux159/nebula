@@ -13,6 +13,13 @@ use nebula_core::{BootSpec, ConsoleSpec, NetSpec, ShareSpec, VmSpec};
 
 use crate::client;
 
+/// Guest binaries match the HOST arch (the microVM runs the same ISA).
+const MUSL_TARGET: &str = if cfg!(target_arch = "aarch64") {
+    "aarch64-unknown-linux-musl"
+} else {
+    "x86_64-unknown-linux-musl"
+};
+
 pub struct SandboxOpts {
     pub cpus: u32,
     pub mem: u64,
@@ -162,17 +169,14 @@ fn guest_binary(name: &str) -> anyhow::Result<PathBuf> {
     for dir in exe.ancestors() {
         if dir.file_name().is_some_and(|n| n == "target") {
             for profile in ["release", "debug"] {
-                let p = dir
-                    .join("aarch64-unknown-linux-musl")
-                    .join(profile)
-                    .join(name);
+                let p = dir.join(MUSL_TARGET).join(profile).join(name);
                 if p.is_file() {
                     return Ok(p);
                 }
             }
         }
     }
-    bail!("{name} (musl) not built — cargo build -p {name} --release --target aarch64-unknown-linux-musl")
+    bail!("{name} (musl) not built — cargo build -p {name} --release --target {MUSL_TARGET}")
 }
 
 /// Static arm64 busybox for the sandbox initramfs (cached).

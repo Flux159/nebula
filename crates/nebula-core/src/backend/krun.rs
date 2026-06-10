@@ -19,14 +19,41 @@ use super::{VmHandle, VmState, VmmBackend};
 const BACKEND: &str = "krun";
 
 /// Candidate dylib paths, first hit wins. NEBULA_LIBKRUN_PATH overrides.
+#[cfg(target_os = "macos")]
 const DYLIB_CANDIDATES: &[&str] = &[
     "/opt/homebrew/opt/libkrun-efi/lib/libkrun-efi.dylib",
     "/opt/homebrew/lib/libkrun-efi.dylib",
     "/opt/homebrew/lib/libkrun.dylib",
     "/usr/local/lib/libkrun.dylib",
 ];
+#[cfg(target_os = "linux")]
+const DYLIB_CANDIDATES: &[&str] = &[
+    "/usr/local/lib64/libkrun.so.1",
+    "/usr/local/lib/libkrun.so.1",
+    "/usr/lib64/libkrun.so.1",
+    "/usr/lib/libkrun.so.1",
+];
 
-const KRUN_KERNEL_FORMAT_RAW: u32 = 0;
+/// Near-binary fork locations checked before the system candidates
+/// (app bundle / embed kit / dev tree).
+#[cfg(target_os = "macos")]
+const NEAR_EXE_CANDIDATES: &[&str] = &[
+    "Frameworks/libkrun.dylib", // Nebula.app/Contents/Frameworks
+    "lib/libkrun.dylib",        // embed kit / zip install layout
+    "third_party/libkrun/target/release/libkrun.1.18.0.dylib",
+];
+#[cfg(target_os = "linux")]
+const NEAR_EXE_CANDIDATES: &[&str] = &[
+    "lib/libkrun.so.1",
+    "third_party/libkrun/target/release/libkrun.so.1.18.0",
+];
+
+/// Direct kernel boot format per guest arch: arm64 takes the raw `Image`,
+/// x86_64 takes an ELF `vmlinux`.
+#[cfg(target_arch = "aarch64")]
+const KRUN_KERNEL_FORMAT: u32 = 0; // KRUN_KERNEL_FORMAT_RAW
+#[cfg(target_arch = "x86_64")]
+const KRUN_KERNEL_FORMAT: u32 = 1; // KRUN_KERNEL_FORMAT_ELF
 
 #[allow(non_snake_case)]
 struct KrunApi {
@@ -67,11 +94,7 @@ fn dylib_path() -> Result<PathBuf> {
     // Look near the running binary: app bundle Frameworks, then the dev tree.
     if let Ok(exe) = std::env::current_exe() {
         for anc in exe.ancestors() {
-            for rel in [
-                "Frameworks/libkrun.dylib", // Nebula.app/Contents/Frameworks
-                "lib/libkrun.dylib",        // embed kit / zip install layout
-                "third_party/libkrun/target/release/libkrun.1.18.0.dylib",
-            ] {
+            for rel in NEAR_EXE_CANDIDATES {
                 let candidate = anc.join(rel);
                 if candidate.is_file() {
                     return Ok(candidate);
@@ -229,6 +252,30 @@ impl VmHandle for KrunVm {
         Ok(())
     }
 
+    /// libkrun maps guest vsock ports to host unix sockets (vsock_ports), so
+    /// "connect to guest port N" = connect to the unix socket mapped to N.
+    /// This is what lets nebulad's agent/socket proxies run unchanged on the
+    /// krun backend (the Linux engine path).
+    fn vsock_connect(&self, port: u32) -> Result<std::os::unix::net::UnixStream> {
+        let map = self
+            .spec
+            .vsock_ports
+            .iter()
+            .find(|m| m.port == port)
+            .ok_or_else(|| {
+                Error::backend(
+                    BACKEND,
+                    format!("vsock:{port}: no host socket mapped for this port"),
+                )
+            })?;
+        std::os::unix::net::UnixStream::connect(&map.host_path).map_err(|e| {
+            Error::backend(
+                BACKEND,
+                format!("vsock:{port} via {}: {e}", map.host_path.display()),
+            )
+        })
+    }
+
     fn balloon_set_guest_mib(&mut self, _target_mib: u64) -> Result<()> {
         // Sidecars are ephemeral; balloon support comes with the fork if needed (4.1).
         Err(Error::backend(
@@ -290,7 +337,7 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
             (api.krun_set_kernel)(
                 ctx,
                 kernel_c.as_ptr(),
-                KRUN_KERNEL_FORMAT_RAW,
+                KRUN_KERNEL_FORMAT,
                 initrd_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
                 cmdline_c.as_ptr(),
             ),

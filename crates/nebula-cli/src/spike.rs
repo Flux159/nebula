@@ -15,6 +15,13 @@ use nebula_core::{BootSpec, ConsoleSpec, NetSpec, VmSpec};
 const ALPINE_KERNEL_URL: &str =
     "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/netboot/vmlinuz-virt";
 
+/// Guest binaries match the HOST arch (the microVM runs the same ISA).
+const MUSL_TARGET: &str = if cfg!(target_arch = "aarch64") {
+    "aarch64-unknown-linux-musl"
+} else {
+    "x86_64-unknown-linux-musl"
+};
+
 pub fn run(backend_name: &str, cpus: u32, mem: u64) -> anyhow::Result<()> {
     let home = dirs_home().context("cannot determine $HOME")?;
     let cache = home.join(".nebula/cache");
@@ -258,10 +265,7 @@ fn find_vessel_init() -> anyhow::Result<PathBuf> {
         .map(PathBuf::from);
     if let Some(target) = target {
         for profile in ["release", "debug"] {
-            let p = target
-                .join("aarch64-unknown-linux-musl")
-                .join(profile)
-                .join("vessel-init");
+            let p = target.join(MUSL_TARGET).join(profile).join("vessel-init");
             if p.is_file() {
                 return Ok(p);
             }
@@ -269,6 +273,6 @@ fn find_vessel_init() -> anyhow::Result<PathBuf> {
     }
     bail!(
         "vessel-init (linux musl build) not found — run:\n  \
-         cargo build -p vessel-init --release --target aarch64-unknown-linux-musl"
+         cargo build -p vessel-init --release --target {MUSL_TARGET}"
     );
 }

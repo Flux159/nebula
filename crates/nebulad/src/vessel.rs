@@ -41,6 +41,25 @@ impl Vessel {
             tracing::info!(gib = eff.data_disk_gib, "created sparse data disk");
         }
 
+        // macOS: VZ (Rosetta + first-party balloon + vsock device).
+        // Linux: krun/KVM — guest vsock ports are mapped to host unix sockets
+        // (vsock_connect in the krun handle goes through them), there is no
+        // balloon/Rosetta, and TSI handles networking without a NIC.
+        let macos = cfg!(target_os = "macos");
+        let vsock_ports = if macos {
+            vec![]
+        } else {
+            let m = |port, name: &str| nebula_core::VsockPortMap {
+                port,
+                host_path: paths.run_dir().join(name),
+            };
+            vec![
+                m(VSOCK_PORT_CONTROL, "agent.vsock"),
+                m(VSOCK_PORT_SHELL, "shell.vsock"),
+                m(VSOCK_PORT_DOCKER, "docker.vsock"),
+                m(VSOCK_PORT_CONTAINERD, "containerd.vsock"),
+            ]
+        };
         let spec = VmSpec {
             name: "vessel".into(),
             cpus: eff.cpus,
@@ -61,20 +80,20 @@ impl Vessel {
                 },
             ],
             shares: home_share(),
-            net: NetSpec::Nat,
-            vsock: true,
+            net: if macos { NetSpec::Nat } else { NetSpec::None },
+            vsock: macos,
             console: ConsoleSpec::File(paths.console_log()),
-            balloon: true,
+            balloon: macos,
             rng: true,
-            rosetta: true,
+            rosetta: macos,
             gpu: false,
-            vsock_ports: vec![],
+            vsock_ports,
             backend: None,
             mac: None,
             machine_id: None,
         };
 
-        let backend = backend_by_name("vz")?;
+        let backend = backend_by_name(if macos { "vz" } else { "krun" })?;
 
         let mut vm = backend.create(&spec)?;
         let t0 = Instant::now();

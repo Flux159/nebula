@@ -443,13 +443,24 @@ fn main() -> anyhow::Result<()> {
             restore,
             control,
         } => {
-            if let Err(e) =
-                nebula_core::backend::vz::run_worker(&spec, restore.as_deref(), control.as_deref())
+            #[cfg(target_os = "macos")]
             {
-                eprintln!("vz-worker: {e}");
+                if let Err(e) = nebula_core::backend::vz::run_worker(
+                    &spec,
+                    restore.as_deref(),
+                    control.as_deref(),
+                ) {
+                    eprintln!("vz-worker: {e}");
+                    std::process::exit(1);
+                }
+                Ok(())
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (spec, restore, control);
+                eprintln!("vz-worker requires macOS (Virtualization.framework)");
                 std::process::exit(1);
             }
-            Ok(())
         }
     }
 }

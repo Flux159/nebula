@@ -62,6 +62,7 @@ impl Config {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn host_mem_bytes() -> u64 {
     let mut size: u64 = 0;
     let mut len = std::mem::size_of::<u64>();
@@ -80,6 +81,20 @@ fn host_mem_bytes() -> u64 {
     } else {
         8 * 1024 * 1024 * 1024
     }
+}
+
+#[cfg(target_os = "linux")]
+fn host_mem_bytes() -> u64 {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|m| {
+            m.lines().find_map(|l| {
+                l.strip_prefix("MemTotal:")
+                    .and_then(|v| v.trim().trim_end_matches(" kB").parse::<u64>().ok())
+            })
+        })
+        .map(|kib| kib * 1024)
+        .unwrap_or(8 * 1024 * 1024 * 1024)
 }
 
 #[cfg(test)]

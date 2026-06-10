@@ -148,6 +148,10 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
         opts.backend
     );
     anyhow::ensure!(
+        opts.backend != "vz" || cfg!(target_os = "macos"),
+        "--backend vz is Virtualization.framework (macOS-only) — use krun on Linux"
+    );
+    anyhow::ensure!(
         !(opts.gpu && opts.backend == "vz"),
         "GPU passthrough (Venus) is libkrun-only — drop --backend vz or --gpu"
     );
@@ -271,11 +275,7 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
         // Stable MAC + machine id: keep the DHCP lease across restarts and
         // keep the config identical to any saved machine state.
         mac: if vz { Some(random_mac()?) } else { None },
-        machine_id: if vz {
-            Some(nebula_core::backend::vz::new_machine_id())
-        } else {
-            None
-        },
+        machine_id: if vz { vz_machine_id() } else { None },
     };
     std::fs::write(dir.join("spec.json"), serde_json::to_vec_pretty(&spec)?)?;
     println!(
@@ -392,11 +392,13 @@ fn start_with(name: &str, restore: Option<&std::path::Path>) -> anyhow::Result<(
 
 /// One connection to a vz-worker's control socket. Sequential ops share the
 /// stream, so pause -> save -> resume cannot be interleaved by another client.
+#[cfg(target_os = "macos")]
 struct VmmCtl {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
 }
 
+#[cfg(target_os = "macos")]
 impl VmmCtl {
     fn connect(dir: &std::path::Path) -> anyhow::Result<Self> {
         let stream = UnixStream::connect(dir.join("vmm.sock"))
@@ -424,6 +426,15 @@ impl VmmCtl {
         );
         Ok(())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn vz_machine_id() -> Option<String> {
+    Some(nebula_core::backend::vz::new_machine_id())
+}
+#[cfg(not(target_os = "macos"))]
+fn vz_machine_id() -> Option<String> {
+    None
 }
 
 fn random_mac() -> anyhow::Result<String> {
@@ -647,8 +658,15 @@ fn engine_exec_long(script: &str) -> anyhow::Result<ExecResult> {
 }
 
 fn clone_file(from: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()> {
+    // APFS clonefile on macOS; reflink (btrfs/XFS) on Linux, both fall back
+    // to a plain copy below when CoW isn't available.
+    let flag = if cfg!(target_os = "macos") {
+        "-c"
+    } else {
+        "--reflink=auto"
+    };
     let status = std::process::Command::new("cp")
-        .arg("-c")
+        .arg(flag)
         .arg(from)
         .arg(to)
         .status()?;
@@ -804,6 +822,9 @@ pub fn snapshot(name: &str, label: &str, mode: SnapMode) -> anyhow::Result<()> {
         }
     };
 
+    #[cfg(not(target_os = "macos"))]
+    anyhow::ensure!(!memory, "memory snapshots require the vz backend (macOS)");
+    #[cfg(target_os = "macos")]
     if memory {
         std::fs::create_dir_all(&sdir)?;
         let t0 = Instant::now();
@@ -1004,7 +1025,7 @@ pub fn branch(name: &str, new_name: &str, label: Option<&str>, count: u32) -> an
             // must keep the saved config (MAC + machine id) — those branches
             // share the source's network identity (vsock control unaffected).
             nspec.mac = Some(random_mac()?);
-            nspec.machine_id = Some(nebula_core::backend::vz::new_machine_id());
+            nspec.machine_id = vz_machine_id();
         }
         std::fs::write(ndir.join("spec.json"), serde_json::to_vec_pretty(&nspec)?)?;
         match &src_state {
