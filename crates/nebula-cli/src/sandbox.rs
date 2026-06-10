@@ -17,6 +17,7 @@ pub struct SandboxOpts {
     pub cpus: u32,
     pub mem: u64,
     pub share_cwd: bool,
+    pub gpu: bool,
     pub cmd: Vec<String>,
 }
 
@@ -101,7 +102,7 @@ pub fn run(opts: SandboxOpts) -> anyhow::Result<()> {
         balloon: false,
         rng: true,
         rosetta: false,
-        gpu: false,
+        gpu: opts.gpu,
     };
 
     let backend = backend_by_name("krun")?;

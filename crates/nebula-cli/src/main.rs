@@ -106,6 +106,9 @@ enum SandboxAction {
         /// Share the current directory into the sandbox at /workdir.
         #[arg(long)]
         share_cwd: bool,
+        /// Attach the host GPU (virtio-gpu Venus, Vulkan->Metal).
+        #[arg(long)]
+        gpu: bool,
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
     },
@@ -151,11 +154,13 @@ fn main() -> anyhow::Result<()> {
                 cpus,
                 mem,
                 share_cwd,
+                gpu,
                 cmd,
             } => sandbox::run(sandbox::SandboxOpts {
                 cpus,
                 mem,
                 share_cwd,
+                gpu,
                 cmd,
             }),
         },

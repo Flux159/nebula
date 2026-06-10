@@ -39,6 +39,14 @@ limitations; routine TODOs live in code.)
 
 ## Needs discussion
 
+- **(2026-06-09, Phase 8) GPU shipped at device level; Venus userspaceis
+  follow-up.** `nebula sandbox run --gpu` attaches virtio-gpu via our GPU=1
+  fork build (card0 + renderD128 visible, virtio driver bound; brew
+  virglrenderer provides Venus host-side). Remaining for the headline AI
+  use case: a GPU guest image with mesa-vulkan(venus) + vulkan-tools, then
+  the llama.cpp Vulkan benchmark vs native Metal vs colima. Also note the
+  GPU=1 dylib is a local build artifact — distribution needs us to ship it.
+
 - **(2026-06-09, Phase 4) VZ balloon = high-water-mark semantics, not true
   reclaim.** Characterized on macOS 26: `VZVirtioTraditionalMemoryBalloonDevice`
   negotiates only MUST_TELL_HOST+DEFLATE_ON_OOM (no FREE_PAGE_HINT/REPORTING,
