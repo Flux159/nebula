@@ -291,8 +291,11 @@ enum SandboxAction {
 
 fn main() -> anyhow::Result<()> {
     // Default SIGPIPE handling: `nebula status | grep -q …` should not panic
-    // when the reader closes early.
-    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    // when the reader closes early. (No SIGPIPE on Windows.)
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL)
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -431,13 +434,22 @@ fn main() -> anyhow::Result<()> {
                 cmd,
             }),
         },
-        Commands::KrunWorker { spec } => match nebula_core::backend::krun::run_worker(&spec) {
-            Ok(never) => match never {},
-            Err(e) => {
-                eprintln!("krun-worker: {e}");
+        #[allow(unused_variables)]
+        Commands::KrunWorker { spec } => {
+            #[cfg(unix)]
+            match nebula_core::backend::krun::run_worker(&spec) {
+                Ok(never) => match never {},
+                Err(e) => {
+                    eprintln!("krun-worker: {e}");
+                    std::process::exit(1);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                eprintln!("krun-worker requires unix (the WHP worker is separate)");
                 std::process::exit(1);
             }
-        },
+        }
         Commands::VzWorker {
             spec,
             restore,

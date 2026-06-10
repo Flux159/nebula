@@ -177,8 +177,8 @@ pub fn shell() -> anyhow::Result<()> {
 /// Raw-mode TTY <-> stream pump shared by `nebula shell` and
 /// `nebula vessels shell`. Consumes the connection.
 pub fn interactive_pump(
-    mut reader: std::io::BufReader<std::os::unix::net::UnixStream>,
-    writer: std::os::unix::net::UnixStream,
+    mut reader: std::io::BufReader<nebula_core::ipc::IpcStream>,
+    writer: nebula_core::ipc::IpcStream,
 ) -> anyhow::Result<()> {
     let _raw = RawTerm::enable()?;
 
@@ -561,17 +561,26 @@ fn find_repo_vessel_out() -> anyhow::Result<PathBuf> {
     bail!("not in a nebula repo (vessel/out not found)")
 }
 
+#[cfg(unix)]
 pub fn term_size() -> Option<(u16, u16)> {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     let rc = unsafe { libc::ioctl(0, libc::TIOCGWINSZ, &mut ws) };
     (rc == 0 && ws.ws_col > 0).then_some((ws.ws_col, ws.ws_row))
 }
 
+/// TODO(windows): GetConsoleScreenBufferInfo; callers default to 80x24.
+#[cfg(windows)]
+pub fn term_size() -> Option<(u16, u16)> {
+    None
+}
+
 /// RAII raw-mode terminal guard.
+#[cfg(unix)]
 struct RawTerm {
     original: libc::termios,
 }
 
+#[cfg(unix)]
 impl RawTerm {
     fn enable() -> anyhow::Result<Self> {
         let mut original: libc::termios = unsafe { std::mem::zeroed() };
@@ -586,8 +595,21 @@ impl RawTerm {
     }
 }
 
+#[cfg(unix)]
 impl Drop for RawTerm {
     fn drop(&mut self) {
         unsafe { libc::tcsetattr(0, libc::TCSANOW, &self.original) };
+    }
+}
+
+/// TODO(windows): ConPTY/SetConsoleMode raw input. Line-buffered shells
+/// still work; interactive TUIs inside `nebula shell` won't until then.
+#[cfg(windows)]
+struct RawTerm;
+
+#[cfg(windows)]
+impl RawTerm {
+    fn enable() -> anyhow::Result<Self> {
+        Ok(Self)
     }
 }

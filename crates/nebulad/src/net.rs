@@ -171,8 +171,8 @@ fn spawn_port_forward(port: u16, target: ForwardTarget, stop: Arc<AtomicBool>) -
     true
 }
 
-/// pump() for a TcpStream<->UnixStream pair (the vsock proxy path).
-fn pump_unix(a: TcpStream, b: std::os::unix::net::UnixStream) {
+/// pump() for a TcpStream<->VsockStream pair (the vsock proxy path).
+fn pump_unix(a: TcpStream, b: nebula_core::backend::VsockStream) {
     let _ = a.set_nodelay(true);
     let (mut ar, mut aw) = (a.try_clone().unwrap(), a);
     let (mut br, mut bw) = (b.try_clone().unwrap(), b);
@@ -333,7 +333,7 @@ fn list_containers(docker_sock: &std::path::Path) -> anyhow::Result<Vec<Containe
 /// GET over a unix socket with Connection: close; handles Content-Length and
 /// chunked transfer encoding (the two things the docker API actually sends).
 fn http_get_unix(sock: &std::path::Path, path: &str) -> anyhow::Result<Vec<u8>> {
-    let mut stream = std::os::unix::net::UnixStream::connect(sock)?;
+    let mut stream = nebula_core::ipc::connect(sock)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     write!(
         stream,

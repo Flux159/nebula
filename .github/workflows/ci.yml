@@ -29,3 +29,25 @@ jobs:
         run: cargo test --workspace
       - name: Guest binaries (linux musl cross-build)
         run: cargo build -p vessel-init -p vessel-agent --release --target aarch64-unknown-linux-musl
+
+  linux-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Unit tests
+        run: cargo test --workspace
+
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (host stack compiles natively; WHP backend in progress)
+        run: cargo build --workspace

@@ -15,7 +15,10 @@ impl Paths {
                 root: PathBuf::from(custom),
             });
         }
-        let home = std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("HOME not set"))?;
+        // USERPROFILE is the Windows spelling of HOME.
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .ok_or_else(|| anyhow::anyhow!("HOME/USERPROFILE not set"))?;
         Ok(Self {
             root: PathBuf::from(home).join(".nebula"),
         })

@@ -43,7 +43,28 @@ fn nebulad_path() -> anyhow::Result<PathBuf> {
     Ok(candidate)
 }
 
+#[cfg(unix)]
+fn uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+#[cfg(not(unix))]
+fn uid() -> u32 {
+    0 // unreachable: all entry points bail on non-macOS first
+}
+
+fn unsupported_here() -> Option<anyhow::Result<()>> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    Some(Err(anyhow::anyhow!(
+        "autostart is macOS-only today (Linux: systemd unit, Windows: Task Scheduler — coming)"
+    )))
+}
+
 pub fn enable() -> anyhow::Result<()> {
+    if let Some(r) = unsupported_here() {
+        return r;
+    }
     let nebulad = nebulad_path()?;
     let logs = crate::client::nebula_home()?.join("logs");
     std::fs::create_dir_all(&logs)?;
@@ -80,7 +101,7 @@ pub fn enable() -> anyhow::Result<()> {
     std::fs::write(&path, plist)?;
 
     // bootout first so re-enabling picks up a changed binary path.
-    let uid = unsafe { libc::getuid() };
+    let uid = uid();
     let _ = std::process::Command::new("launchctl")
         .args(["bootout", &format!("gui/{uid}/{}", label())])
         .output();
@@ -95,7 +116,10 @@ pub fn enable() -> anyhow::Result<()> {
 }
 
 pub fn disable() -> anyhow::Result<()> {
-    let uid = unsafe { libc::getuid() };
+    if let Some(r) = unsupported_here() {
+        return r;
+    }
+    let uid = uid();
     let _ = std::process::Command::new("launchctl")
         .args(["bootout", &format!("gui/{uid}/{}", label())])
         .output();
@@ -108,8 +132,11 @@ pub fn disable() -> anyhow::Result<()> {
 }
 
 pub fn status() -> anyhow::Result<()> {
+    if let Some(r) = unsupported_here() {
+        return r;
+    }
     let installed = plist_path()?.is_file();
-    let uid = unsafe { libc::getuid() };
+    let uid = uid();
     let loaded = std::process::Command::new("launchctl")
         .args(["print", &format!("gui/{uid}/{}", label())])
         .output()

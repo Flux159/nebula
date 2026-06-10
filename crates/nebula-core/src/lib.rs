@@ -10,6 +10,7 @@ pub mod backend;
 pub mod dns;
 pub mod error;
 pub mod initramfs;
+pub mod ipc;
 pub mod proto;
 pub mod spec;
 

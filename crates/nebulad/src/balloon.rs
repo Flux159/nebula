@@ -70,6 +70,12 @@ pub fn host_footprint_mib() -> u64 {
     footprint_of(std::process::id() as i32) + vm_xpc_footprint_mib()
 }
 
+/// TODO(whp): real accounting via GetProcessMemoryInfo once workers exist.
+#[cfg(windows)]
+pub fn host_footprint_mib() -> u64 {
+    0
+}
+
 /// On Linux the krun workers ARE the VMs: our RSS plus every child
 /// krun-worker's RSS (from /proc) is the whole story.
 #[cfg(target_os = "linux")]

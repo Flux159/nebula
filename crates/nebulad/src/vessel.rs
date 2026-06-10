@@ -140,7 +140,7 @@ impl Vessel {
         self.vm.lock().unwrap().state()
     }
 
-    pub fn vsock_connect(&self, port: u32) -> anyhow::Result<std::os::unix::net::UnixStream> {
+    pub fn vsock_connect(&self, port: u32) -> anyhow::Result<nebula_core::backend::VsockStream> {
         Ok(self.vm.lock().unwrap().vsock_connect(port)?)
     }
 
@@ -167,7 +167,10 @@ impl Vessel {
     }
 
     /// Open the raw shell stream and send the ShellOpen header.
-    pub fn open_shell(&self, open: &ShellOpen) -> anyhow::Result<std::os::unix::net::UnixStream> {
+    pub fn open_shell(
+        &self,
+        open: &ShellOpen,
+    ) -> anyhow::Result<nebula_core::backend::VsockStream> {
         let stream = self.vm.lock().unwrap().vsock_connect(VSOCK_PORT_SHELL)?;
         let mut writer = stream.try_clone()?;
         let mut line = serde_json::to_string(open)?;

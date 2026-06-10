@@ -9,8 +9,8 @@
 //! Layout: ~/.nebula/vessels/<name>/{spec.json,pid,rootfs.img,data.img,
 //! console.log,agent.sock,shell.sock}
 
+use nebula_core::ipc::{self, IpcStream as UnixStream};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -132,13 +132,42 @@ fn read_spec(dir: &std::path::Path) -> anyhow::Result<VmSpec> {
     Ok(serde_json::from_str(&raw)?)
 }
 
+/// Portable "is this pid alive" / "kill it" (vessel workers).
+fn pid_alive(pid: i32) -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+            .unwrap_or(false)
+    }
+}
+
+fn pid_kill(pid: i32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .output();
+    }
+}
+
 fn live_pid(dir: &std::path::Path) -> Option<i32> {
     let pid: i32 = std::fs::read_to_string(dir.join("pid"))
         .ok()?
         .trim()
         .parse()
         .ok()?;
-    (unsafe { libc::kill(pid, 0) } == 0).then_some(pid)
+    pid_alive(pid).then_some(pid)
 }
 
 pub fn new(opts: NewOpts) -> anyhow::Result<()> {
@@ -401,7 +430,7 @@ struct VmmCtl {
 #[cfg(target_os = "macos")]
 impl VmmCtl {
     fn connect(dir: &std::path::Path) -> anyhow::Result<Self> {
-        let stream = UnixStream::connect(dir.join("vmm.sock"))
+        let stream = ipc::connect(&dir.join("vmm.sock"))
             .context("vessel has no live vz-worker control socket")?;
         stream.set_read_timeout(Some(Duration::from_secs(120)))?;
         let writer = stream.try_clone()?;
@@ -458,14 +487,14 @@ pub fn stop(name: &str) -> anyhow::Result<()> {
     let _ = agent_request(&dir, &AgentRequest::Shutdown);
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if unsafe { libc::kill(pid, 0) } != 0 {
+        if !pid_alive(pid) {
             println!("vessel `{name}` stopped");
             let _ = std::fs::remove_file(dir.join("pid"));
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    unsafe { libc::kill(pid, libc::SIGKILL) };
+    pid_kill(pid);
     let _ = std::fs::remove_file(dir.join("pid"));
     println!("vessel `{name}` stopped (forced)");
     Ok(())
@@ -1239,7 +1268,7 @@ pub fn shell(name: &str) -> anyhow::Result<()> {
     }
     let dir = dir_of(name)?;
     anyhow::ensure!(live_pid(&dir).is_some(), "vessel `{name}` is not running");
-    let stream = UnixStream::connect(dir.join("shell.sock"))?;
+    let stream = ipc::connect(&dir.join("shell.sock"))?;
     let (cols, rows) = crate::commands::term_size().unwrap_or((80, 24));
     let open = ShellOpen {
         cmd: "/bin/sh".into(),
@@ -1255,7 +1284,7 @@ pub fn shell(name: &str) -> anyhow::Result<()> {
 }
 
 fn agent_request(dir: &std::path::Path, req: &AgentRequest) -> anyhow::Result<AgentResponse> {
-    let stream = UnixStream::connect(dir.join("agent.sock"))?;
+    let stream = ipc::connect(&dir.join("agent.sock"))?;
     stream.set_read_timeout(Some(Duration::from_secs(65)))?;
     let mut writer = stream.try_clone()?;
     let mut line = serde_json::to_string(req)?;

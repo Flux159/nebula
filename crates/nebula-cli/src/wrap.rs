@@ -7,6 +7,7 @@
 //! user's own contexts never change. (`nebula setup <tool>` remains the way
 //! to switch the plain commands over persistently.)
 
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 use anyhow::{bail, Context};
@@ -89,10 +90,23 @@ fn exec(tool: &str, args: &[String], env: &[(&str, String)]) -> anyhow::Result<(
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let err = cmd.exec(); // only returns on failure
-    Err(err).with_context(|| {
-        format!(
-            "could not run `{tool}` — not on your PATH and no bundled copy found (looked for {resolved})"
-        )
-    })
+    #[cfg(unix)]
+    {
+        let err = cmd.exec(); // only returns on failure
+        Err(err).with_context(|| {
+            format!(
+                "could not run `{tool}` — not on your PATH and no bundled copy found (looked for {resolved})"
+            )
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        // No execve on Windows: run as a child and mirror its exit code.
+        let status = cmd.status().with_context(|| {
+            format!(
+                "could not run `{tool}` — not on your PATH and no bundled copy found (looked for {resolved})"
+            )
+        })?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }

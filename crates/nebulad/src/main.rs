@@ -25,6 +25,7 @@ fn main() -> anyhow::Result<()> {
     // The krun backend re-execs the CURRENT binary as its VM worker
     // (krun_start_enter takes over the process) — when the engine runs on
     // krun (Linux), that binary is nebulad, so route the arg before clap.
+    #[cfg(unix)]
     {
         let mut args = std::env::args().skip(1);
         if args.next().as_deref() == Some("krun-worker") {
@@ -91,5 +92,9 @@ fn read_live_pid(paths: &paths::Paths) -> Option<u32> {
         .parse()
         .ok()?;
     // Liveness probe; stale pid files are common after crashes.
-    (unsafe { libc::kill(pid as i32, 0) } == 0).then_some(pid)
+    #[cfg(unix)]
+    return (unsafe { libc::kill(pid as i32, 0) } == 0).then_some(pid);
+    // Windows: the control-socket probe in server::serve is the real guard.
+    #[cfg(windows)]
+    Some(pid)
 }

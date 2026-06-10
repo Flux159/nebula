@@ -130,7 +130,10 @@ pub fn install(assume_yes: bool) -> anyhow::Result<()> {
         }
         let dst = bin.join(tool);
         let _ = std::fs::remove_file(&dst); // refresh stale links (moved app)
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&src, &dst)?;
+        #[cfg(windows)]
+        std::fs::copy(&src, &dst)?; // symlinks need privileges on Windows
     }
 
     if !profile_has_marker()? {

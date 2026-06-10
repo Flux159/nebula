@@ -1,7 +1,7 @@
 //! Client for the nebulad control socket.
 
+use nebula_core::ipc::{self, IpcStream as UnixStream};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -13,7 +13,11 @@ pub fn nebula_home() -> anyhow::Result<PathBuf> {
     if let Some(custom) = std::env::var_os("NEBULA_HOME") {
         return Ok(PathBuf::from(custom));
     }
-    Ok(PathBuf::from(std::env::var_os("HOME").context("HOME not set")?).join(".nebula"))
+    // USERPROFILE is the Windows spelling of HOME.
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .context("HOME/USERPROFILE not set")?;
+    Ok(PathBuf::from(home).join(".nebula"))
 }
 
 pub fn control_sock() -> anyhow::Result<PathBuf> {
@@ -22,7 +26,7 @@ pub fn control_sock() -> anyhow::Result<PathBuf> {
 
 pub fn connect() -> anyhow::Result<UnixStream> {
     let path = control_sock()?;
-    UnixStream::connect(&path)
+    ipc::connect(&path)
         .with_context(|| format!("nebulad is not running (no socket at {})", path.display()))
 }
 
@@ -51,6 +55,6 @@ pub fn request_on(
 
 pub fn daemon_running() -> bool {
     control_sock()
-        .map(|p| UnixStream::connect(p).is_ok())
+        .map(|p| ipc::connect(&p).is_ok())
         .unwrap_or(false)
 }

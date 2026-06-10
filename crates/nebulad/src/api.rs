@@ -257,7 +257,7 @@ fn respond_raw(writer: &mut TcpStream, status: u16, body: &[u8]) -> anyhow::Resu
 
 /// GET against the proxied docker unix socket (Connection: close).
 fn docker_get(sock: &std::path::Path, path: &str) -> anyhow::Result<Vec<u8>> {
-    let mut stream = std::os::unix::net::UnixStream::connect(sock)?;
+    let mut stream = nebula_core::ipc::connect(sock)?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
     write!(
         stream,

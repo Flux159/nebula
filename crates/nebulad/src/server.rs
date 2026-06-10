@@ -1,8 +1,8 @@
 //! Control socket server: JSON-lines over a unix socket, one request per
 //! connection (the `shell` op upgrades the connection to a raw byte bridge).
 
+use nebula_core::ipc::{self, IpcListener, IpcStream};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -16,14 +16,13 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
     // A live sibling answers on the socket; a stale file from a crash does
     // not. Never steal a live daemon's socket — that orphans it (and its VM)
     // while it still holds the DNS/k8s/API ports.
-    if UnixStream::connect(&sock_path).is_ok() {
+    if ipc::connect(&sock_path).is_ok() {
         anyhow::bail!(
             "another nebulad is already serving {} — refusing to start",
             sock_path.display()
         );
     }
-    let _ = std::fs::remove_file(&sock_path);
-    let listener = UnixListener::bind(&sock_path)?;
+    let listener = ipc::listen(&sock_path)?;
     tracing::info!(sock = %sock_path.display(), "control socket ready");
 
     let vessel = Arc::new(vessel);
@@ -114,7 +113,7 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
 }
 
 fn handle(
-    conn: UnixStream,
+    conn: IpcStream,
     vessel: &Vessel,
     balloon: &crate::balloon::BalloonState,
     instance_net: &InstanceNet,
@@ -232,8 +231,7 @@ fn handle(
 /// port (which the agent forwards to the matching guest unix socket).
 fn spawn_unix_proxy(vessel: Arc<Vessel>, sock_path: std::path::PathBuf, vsock_port: u32) {
     std::thread::spawn(move || {
-        let _ = std::fs::remove_file(&sock_path);
-        let listener = match UnixListener::bind(&sock_path) {
+        let listener = match ipc::listen(&sock_path) {
             Ok(l) => l,
             Err(e) => {
                 tracing::error!("proxy bind {} failed: {e}", sock_path.display());
@@ -256,7 +254,7 @@ fn spawn_unix_proxy(vessel: Arc<Vessel>, sock_path: std::path::PathBuf, vsock_po
     });
 }
 
-fn respond(writer: &mut UnixStream, resp: &DaemonResponse) -> anyhow::Result<()> {
+fn respond(writer: &mut IpcStream, resp: &DaemonResponse) -> anyhow::Result<()> {
     let mut line = serde_json::to_string(resp)?;
     line.push('\n');
     writer.write_all(line.as_bytes())?;
@@ -265,9 +263,9 @@ fn respond(writer: &mut UnixStream, resp: &DaemonResponse) -> anyhow::Result<()>
 
 /// Bidirectional byte pump between the CLI connection and the vsock stream.
 fn bridge(
-    mut client_r: BufReader<UnixStream>,
-    mut client_w: UnixStream,
-    vsock: UnixStream,
+    mut client_r: BufReader<IpcStream>,
+    mut client_w: IpcStream,
+    vsock: nebula_core::backend::VsockStream,
 ) -> anyhow::Result<()> {
     let mut vsock_w = vsock.try_clone()?;
     let mut vsock_r = vsock;

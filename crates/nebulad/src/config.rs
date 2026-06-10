@@ -83,6 +83,12 @@ fn host_mem_bytes() -> u64 {
     }
 }
 
+#[cfg(windows)]
+fn host_mem_bytes() -> u64 {
+    // TODO(whp): GlobalMemoryStatusEx via windows-sys once the backend lands.
+    8 * 1024 * 1024 * 1024
+}
+
 #[cfg(target_os = "linux")]
 fn host_mem_bytes() -> u64 {
     std::fs::read_to_string("/proc/meminfo")
