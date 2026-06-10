@@ -429,6 +429,57 @@ pub fn install_image(kernel: Option<PathBuf>, rootfs: Option<PathBuf>) -> anyhow
     Ok(())
 }
 
+/// Default release channel for guest images (override: NEBULA_IMAGES_URL).
+const IMAGES_BASE_URL: &str = "https://github.com/Flux159/nebula/releases/latest/download";
+
+/// Download kernel + rootfs artifacts, verify checksums, install them.
+/// This is the end-user bootstrap: no Docker required on the host — the
+/// images are built in CI (see .github/workflows/guest-images.yml).
+pub fn download_images() -> anyhow::Result<()> {
+    let base = std::env::var("NEBULA_IMAGES_URL").unwrap_or_else(|_| IMAGES_BASE_URL.into());
+    let home = client::nebula_home()?;
+    let tmp = home.join("cache/image-download");
+    std::fs::create_dir_all(&tmp)?;
+
+    println!("downloading guest images from {base} …");
+    for name in ["SHA256SUMS", "kernel-Image.gz", "rootfs.img.gz"] {
+        let status = std::process::Command::new("curl")
+            .args(["-fL", "--retry", "3", "--progress-bar", "-o"])
+            .arg(tmp.join(name))
+            .arg(format!("{base}/{name}"))
+            .status()?;
+        anyhow::ensure!(status.success(), "download failed: {base}/{name}");
+    }
+
+    // Verify before touching anything.
+    let status = std::process::Command::new("shasum")
+        .args(["-a", "256", "-c", "SHA256SUMS"])
+        .current_dir(&tmp)
+        .status()?;
+    anyhow::ensure!(
+        status.success(),
+        "checksum verification FAILED — refusing to install"
+    );
+
+    let gunzip = |src: &std::path::Path, dst: &std::path::Path| -> anyhow::Result<()> {
+        let out = std::fs::File::create(dst)?;
+        let status = std::process::Command::new("gzip")
+            .arg("-dc")
+            .stdin(std::fs::File::open(src)?)
+            .stdout(out)
+            .status()?;
+        anyhow::ensure!(status.success(), "decompress failed for {}", src.display());
+        Ok(())
+    };
+    let kernel = tmp.join("Image");
+    let rootfs = tmp.join("rootfs.img");
+    gunzip(&tmp.join("kernel-Image.gz"), &kernel)?;
+    gunzip(&tmp.join("rootfs.img.gz"), &rootfs)?;
+    install_image(Some(kernel), Some(rootfs))?;
+    let _ = std::fs::remove_dir_all(&tmp);
+    Ok(())
+}
+
 fn ensure_images_installed() -> anyhow::Result<()> {
     let home = client::nebula_home()?;
     if home.join("kernel/Image").is_file() && home.join("disks/rootfs.img").is_file() {
@@ -441,10 +492,9 @@ fn ensure_images_installed() -> anyhow::Result<()> {
             return install_image(None, None);
         }
     }
-    bail!(
-        "guest images missing — build them first:\n  \
-         vessel/build-kernel.sh && vessel/build-rootfs.sh && nebula install-image"
-    );
+    // End users: fetch the CI-built artifacts (no Docker needed).
+    println!("guest images not found locally — fetching the released images");
+    download_images()
 }
 
 /// Dev-mode discovery of <repo>/vessel/out relative to the running binary.

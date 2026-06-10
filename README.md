@@ -78,6 +78,16 @@ Measured on an M-series MacBook Pro (16 cores), release build, 2026-06:
 
 Reproduce with `scripts/test-phase*.sh`; details in `tasks/spike-notes.md`.
 
+## How installs bootstrap (no Docker required)
+
+The guest kernel + rootfs are built by CI on arm64 Linux runners
+(`.github/workflows/guest-images.yml`) and attached to GitHub Releases as
+gzip artifacts (~16 MB kernel + ~160 MB rootfs — the 2 GB ext4 image is
+mostly sparse zeros). On first `nebula up`, the CLI downloads them, verifies
+SHA-256 checksums, and installs to `~/.nebula` (a pristine copy is kept for
+`nebula vessels reset`). Developers working from a checkout build the same
+images locally with Docker via `vessel/build-*.sh`.
+
 ## Building from source
 
 Requirements: Apple Silicon Mac, Rust stable + `aarch64-unknown-linux-musl`

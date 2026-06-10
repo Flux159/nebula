@@ -109,6 +109,9 @@ enum Commands {
         kernel: Option<PathBuf>,
         #[arg(long)]
         rootfs: Option<PathBuf>,
+        /// Download the released images instead of using local files.
+        #[arg(long)]
+        download: bool,
     },
     /// Manage persistent named microVMs (separate from the engine vessel).
     Vessels {
@@ -250,7 +253,17 @@ fn main() -> anyhow::Result<()> {
         Commands::Ui => autostart::open_ui(),
         Commands::Quickstart => commands::quickstart(),
         Commands::Doctor => commands::doctor(),
-        Commands::InstallImage { kernel, rootfs } => commands::install_image(kernel, rootfs),
+        Commands::InstallImage {
+            kernel,
+            rootfs,
+            download,
+        } => {
+            if download {
+                commands::download_images()
+            } else {
+                commands::install_image(kernel, rootfs)
+            }
+        }
         Commands::Vessels { action } => match action {
             VesselsAction::New {
                 name,
