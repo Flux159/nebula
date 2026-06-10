@@ -10,37 +10,12 @@ mod sandbox;
 mod spike;
 mod wrap;
 
-const QUICKSTART: &str = "\
-\x1b[1mQUICKSTART\x1b[0m
-  Engine:
-    nebula up                          start the engine (~0.6s)
-    nebula autostart enable            start it at login instead
-
-  Docker:
-    nebula setup docker                point `docker` at Nebula (revert: nebula revert docker)
-    docker run -d -p 8080:80 nginx     then open http://localhost:8080
-    nebula docker ps                   …or one-off, without changing contexts
-
-  Kubernetes (k3s, started on demand):
-    nebula setup kubectl               point `kubectl` at Nebula (revert: nebula revert kubectl)
-    kubectl create deployment web --image=nginx
-    kubectl expose deployment web --port 80 --type NodePort
-    nebula kubectl get nodes           …or one-off, without changing contexts
-
-  Helm:
-    nebula helm install my-redis oci://registry-1.docker.io/bitnamicharts/redis
-
-  Isolated microVMs:
-    nebula sandbox run -- uname -a     boots, runs, and exits in ~250ms
-
-  See where you stand anytime: nebula status";
-
 #[derive(Parser)]
 #[command(
     name = "nebula",
     version,
     about = "Containers, Kubernetes, and microVMs on macOS",
-    after_help = QUICKSTART
+    after_help = "Don't know where to start? Run: nebula quickstart"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -123,6 +98,8 @@ enum Commands {
     },
     /// Open the Nebula desktop app.
     Ui,
+    /// Show short guides for getting started (engine, docker, k8s, helm).
+    Quickstart,
     /// Diagnose common setup problems.
     Doctor,
     /// Install guest images (kernel + rootfs) into ~/.nebula.
@@ -217,6 +194,7 @@ fn main() -> anyhow::Result<()> {
             AutostartAction::Status => autostart::status(),
         },
         Commands::Ui => autostart::open_ui(),
+        Commands::Quickstart => commands::quickstart(),
         Commands::Doctor => commands::doctor(),
         Commands::InstallImage { kernel, rootfs } => commands::install_image(kernel, rootfs),
         Commands::Sandbox { action } => match action {

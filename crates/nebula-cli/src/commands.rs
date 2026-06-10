@@ -248,6 +248,55 @@ pub fn stats(watch: bool) -> anyhow::Result<()> {
     }
 }
 
+pub fn quickstart() -> anyhow::Result<()> {
+    let bold = |s: &str| format!("\x1b[1m{s}\x1b[0m");
+    let running = client::daemon_running();
+
+    println!("{}", bold("NEBULA QUICKSTART"));
+    println!();
+    println!("{}", bold("1. Engine"));
+    if running {
+        println!("   ✓ the engine is running");
+    } else {
+        println!("   nebula up                          start the engine (~0.6s)");
+    }
+    println!("   nebula autostart enable            start it at login + restart on failure");
+    println!("   nebula status                      see where you stand anytime");
+    println!();
+    println!("{}", bold("2. Docker"));
+    println!("   nebula setup docker                point `docker` at Nebula");
+    println!("   docker run -d -p 8080:80 nginx     test it: http://localhost:8080");
+    println!("   nebula revert docker               put docker back exactly as it was");
+    println!("   nebula docker ps                   one-off, never touches your contexts");
+    println!();
+    println!("{}", bold("3. Kubernetes (k3s, starts on demand)"));
+    println!("   nebula setup kubectl               point `kubectl` at Nebula");
+    println!("   kubectl create deployment web --image=nginx");
+    println!("   kubectl expose deployment web --port 80 --type NodePort");
+    println!("   nebula revert kubectl              restore your previous context");
+    println!("   nebula kubectl get nodes           one-off, never touches your contexts");
+    println!();
+    println!("{}", bold("4. Helm"));
+    println!("   nebula helm install my-redis oci://registry-1.docker.io/bitnamicharts/redis");
+    println!();
+    println!("{}", bold("5. Isolated microVMs"));
+    println!("   nebula sandbox run -- uname -a     boots, runs, exits in ~250ms");
+    println!("   nebula sandbox run --gpu -- ls /dev/dri");
+    println!();
+    println!("{}", bold("6. Desktop app & stats"));
+    println!("   nebula ui                          open the app");
+    println!("   nebula stats --watch               watch the memory balloon breathe");
+    println!();
+
+    // End with live status so the user knows their immediate next move.
+    if running {
+        status()?;
+    } else {
+        println!("engine is {} — start with: nebula up", bold("stopped"));
+    }
+    Ok(())
+}
+
 pub fn logs(follow: bool) -> anyhow::Result<()> {
     let console = client::nebula_home()?.join("logs/vessel-console.log");
     anyhow::ensure!(console.is_file(), "no console log at {}", console.display());
