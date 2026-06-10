@@ -201,7 +201,8 @@ mod init {
         // DHCP-provided nameserver is dead weight. Public resolvers until the
         // Phase 3 host-backed resolver lands (see tasks/issues.md).
         std::thread::spawn(|| {
-            let want = "nameserver 1.1.1.1\nnameserver 8.8.8.8\n";
+            // The agent's DNS relay (127.0.0.1:53) resolves via the HOST.
+            let want = "nameserver 127.0.0.1\n";
             for _ in 0..20 {
                 std::thread::sleep(Duration::from_millis(500));
                 let cur = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
@@ -287,6 +288,23 @@ mod init {
         }
     }
 
+    /// Mount the host home share at the same absolute path as on macOS, so
+    /// `docker -v ~/x:/x` paths resolve identically on both sides.
+    fn setup_home_share() {
+        let Some(home) = std::env::var_os("NEBULA_HOME") else {
+            return;
+        };
+        let home = home.to_string_lossy().into_owned();
+        let _ = std::fs::create_dir_all(&home);
+        let status = std::process::Command::new("/bin/mount")
+            .args(["-t", "virtiofs", "home", &home])
+            .status();
+        match status {
+            Ok(s) if s.success() => println!("nebula-init: home share mounted at {home}"),
+            _ => eprintln!("nebula-init: home share mount failed"),
+        }
+    }
+
     fn vessel_mode() -> ! {
         attach_console();
         let _ = std::fs::write("/proc/sys/kernel/hostname", "nebula");
@@ -294,6 +312,7 @@ mod init {
         setup_data_disk();
         setup_network();
         setup_rosetta();
+        setup_home_share();
         // dockerd requires forwarding for container NAT.
         let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
         println!(

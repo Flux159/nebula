@@ -16,6 +16,9 @@ pub const VSOCK_PORT_SHELL: u32 = 1025;
 pub const VSOCK_PORT_DOCKER: u32 = 2375;
 /// Stream proxy to the guest's /run/containerd/containerd.sock.
 pub const VSOCK_PORT_CONTAINERD: u32 = 2376;
+/// UDP port on the host (NAT gateway address) where nebulad answers DNS
+/// relayed by the guest agent's 127.0.0.1:53 proxy.
+pub const HOST_DNS_UDP_PORT: u16 = 42053;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -55,6 +58,9 @@ pub struct Health {
     pub agent_version: String,
     pub kernel: String,
     pub uptime_secs: u64,
+    /// Guest eth0 IPv4 address (used by the host port forwarder).
+    #[serde(default)]
+    pub ip: Option<String>,
 }
 
 /// Guest memory signals consumed by the balloon controller (Phase 4).

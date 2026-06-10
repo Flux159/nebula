@@ -57,3 +57,10 @@ Findings from the dual-backend bring-up (0.3/0.4). Living doc.
 - Alpine `CONFIG_VIRTIO_MMIO=m` (both virt and lts kernels): any virtio device
   under libkrun needs the module first; we bundle+insmod it in the spike
   initramfs. Our Phase 1 kernel builds it `=y`.
+
+## Phase 3 perf snapshot (M-series, 2026-06-09)
+
+- virtiofs (home share) sequential write: ~1.3 GB/s (buffered)
+- virtio-blk (data disk) direct write: ~276 MB/s
+- virtiofs small-file churn: 1000 creates in 0.30s (~3.3k/s)
+- Vessel cold boot to healthy agent: ~620ms; spike VMs: vz ~330ms, krun ~230ms

@@ -4,6 +4,7 @@
 //! Crash recovery / auto-restart hardening lands in Phase 6.
 
 mod config;
+mod net;
 mod paths;
 mod server;
 mod vessel;

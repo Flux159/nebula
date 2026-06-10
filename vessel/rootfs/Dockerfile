@@ -18,7 +18,7 @@ RUN printf 'version = 2\nroot = "/var/lib/nebula/containerd"\nstate = "/run/cont
     > /etc/containerd/config.toml
 
 # dockerd: containerd image store so docker/nerdctl/k3s see one image set.
-RUN printf '{\n  "data-root": "/var/lib/nebula/docker",\n  "userland-proxy-path": "/usr/bin/docker-proxy",\n  "features": { "containerd-snapshotter": true }\n}\n' \
+RUN printf '{\n  "data-root": "/var/lib/nebula/docker",\n  "userland-proxy-path": "/usr/bin/docker-proxy",\n  "dns": ["172.17.0.1"],\n  "features": { "containerd-snapshotter": true }\n}\n' \
     > /etc/docker/daemon.json
 
 FROM alpine:3.22 AS build

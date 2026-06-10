@@ -28,6 +28,9 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
         VSOCK_PORT_CONTAINERD,
     );
 
+    // DNS resolver + dynamic port forwarding (Phase 3).
+    let _net = crate::net::start(vessel.clone(), paths.docker_sock());
+
     for conn in listener.incoming() {
         if shutdown.load(Ordering::SeqCst) {
             break;

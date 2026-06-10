@@ -48,13 +48,19 @@ impl Vessel {
             boot: BootSpec::Kernel {
                 kernel,
                 initramfs: None,
-                cmdline: "console=hvc0 root=/dev/vda rw rootfstype=ext4 init=/sbin/nebula-init reboot=k panic=10".into(),
+                cmdline: vessel_cmdline(),
             },
             disks: vec![
-                DiskSpec { path: rootfs, read_only: false },
-                DiskSpec { path: paths.data_img(), read_only: false },
+                DiskSpec {
+                    path: rootfs,
+                    read_only: false,
+                },
+                DiskSpec {
+                    path: paths.data_img(),
+                    read_only: false,
+                },
             ],
-            shares: vec![],
+            shares: home_share(),
             net: NetSpec::Nat,
             vsock: true,
             console: ConsoleSpec::File(paths.console_log()),
@@ -64,6 +70,7 @@ impl Vessel {
         };
 
         let backend = backend_by_name("vz")?;
+
         let mut vm = backend.create(&spec)?;
         let t0 = Instant::now();
         vm.start()?;
@@ -149,4 +156,28 @@ impl Vessel {
         vm.wait_for(VmState::Stopped, Duration::from_secs(10))?;
         Ok(())
     }
+}
+
+/// Share the user's home directory into the Vessel at the same path, so bind
+/// mounts like `-v ~/code/app:/app` resolve identically on host and guest.
+fn home_share() -> Vec<nebula_core::ShareSpec> {
+    match std::env::var("HOME") {
+        Ok(home) if std::path::Path::new(&home).is_dir() => vec![nebula_core::ShareSpec {
+            tag: "home".into(),
+            host_path: home.into(),
+            read_only: false,
+        }],
+        _ => vec![],
+    }
+}
+
+fn vessel_cmdline() -> String {
+    let mut cmdline = String::from(
+        "console=hvc0 root=/dev/vda rw rootfstype=ext4 init=/sbin/nebula-init reboot=k panic=10",
+    );
+    if let Ok(home) = std::env::var("HOME") {
+        // Kernel passes unknown key=value words to init's environment.
+        cmdline.push_str(&format!(" NEBULA_HOME={home}"));
+    }
+    cmdline
 }

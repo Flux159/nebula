@@ -72,7 +72,98 @@ mod agent {
                 handle_containerd_proxy,
             )
         });
+        std::thread::spawn(dns_proxy);
         serve_loop("control", VSOCK_PORT_CONTROL, handle_control)
+    }
+
+    /// Relay DNS: guest 127.0.0.1:53 (UDP) <-> nebulad at the NAT gateway.
+    /// Queries resolve on the HOST (getaddrinfo), so VPN/split-horizon DNS
+    /// behaves exactly like the Mac's own.
+    fn dns_proxy() {
+        use std::net::UdpSocket;
+        let Some(gw) = default_gateway() else {
+            eprintln!("vessel-agent: dns: no default gateway; relay disabled");
+            return;
+        };
+        let upstream = format!("{gw}:{HOST_DNS_UDP_PORT}");
+        let sock = loop {
+            // 0.0.0.0: containers query via the docker0 address (daemon.json
+            // sets "dns": ["172.17.0.1"]), the guest itself via 127.0.0.1.
+            match UdpSocket::bind("0.0.0.0:53") {
+                Ok(s) => break s,
+                Err(e) => {
+                    eprintln!("vessel-agent: dns bind failed: {e}; retrying");
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+        };
+        eprintln!("vessel-agent: dns relay 127.0.0.1:53 -> {upstream}");
+        let mut buf = [0u8; 1500];
+        loop {
+            let Ok((n, client)) = sock.recv_from(&mut buf) else {
+                continue;
+            };
+            // One ephemeral upstream socket per query keeps responses matched.
+            let Ok(up) = UdpSocket::bind("0.0.0.0:0") else {
+                continue;
+            };
+            let _ = up.set_read_timeout(Some(Duration::from_secs(4)));
+            if up.send_to(&buf[..n], &upstream).is_err() {
+                continue;
+            }
+            let mut resp = [0u8; 1500];
+            if let Ok(rn) = up.recv(&mut resp) {
+                let _ = sock.send_to(&resp[..rn], client);
+            }
+        }
+    }
+
+    /// Default gateway from /proc/net/route (hex little-endian).
+    fn default_gateway() -> Option<std::net::Ipv4Addr> {
+        for _ in 0..50 {
+            if let Ok(route) = std::fs::read_to_string("/proc/net/route") {
+                for line in route.lines().skip(1) {
+                    let cols: Vec<&str> = line.split_whitespace().collect();
+                    if cols.len() >= 3 && cols[1] == "00000000" {
+                        if let Ok(gw) = u32::from_str_radix(cols[2], 16) {
+                            if gw != 0 {
+                                return Some(std::net::Ipv4Addr::from(gw.to_le_bytes()));
+                            }
+                        }
+                    }
+                }
+            }
+            // DHCP may not have installed the route yet.
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        None
+    }
+
+    /// eth0 IPv4 via getifaddrs.
+    fn eth0_ip() -> Option<String> {
+        unsafe {
+            let mut addrs: *mut libc::ifaddrs = std::ptr::null_mut();
+            if libc::getifaddrs(&mut addrs) != 0 {
+                return None;
+            }
+            let mut cur = addrs;
+            let mut found = None;
+            while !cur.is_null() {
+                let ifa = &*cur;
+                if !ifa.ifa_name.is_null() && !ifa.ifa_addr.is_null() {
+                    let name = std::ffi::CStr::from_ptr(ifa.ifa_name).to_string_lossy();
+                    if name == "eth0" && (*ifa.ifa_addr).sa_family == libc::AF_INET as u16 {
+                        let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+                        let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+                        found = Some(ip.to_string());
+                        break;
+                    }
+                }
+                cur = ifa.ifa_next;
+            }
+            libc::freeifaddrs(addrs);
+            found
+        }
     }
 
     fn handle_docker_proxy(conn: std::fs::File) {
@@ -221,6 +312,7 @@ mod agent {
             agent_version: env!("CARGO_PKG_VERSION").into(),
             kernel: release,
             uptime_secs: uptime as u64,
+            ip: eth0_ip(),
         }
     }
 
