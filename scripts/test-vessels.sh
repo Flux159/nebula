@@ -28,15 +28,15 @@ check "vz vessel boots"              "$NEBULA vessels new tv-vz --backend vz --m
 check "vz backend recorded"          "$NEBULA vessels info tv-vz | grep -q 'backend:  vz'"
 check "vz outbound network"          "$NEBULA vessels exec tv-vz -- wget -q -T 10 -O /dev/null http://1.1.1.1"
 
-echo "--- disk snapshots still work on both"
-check "krun disk snapshot"           "$NEBULA vessels snapshot tv-krun base"
-check "vz disk snapshot"             "$NEBULA vessels snapshot tv-vz base"
+echo "--- snapshot defaults: memory+disk on vz, graceful disk-only elsewhere"
+check "krun snapshot (auto->disk)"   "out=\$($NEBULA vessels snapshot tv-krun base); echo \"\$out\" | grep -q 'disk-only'"
+check "vz --no-memory is disk-only"  "$NEBULA vessels snapshot tv-vz base --no-memory && { $NEBULA vessels snapshots tv-vz | grep 'base' | grep -vq memory; }"
 
-echo "--- live memory snapshot (vz)"
+echo "--- live memory snapshot (vz, the default)"
 # RAM-only witnesses: a tmpfs file and a background process. Disk snapshots
 # cannot preserve either; only a true memory-state snapshot can.
 check "plant RAM-only state"         "$NEBULA vessels exec tv-vz -- sh -c 'echo golden > /tmp/witness; nohup sleep 86400 >/dev/null 2>&1 & sleep 0.2; pgrep -x sleep'"
-check "memory snapshot, vm stays up" "$NEBULA vessels snapshot tv-vz cp --memory && $NEBULA vessels exec tv-vz -- true"
+check "default snapshot is memory"   "$NEBULA vessels snapshot tv-vz cp | grep -q 'memory snapshot' && $NEBULA vessels exec tv-vz -- true"
 check "snapshot listed with memory"  "$NEBULA vessels snapshots tv-vz | grep -q 'cp.*memory'"
 check "corrupt RAM state"            "$NEBULA vessels exec tv-vz -- sh -c 'echo corrupted > /tmp/witness; pkill -x sleep; true'"
 check "restore resumes mid-exec"     "$NEBULA vessels restore tv-vz cp | grep -q 'live resume'"
@@ -54,6 +54,7 @@ echo "--- guardrails"
 # otherwise fail the pipeline even when grep matches.
 check "--memory rejects krun vessel" "out=\$($NEBULA vessels snapshot tv-krun mem --memory 2>&1); echo \"\$out\" | grep -q 'need a vz vessel'"
 check "--memory rejects stopped vm"  "$NEBULA vessels stop tv-vz && out=\$($NEBULA vessels snapshot tv-vz mem2 --memory 2>&1); echo \"\$out\" | grep -q 'not running'"
+check "auto on stopped vz -> disk"   "out=\$($NEBULA vessels snapshot tv-vz coldsnap); echo \"\$out\" | grep -q 'disk-only'"
 check "stopped vz cold-boots again"  "$NEBULA vessels start tv-vz && $NEBULA vessels exec tv-vz -- true"
 
 for v in tv-krun tv-vz tv-fork-1 tv-fork-2; do

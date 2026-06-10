@@ -5,6 +5,9 @@
 #
 # Output (default dist-embed/):
 #   bin/nebula bin/nebulad          signed sidecar binaries
+#   lib/libkrun.dylib (+deps)       relocatable fork dylib (sandboxes/GPU/
+#                                   krun vessels; bin/nebula finds it at
+#                                   ../lib automatically)
 #   images/kernel-Image.gz          guest kernel
 #   images/rootfs.img.gz            guest rootfs (chosen flavor)
 #   config.toml.example             per-instance settings, ready to brand
@@ -39,10 +42,14 @@ if [ -n "$OVERLAY$SETUP" ] || [ ! -f "$IMG" ]; then
 fi
 test -f vessel/out/Image || vessel/build-kernel.sh
 
+echo "==> relocatable libkrun"
+scripts/package-libkrun.sh dist/libkrun
+
 echo "==> assembling $OUT/"
 rm -rf "$OUT"
-mkdir -p "$OUT/bin" "$OUT/images"
+mkdir -p "$OUT/bin" "$OUT/images" "$OUT/lib"
 cp target/release/nebula target/release/nebulad "$OUT/bin/"
+cp dist/libkrun/*.dylib "$OUT/lib/"
 gzip -9 -c vessel/out/Image > "$OUT/images/kernel-Image.gz"
 gzip -9 -c "$IMG" > "$OUT/images/rootfs.img.gz"
 cp scripts/entitlements/dev.entitlements "$OUT/entitlements.plist"
@@ -68,8 +75,11 @@ EOF
 cat > "$OUT/EMBED.md" <<'EOF'
 # Embedding Nebula — quick integration
 
-1. Ship `bin/`, `images/` inside your app (Tauri: sidecars + resources).
-   Sign the sidecars with `entitlements.plist` (virtualization + hypervisor).
+1. Ship `bin/`, `lib/`, `images/` inside your app (Tauri: sidecars +
+   resources). Keep `lib/` next to `bin/` — nebula finds `../lib/libkrun.dylib`
+   by itself (needed for sandboxes, GPU, and krun vessels; the engine and vz
+   vessels work without it). Sign the sidecars with `entitlements.plist`
+   (virtualization + hypervisor).
 
 2. First run, from your app:
        export NEBULA_HOME="$HOME/Library/Application Support/YourApp/nebula"

@@ -69,6 +69,7 @@ fn dylib_path() -> Result<PathBuf> {
         for anc in exe.ancestors() {
             for rel in [
                 "Frameworks/libkrun.dylib", // Nebula.app/Contents/Frameworks
+                "lib/libkrun.dylib",        // embed kit / zip install layout
                 "third_party/libkrun/target/release/libkrun.1.18.0.dylib",
             ] {
                 let candidate = anc.join(rel);

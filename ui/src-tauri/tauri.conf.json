@@ -41,6 +41,14 @@
       "resources/kernel-Image.gz",
       "resources/rootfs.img.gz",
       "resources/bin"
-    ]
+    ],
+    "macOS": {
+      "frameworks": [
+        "frameworks/libkrun.dylib",
+        "frameworks/libvirglrenderer.1.dylib",
+        "frameworks/libepoxy.0.dylib",
+        "frameworks/libMoltenVK.dylib"
+      ]
+    }
   }
 }

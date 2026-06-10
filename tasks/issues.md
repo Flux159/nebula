@@ -78,8 +78,15 @@ limitations; routine TODOs live in code.)
   fork build (card0 + renderD128 visible, virtio driver bound; brew
   virglrenderer provides Venus host-side). Remaining for the headline AI
   use case: a GPU guest image with mesa-vulkan(venus) + vulkan-tools, then
-  the llama.cpp Vulkan benchmark vs native Metal vs colima. Also note the
-  GPU=1 dylib is a local build artifact — distribution needs us to ship it.
+  the llama.cpp Vulkan benchmark vs native Metal vs colima. ~~Also note the
+  GPU=1 dylib is a local build artifact — distribution needs us to ship it.~~
+  RESOLVED (2026-06-10): `scripts/package-libkrun.sh` makes the full GPU
+  closure relocatable (libkrun + virglrenderer + libepoxy + MoltenVK, 14 MB,
+  @loader_path rewrites + re-sign); bundle-app.sh ships it in
+  Nebula.app/Contents/Frameworks, embed-kit.sh in lib/; dylib resolution
+  walks ancestors of the running binary (Frameworks/, lib/, dev tree) before
+  brew, so no NEBULA_LIBKRUN_PATH needed anywhere. Verified: sandbox + GPU
+  sandbox boot from a bare /tmp copy with no homebrew references.
 
 - **(2026-06-09, Phase 4) VZ balloon = high-water-mark semantics, not true
   reclaim.** Characterized on macOS 26: `VZVirtioTraditionalMemoryBalloonDevice`

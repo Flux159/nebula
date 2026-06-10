@@ -52,14 +52,15 @@ nebula ui                 # open the desktop app (a client of the engine)
   ports appear on `localhost` automatically.
 - **Sandbox microVMs.** `nebula sandbox run` boots, runs, and tears down an
   isolated VM in ~250ms; `--gpu` attaches virtio-gpu (Vulkan→Metal via Venus).
-- **Snapshots & live branching.** `nebula vessels snapshot` clones a vessel's
-  disks in ~10ms (APFS copy-on-write); `--memory` on a `--backend vz` vessel
-  saves the LIVE machine state (RAM, running processes, open sockets) in
-  ~360ms without stopping it. `vessels branch --snapshot x --count N` fans out
-  N independent clones — with a memory snapshot each wakes mid-execution
-  (~600ms per branch), the primitive for tree-search over agent runs.
-  `vessels new --from-image debian:bookworm-slim` boots any arm64 docker image
-  as a snapshot-capable microVM.
+- **Snapshots & live branching.** On `--backend vz` vessels,
+  `nebula vessels snapshot` captures disks **and** the live machine state
+  (RAM, running processes, open sockets) by default — ~360ms, without
+  stopping the vessel (`--no-memory` for a ~10ms disk-only APFS clone).
+  `vessels branch --snapshot x --count N` fans out N independent clones —
+  from a memory snapshot each wakes mid-execution (~600ms per branch), the
+  primitive for tree-search over agent runs. `vessels new --from-image
+  debian:bookworm-slim` boots any arm64 docker image as a snapshot-capable
+  microVM.
 - **Embeddable.** REST API (`127.0.0.1:7440`, v1alpha1) with TypeScript
   (`sdk/typescript`) and Python (`sdk/python`) clients; Tauri UI in `ui/`.
 - **Daemon-first.** The engine (`nebulad`) runs independently of the app and

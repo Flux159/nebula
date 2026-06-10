@@ -553,33 +553,66 @@ fn validate_label(label: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Crash-consistent disk snapshot: stop (if running), APFS-clone both disks,
-/// restart. Stopping takes ~0.2s and restart ~0.1s, so snapshotting a live
-/// vessel costs well under a second.
+/// How much of a vessel a snapshot captures.
+#[derive(PartialEq, Clone, Copy)]
+pub enum SnapMode {
+    /// Memory + disks when possible (running vz vessel), else disks only.
+    Auto,
+    /// Memory + disks, or fail.
+    Memory,
+    /// Disks only.
+    DiskOnly,
+}
+
+/// Snapshot a vessel.
 ///
-/// With `memory` (vz vessels): pause -> save machine state -> clone disks ->
-/// resume. The guest never stops; restore resumes mid-execution with running
-/// processes, open sockets, and RAM (tmpfs etc.) intact.
-pub fn snapshot(name: &str, label: &str, memory: bool) -> anyhow::Result<()> {
+/// Memory mode (default on running vz vessels): pause -> save machine state
+/// -> clone disks -> resume. The guest never stops; restore resumes
+/// mid-execution with running processes, open sockets, and RAM (tmpfs etc.)
+/// intact.
+///
+/// Disk mode: stop (if running), APFS-clone both disks, restart — crash-
+/// consistent, ~0.2s stop + ~10ms clone + ~0.1s restart.
+pub fn snapshot(name: &str, label: &str, mode: SnapMode) -> anyhow::Result<()> {
     validate_label(label)?;
     let dir = dir_of(name)?;
     anyhow::ensure!(dir.exists(), "no vessel named `{name}`");
     let sdir = snap_dir(&dir, label);
     anyhow::ensure!(!sdir.exists(), "snapshot `{label}` already exists");
 
+    let spec = read_spec(&dir)?;
+    let is_vz = spec.backend.as_deref() == Some("vz");
+    let running = live_pid(&dir).is_some();
+    let memory = match mode {
+        SnapMode::DiskOnly => false,
+        SnapMode::Memory => {
+            anyhow::ensure!(
+                is_vz,
+                "memory snapshots need a vz vessel (nebula vessels new {name} --backend vz); \
+                 this one runs on {}",
+                spec.backend.as_deref().unwrap_or("krun")
+            );
+            anyhow::ensure!(
+                running,
+                "vessel `{name}` is not running — a memory snapshot captures a LIVE vm \
+                 (for a stopped vessel take a disk snapshot: --no-memory)"
+            );
+            true
+        }
+        SnapMode::Auto => {
+            if !is_vz {
+                println!(
+                    "note: disk-only snapshot — live memory capture needs a vz vessel \
+                     (nebula vessels new <name> --backend vz)"
+                );
+            } else if !running {
+                println!("note: vessel is stopped — disk-only snapshot (start it to capture memory)");
+            }
+            is_vz && running
+        }
+    };
+
     if memory {
-        let spec = read_spec(&dir)?;
-        anyhow::ensure!(
-            spec.backend.as_deref() == Some("vz"),
-            "memory snapshots need a vz vessel (nebula vessels new {name} --backend vz); \
-             this one runs on {}",
-            spec.backend.as_deref().unwrap_or("krun")
-        );
-        anyhow::ensure!(
-            live_pid(&dir).is_some(),
-            "vessel `{name}` is not running — a memory snapshot captures a LIVE vm \
-             (for a stopped vessel take a plain disk snapshot)"
-        );
         std::fs::create_dir_all(&sdir)?;
         let t0 = Instant::now();
         let mut ctl = VmmCtl::connect(&dir)?;
@@ -613,8 +646,7 @@ pub fn snapshot(name: &str, label: &str, memory: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let was_running = live_pid(&dir).is_some();
-    if was_running {
+    if running {
         stop(name)?;
     }
     std::fs::create_dir_all(&sdir)?;
@@ -624,7 +656,7 @@ pub fn snapshot(name: &str, label: &str, memory: bool) -> anyhow::Result<()> {
         clone_file(&dir.join("data.img"), &sdir.join("data.img"))?;
     }
     println!("snapshot `{name}@{label}` taken in {:.0?}", t0.elapsed());
-    if was_running {
+    if running {
         start(name)?;
     }
     Ok(())

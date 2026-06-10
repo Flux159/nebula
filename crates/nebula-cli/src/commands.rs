@@ -287,8 +287,8 @@ pub fn quickstart() -> anyhow::Result<()> {
     println!("{}", bold("5. Your own VMs"));
     println!("   nebula vessels new dev             persistent named microVM (--gpu for GPU)");
     println!("   nebula vessels shell dev           drop into it (ls/stop/rm to manage)");
-    println!("   nebula vessels snapshot dev s1     ~10ms disk snapshot (restore/branch later)");
-    println!("     --memory                         live RAM+processes too (--backend vz vessels)");
+    println!("   nebula vessels snapshot dev s1     disks + live RAM/processes on vz vessels");
+    println!("                                      (--no-memory: ~10ms disk-only clone)");
     println!("   nebula sandbox run -- uname -a     or ephemeral: boots+runs+exits in ~250ms");
     println!();
     println!("{}", bold("6. Desktop app & stats"));

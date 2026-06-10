@@ -14,7 +14,7 @@ multi-instance story.
 | `nebulad` (daemon) | 2.2 MB | `cargo build --release -p nebulad` / our releases | yes |
 | `kernel-Image.gz` | 16 MB | CI (`guest-images.yml`) / `vessel/build-kernel.sh` | yes |
 | `rootfs.img.gz` | 117 MB (`full`) / 57 MB (`docker`) / 6 MB (`minimal`) | CI / `vessel/build-rootfs.sh FLAVOR=…` | yes (pick a flavor) |
-| `libkrun.dylib` (fork) | 5 MB | `scripts/build-libkrun.sh` | only for sandboxes/GPU/named vessels |
+| `lib/` (fork libkrun + virgl/epoxy/MoltenVK, relocatable) | 14 MB | in the embed kit / `scripts/package-libkrun.sh` | only for sandboxes/GPU/krun vessels — keep beside `bin/`, found automatically |
 | docker / kubectl / helm CLIs | 39/55/59 MB | `scripts/fetch-host-clis.sh` | only if your users need raw CLIs |
 
 Pick the flavor by how you schedule agents. An orchestrator that treats
@@ -143,19 +143,20 @@ Vessels snapshot two ways; pick per vessel at creation time:
 nebula vessels new agent --from-image your/devcontainer            # libkrun: ~100ms boots
 nebula vessels new agent --from-image your/devcontainer --backend vz  # VZ: live memory snapshots
 
-nebula vessels snapshot agent step3              # disks only, ~10ms (stop->clone->restart)
-nebula vessels snapshot agent step3 --memory     # + RAM/processes, ~360ms, vessel NEVER stops
+nebula vessels snapshot agent step3              # vz default: disks + LIVE memory,
+                                                 #   ~360ms, vessel never stops
+nebula vessels snapshot agent step3 --no-memory  # disks only, ~10ms (stop->clone->restart)
 nebula vessels branch agent try --snapshot step3 --count 5   # 5 independent clones
 nebula vessels restore agent step3               # memory snapshots resume mid-execution
 ```
 
-Disk snapshots are crash-consistent and fit "state lives in files" agents.
-Memory snapshots capture the live machine — running processes, open
-connections, tmpfs — so branches wake mid-execution (~600ms each); use them
-when you can't assume the agent flushed everything to disk. Two caveats:
-memory-branches share the source's network identity (vsock-based
-exec/shell are per-VM and unaffected), and `--backend vz` excludes GPU
-(libkrun-only).
+On running vz vessels snapshots capture the live machine by default —
+running processes, open connections, tmpfs — so restores and branches wake
+mid-execution (~600ms each); you never have to assume the agent flushed
+everything to disk. krun vessels (and stopped vessels) automatically fall
+back to crash-consistent disk-only snapshots. Two caveats: memory-branches
+share the source's network identity (vsock-based exec/shell are per-VM and
+unaffected), and `--backend vz` excludes GPU (libkrun-only).
 
 ## 4. Multiple Nebulas — the isolation story
 

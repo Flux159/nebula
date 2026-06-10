@@ -197,15 +197,19 @@ enum VesselsAction {
         #[arg(long)]
         force: bool,
     },
-    /// Take a crash-consistent disk snapshot (stop->clone->restart, <1s).
+    /// Snapshot a vessel. Default: disks + live machine state (RAM, running
+    /// processes) on running vz vessels — pause -> save -> clone -> resume,
+    /// the vessel never stops. krun/stopped vessels fall back to disk-only.
     Snapshot {
         name: String,
         label: String,
-        /// Also save live machine state (RAM + devices) WITHOUT stopping the
-        /// vessel: pause -> save -> clone disks -> resume. Restoring resumes
-        /// exactly where execution left off. Requires a `--backend vz` vessel.
-        #[arg(long)]
+        /// Require the live memory state (error instead of falling back to
+        /// disk-only when the vessel is krun-backed or stopped).
+        #[arg(long, conflicts_with = "no_memory")]
         memory: bool,
+        /// Disk-only snapshot (~10ms clone; stop->clone->restart if running).
+        #[arg(long)]
+        no_memory: bool,
     },
     /// List a vessel's snapshots.
     Snapshots { name: String },
@@ -352,7 +356,16 @@ fn main() -> anyhow::Result<()> {
                 name,
                 label,
                 memory,
-            } => vessels::snapshot(&name, &label, memory),
+                no_memory,
+            } => vessels::snapshot(
+                &name,
+                &label,
+                match (memory, no_memory) {
+                    (true, _) => vessels::SnapMode::Memory,
+                    (_, true) => vessels::SnapMode::DiskOnly,
+                    _ => vessels::SnapMode::Auto,
+                },
+            ),
             VesselsAction::Snapshots { name } => vessels::snapshots(&name),
             VesselsAction::SnapshotRm { name, label } => vessels::snapshot_rm(&name, &label),
             VesselsAction::Restore { name, label } => vessels::restore(&name, &label),

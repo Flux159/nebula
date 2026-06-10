@@ -21,11 +21,17 @@ fi
 echo "==> host CLIs (docker/kubectl/helm)"
 scripts/fetch-host-clis.sh
 
+echo "==> relocatable libkrun (sandbox/GPU/krun vessels on user machines)"
+scripts/package-libkrun.sh dist/libkrun
+
 echo "==> staging sidecars + resources"
-mkdir -p ui/src-tauri/binaries ui/src-tauri/resources
+mkdir -p ui/src-tauri/binaries ui/src-tauri/resources ui/src-tauri/frameworks
 cp target/release/nebula  "ui/src-tauri/binaries/nebula-$TRIPLE"
 cp target/release/nebulad "ui/src-tauri/binaries/nebulad-$TRIPLE"
 cp dist/kernel-Image.gz dist/rootfs.img.gz ui/src-tauri/resources/
+# -> Nebula.app/Contents/Frameworks (the nebula sidecar in Contents/MacOS
+#    resolves Frameworks/libkrun.dylib via its ancestor walk).
+cp dist/libkrun/*.dylib ui/src-tauri/frameworks/
 
 echo "==> tauri bundle"
 (cd ui/src-tauri && cargo tauri build)
