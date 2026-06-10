@@ -1,0 +1,19 @@
+[package]
+name = "nebula-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Nebula CLI: containers, Kubernetes, and microVMs on macOS"
+
+[[bin]]
+name = "nebula"
+path = "src/main.rs"
+
+[dependencies]
+nebula-core = { path = "../nebula-core" }
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

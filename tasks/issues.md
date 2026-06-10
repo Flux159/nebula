@@ -4,6 +4,19 @@ Running log of problems, surprises, and deferred decisions hit during implementa
 Newest at the top within each section. (Items here need Suyog's input or are accepted
 limitations; routine TODOs live in code.)
 
+## Open (being worked / next phase)
+
+- **(2026-06-09, Phase 0) Stock Alpine kernel panics at early boot under libkrun
+  (fork 1.18.0), boots fine under VZ.** Guest dies before any console exists
+  (libkrun has no earlycon/pl011, virtio-MMIO console needs `virtio_mmio` which
+  Alpine builds `=m`, and the panic precedes module load), so the panic message is
+  unobtainable with stock kernels. Verified initrd/FDT plumbing in the fork looks
+  correct (`linux,initrd-start/end` written, memory regions sized). Resolution path:
+  the Phase 1 **custom kernel** (VIRTIO_MMIO=y, VIRTIO_CONSOLE=y) gives us console
+  output during boot and is what the product needs anyway. Only gates the krun
+  sidecar engine (Phase 7), not the VZ Vessel (Phases 1–6). VZ spike passes
+  end-to-end (357ms boot→poweroff).
+
 ## Needs discussion
 
 - **(2026-06-09) Stray `package.json` in repo root.** Untracked file named `nebulas`

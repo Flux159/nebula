@@ -1,0 +1,10 @@
+[package]
+name = "vessel-init"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tiny PID 1 for Nebula guest VMs (static musl build, lives in the initramfs)"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true

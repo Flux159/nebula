@@ -1,0 +1,29 @@
+[package]
+name = "nebula-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Embeddable core engine for Nebula: VMM backends, VM lifecycle, guest image tooling"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-virtualization = "0.3"
+dispatch2 = "0.3"
+block2 = "0.6"
+
+[features]
+default = ["vz", "libkrun"]
+# Virtualization.framework backend (primary Vessel on macOS)
+vz = []
+# libkrun backend (GPU/sandbox sidecars); requires libkrun dylib at runtime
+libkrun = []

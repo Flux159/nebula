@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+exclude = ["third_party"]
+members = [
+    "crates/nebula-core",
+    "crates/nebula-cli",
+    "crates/nebulad",
+    "crates/nebula-balloon",
+    "crates/vessel-agent",
+    "crates/vessel-init",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Flux159/nebula"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+strip = true
