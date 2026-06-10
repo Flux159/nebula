@@ -6,6 +6,38 @@ limitations; routine TODOs live in code.)
 
 ## Open (being worked / next phase)
 
+- **(2026-06-10) Fork snapshot/restore ("krun-snapshot") — the Firecracker
+  design, agreed as the next fork track.** Supersedes the old "memory-state
+  snapshots are vz-only" limitation with a cross-platform plan:
+  * Snapshot = guest RAM written to a file + serialized vCPU state
+    (KVM get/set APIs on Linux, hv_vcpu get/set on macOS/HVF) + virtio
+    device state (our device surface is small: blk/vsock/net/fs/rng/console).
+  * Restore = `mmap(snapshot, MAP_PRIVATE)` + load the vCPU/device blob —
+    target <10ms, nothing eagerly copied (pages fault in via page cache).
+  * **CoW page sharing**: N clones restored from one snapshot file share
+    physical pages until written (MAP_PRIVATE is POSIX — works on macOS
+    too). Marginal memory per idle clone ≈ dirtied pages (single-digit MB).
+    This is the Lambda/Fargate density model and the engine of
+    "microVMs for almost everything" + tasks/microvm-k8s-brief.md.
+  * Disk-side analog: split `convert-image` output into a shared read-only
+    base.img (per base layer chain) + small per-app upper disk joined by
+    overlayfs in-guest — restores containerd-style layer dedup for vessels.
+  * Order: KVM first (ubuntu box, Firecracker as reference map), HVF second
+    (gives GPU vessels snapshots — impossible on vz). VZ vessels keep
+    Apple's save/restore as the slow tier (~400-600ms, opaque sharing).
+
+- **(2026-06-10, Linux) docker attach/exec streams through the vsock unix
+  proxy — half-close saga, in progress.** Hijacked HTTP connections (docker
+  run/exec output) lost server->guest bytes: docker CLI half-closes its
+  write side when stdin isn't attached, and libkrun's host-side unix proxy
+  answered read-EOF with a full VSOCK RST, killing dockerd's response.
+  Fork patch adds MuxerRx::ShutdownSend (VSOCK_OP_SHUTDOWN +
+  SHUTDOWN_SEND flags) so host EOF half-closes the guest side instead.
+  First test after the patch HANGS at docker run (failure mode moved from
+  lost-output to no-teardown) — likely the guest's later full-close path or
+  credit accounting needs the same care. Plain request/response, logs,
+  pulls, published ports, k8s ALL work; only attach-style streams affected.
+
 - **(2026-06-10, Linux) Guest networking strategy for the Linux/krun engine
   needs deciding.** Findings from the KVM spike: our x86_64 vmlinux boots on
   KVM ✓ (reached userspace), but libkrun's TSI on Linux is delivered via a
