@@ -21,18 +21,25 @@ fi
 docker version >/dev/null 2>&1 || { echo "ERROR: no working docker engine for the build" >&2; exit 1; }
 cd "$(dirname "$0")/.."
 
+# Guest arch follows the build host (the microVM runs the host ISA).
+case "$(uname -m)" in
+    arm64|aarch64) MUSL_TARGET=aarch64-unknown-linux-musl; K3S_ARCH=arm64 ;;
+    x86_64)        MUSL_TARGET=x86_64-unknown-linux-musl;  K3S_ARCH=amd64 ;;
+    *) echo "unsupported build arch: $(uname -m)" >&2; exit 1 ;;
+esac
+
 if [ "${NEBULA_STRIP:-0}" = 1 ]; then
     # Opt-in (see scripts/strip-debug.sh): keep line tables at link, then
     # objcopy-split them so guest panics stay symbolicatable.
     CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=1 \
-        cargo build -p vessel-init -p vessel-agent --release --target aarch64-unknown-linux-musl
+        cargo build -p vessel-init -p vessel-agent --release --target "$MUSL_TARGET"
 else
-    cargo build -p vessel-init -p vessel-agent --release --target aarch64-unknown-linux-musl
+    cargo build -p vessel-init -p vessel-agent --release --target "$MUSL_TARGET"
 fi
 
 mkdir -p vessel/rootfs/bin
-cp target/aarch64-unknown-linux-musl/release/vessel-init vessel/rootfs/bin/
-cp target/aarch64-unknown-linux-musl/release/vessel-agent vessel/rootfs/bin/
+cp "target/$MUSL_TARGET/release/vessel-init" vessel/rootfs/bin/
+cp "target/$MUSL_TARGET/release/vessel-agent" vessel/rootfs/bin/
 if [ "${NEBULA_STRIP:-0}" = 1 ]; then
     scripts/strip-debug.sh vessel/rootfs/bin/vessel-init vessel/rootfs/bin/vessel-agent
 fi
@@ -65,6 +72,7 @@ SIZE_MB="${ROOTFS_SIZE_MB:-2048}"
 docker build \
     --build-arg FLAVOR="$FLAVOR" \
     --build-arg ROOTFS_SIZE_MB="$SIZE_MB" \
+    --build-arg K3S_ARCH="$K3S_ARCH" \
     --target export \
     --output type=local,dest=/tmp/nebula-rootfs-build \
     vessel/rootfs/

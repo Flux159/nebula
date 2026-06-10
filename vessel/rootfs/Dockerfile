@@ -18,10 +18,13 @@ RUN if [ "$FLAVOR" != "minimal" ]; then \
     fi
 
 # k3s: full flavor only (it bundles its own kubectl for in-guest use).
+# Release asset name: k3s-arm64 for arm64; plain `k3s` for amd64.
 ARG K3S_VERSION=v1.35.5%2Bk3s1
+ARG K3S_ARCH=arm64
 RUN if [ "$FLAVOR" = "full" ]; then \
-        wget -qO /usr/local/bin/k3s \
-            "https://github.com/k3s-io/k3s/releases/download/${K3S_VERSION}/k3s-arm64" \
+        if [ "$K3S_ARCH" = "amd64" ]; then K3S_ASSET=k3s; else K3S_ASSET="k3s-${K3S_ARCH}"; fi \
+        && wget -qO /usr/local/bin/k3s \
+            "https://github.com/k3s-io/k3s/releases/download/${K3S_VERSION}/${K3S_ASSET}" \
         && chmod 755 /usr/local/bin/k3s; \
     fi
 
