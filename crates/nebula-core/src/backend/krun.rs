@@ -76,6 +76,8 @@ struct KrunApi {
     /// virtio-net device backed by a userspace proxy (passt) unix socket.
     krun_add_net_unixstream:
         Option<unsafe extern "C" fn(u32, *const c_char, i32, *const u8, u32, u32) -> i32>,
+    /// Optional: our fork's in-process usermode NAT (no passt needed).
+    krun_add_net_usernet: Option<unsafe extern "C" fn(u32, *const u8) -> i32>,
     krun_start_enter: unsafe extern "C" fn(u32) -> i32,
 }
 
@@ -148,6 +150,7 @@ fn load_api() -> Result<&'static KrunApi> {
                 krun_set_gpu_options: sym(handle, "krun_set_gpu_options").ok(),
                 krun_add_vsock_port2: sym(handle, "krun_add_vsock_port2")?,
                 krun_add_net_unixstream: sym(handle, "krun_add_net_unixstream").ok(),
+                krun_add_net_usernet: sym(handle, "krun_add_net_usernet").ok(),
                 krun_start_enter: sym(handle, "krun_start_enter")?,
             })
         }
@@ -403,48 +406,53 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
         // VZ NAT (this is the Linux engine's outbound path: TSI's guest-side
         // hijack doesn't apply to our disk-boot/own-init flow).
         if matches!(spec.net, crate::spec::NetSpec::Nat) {
-            let add_net = api.krun_add_net_unixstream.ok_or_else(|| {
-                Error::backend(
-                    BACKEND,
-                    "NetSpec::Nat needs a libkrun built with NET=1 (krun_add_net_unixstream missing)",
-                )
-            })?;
-            let passt = passt_path().ok_or_else(|| {
-                Error::backend(
-                    BACKEND,
-                    "passt not found (apt/brew install passt, or set NEBULA_PASST_PATH)",
-                )
-            })?;
-            let sock =
-                std::env::temp_dir().join(format!("nebula-passt-{}.sock", std::process::id()));
-            let _ = std::fs::remove_file(&sock);
-            // --one-off: passt exits when the VM closes the connection, so it
-            // shares the worker's lifetime even though it daemonizes.
-            // -t/-u all: passt mirrors every port the GUEST binds onto the
-            // host — published container ports and the k3s API appear on
-            // localhost without separate host-side forwarders (the guest IP
-            // itself is not host-routable behind passt).
-            Command::new(&passt)
-                .arg("--quiet")
-                .arg("--one-off")
-                .args(["-t", "all", "-u", "all"])
-                .arg("--socket")
-                .arg(&sock)
-                .spawn()
-                .map_err(|e| Error::backend(BACKEND, format!("spawn {}: {e}", passt.display())))?;
-            for _ in 0..50 {
-                if sock.exists() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
             let mac: [u8; 6] =
                 parse_mac(spec.mac.as_deref()).unwrap_or([0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee]);
-            let sock_c = cstr(&sock.to_string_lossy());
-            check(
-                "krun_add_net_unixstream",
-                add_net(ctx, sock_c.as_ptr(), -1, mac.as_ptr(), 0, 0),
-            )?;
+            // Default: the fork's in-process NAT (zero host deps; same path
+            // Windows/WHP will use). NEBULA_NET=passt forces the external
+            // proxy for debugging/comparison.
+            let force_passt = std::env::var("NEBULA_NET").as_deref() == Ok("passt");
+            if !force_passt {
+                if let Some(add_usernet) = api.krun_add_net_usernet {
+                    check("krun_add_net_usernet", add_usernet(ctx, mac.as_ptr()))?;
+                }
+            }
+            if force_passt || api.krun_add_net_usernet.is_none() {
+                // Fallback/debug path: external passt proxy.
+                let add_net = api.krun_add_net_unixstream.ok_or_else(|| {
+                    Error::backend(BACKEND, "NetSpec::Nat needs a libkrun built with NET=1")
+                })?;
+                let passt = passt_path().ok_or_else(|| {
+                    Error::backend(
+                        BACKEND,
+                        "passt not found (apt/brew install passt, or set NEBULA_PASST_PATH)",
+                    )
+                })?;
+                let sock =
+                    std::env::temp_dir().join(format!("nebula-passt-{}.sock", std::process::id()));
+                let _ = std::fs::remove_file(&sock);
+                // --one-off: passt exits when the VM closes the connection.
+                Command::new(&passt)
+                    .arg("--quiet")
+                    .arg("--one-off")
+                    .arg("--socket")
+                    .arg(&sock)
+                    .spawn()
+                    .map_err(|e| {
+                        Error::backend(BACKEND, format!("spawn {}: {e}", passt.display()))
+                    })?;
+                for _ in 0..50 {
+                    if sock.exists() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                let sock_c = cstr(&sock.to_string_lossy());
+                check(
+                    "krun_add_net_unixstream",
+                    add_net(ctx, sock_c.as_ptr(), -1, mac.as_ptr(), 0, 0),
+                )?;
+            }
         }
 
         if !spec.disks.is_empty() {

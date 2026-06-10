@@ -455,6 +455,22 @@ int32_t krun_add_net_unixstream(uint32_t ctx_id,
  * Returns:
  *  Zero on success or a negative error number on failure.
  */
+/*
+ * Adds a virtio-net device backed by an IN-PROCESS usermode NAT (usernet):
+ * no external proxy (passt/gvproxy) required. The guest receives
+ * 192.168.127.2/24 via DHCP; the gateway/DNS at 192.168.127.1 maps to the
+ * host loopback. Outbound TCP/UDP flows are NATed through ordinary host
+ * sockets. Only available in builds with the NET feature.
+ *
+ * Arguments:
+ *  "ctx_id" - the configuration context ID.
+ *  "c_mac"  - guest MAC address as an array of 6 uint8_t entries.
+ *
+ * Returns:
+ *  Zero on success or a negative error number on failure.
+ */
+int32_t krun_add_net_usernet(uint32_t ctx_id, uint8_t *const c_mac);
+
 int32_t krun_add_net_unixgram(uint32_t ctx_id,
                               const char *c_path,
                               int fd,

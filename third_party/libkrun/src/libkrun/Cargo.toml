@@ -14,7 +14,7 @@ init-blob = ["dep:init-blob"]
 tee = ["vmm/tee", "devices/tee"]
 amd-sev = ["blk", "tee", "vmm/amd-sev", "devices/amd-sev"]
 tdx = ["blk", "tee", "vmm/tdx", "devices/tdx"]
-net = ["devices/net", "vmm/net"]
+net = ["devices/net", "vmm/net", "dep:usernet"]
 blk = ["devices/blk", "vmm/blk"]
 gpu = ["vmm/gpu", "devices/gpu", "krun_display"]
 input = ["krun_input", "vmm/input", "devices/input"]
@@ -23,6 +23,7 @@ aws-nitro = ["vmm/aws-nitro", "devices/aws-nitro", "dep:aws-nitro", "dep:nitro-e
 vhost-user = ["vmm/vhost-user", "devices/vhost-user"]
 
 [dependencies]
+usernet = { path = "../usernet", optional = true }
 crossbeam-channel = ">=0.5.15"
 env_logger = "0.11"
 libc = ">=0.2.39"

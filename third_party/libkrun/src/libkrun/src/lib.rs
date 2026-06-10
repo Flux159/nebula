@@ -1072,6 +1072,43 @@ pub unsafe extern "C" fn krun_add_net_unixstream(
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
 #[cfg(feature = "net")]
+pub unsafe extern "C" fn krun_add_net_usernet(ctx_id: u32, c_mac: *const u8) -> i32 {
+    // In-process usermode NAT (no passt/gvproxy): a socketpair where one end
+    // feeds the standard unixstream virtio-net backend and the other is
+    // served by the `usernet` smoltcp NAT thread. The guest gets eth0 with
+    // DHCP at 192.168.127.2, gateway/DNS at .1 (mapped to host loopback).
+    unsafe {
+        let mac: [u8; 6] = match slice::from_raw_parts(c_mac, 6).try_into() {
+            Ok(m) => m,
+            Err(_) => return -libc::EINVAL,
+        };
+        let mut fds = [0i32; 2];
+        if libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) != 0 {
+            return -libc::EIO;
+        }
+        let device_end = fds[0];
+        let nat_end = std::os::fd::OwnedFd::from_raw_fd(fds[1]);
+        usernet::spawn(nat_end, mac);
+
+        match CTX_MAP.lock().unwrap().entry(ctx_id) {
+            Entry::Occupied(mut ctx_cfg) => {
+                let cfg = ctx_cfg.get_mut();
+                create_virtio_net(
+                    cfg,
+                    VirtioNetBackend::UnixstreamFd(device_end),
+                    mac,
+                    0,
+                );
+            }
+            Entry::Vacant(_) => return -libc::ENOENT,
+        }
+        KRUN_SUCCESS
+    }
+}
+
+#[allow(clippy::missing_safety_doc)]
+#[unsafe(no_mangle)]
+#[cfg(feature = "net")]
 pub unsafe extern "C" fn krun_add_net_unixgram(
     ctx_id: u32,
     c_path: *const c_char,

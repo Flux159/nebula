@@ -4,6 +4,7 @@ members = [
     "src/init_blob",
     "src/input",
     "src/display",
+    "src/usernet",
     "src/utils",
     "src/arch_gen",
     "src/cpuid",

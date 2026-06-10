@@ -1,0 +1,20 @@
+[package]
+name = "usernet"
+version = "0.1.0"
+edition = "2021"
+description = "In-process usermode NAT for libkrun virtio-net (no passt/gvproxy)"
+license = "Apache-2.0"
+
+[dependencies]
+smoltcp = { version = "0.12", default-features = false, features = [
+    "std",
+    "medium-ethernet",
+    "proto-ipv4",
+    "proto-dhcpv4",
+    "socket-tcp",
+    "socket-udp",
+    "log",
+] }
+libc = "0.2"
+heapless = "0.8"
+log = "0.4"
