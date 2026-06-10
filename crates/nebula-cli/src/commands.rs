@@ -212,7 +212,8 @@ pub fn stats(watch: bool) -> anyhow::Result<()> {
                     Some(g) => format!(
                         "guest {used}/{target} MiB used (avail {avail}) | balloon holds {balloon} MiB of {max} | host footprint {host} MiB{psi}",
                         used = ((g.total_kib - g.available_kib) / 1024)
-                            .saturating_sub(s.max_mib - s.balloon_target_mib),
+                            .saturating_sub(s.max_mib - s.balloon_target_mib)
+                            .min(s.balloon_target_mib),
                         target = s.balloon_target_mib,
                         avail = g.available_kib / 1024,
                         balloon = s.max_mib - s.balloon_target_mib,

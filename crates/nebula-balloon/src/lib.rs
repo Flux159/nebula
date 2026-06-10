@@ -26,8 +26,9 @@ pub struct Config {
     pub psi_deflate_threshold: f64,
     /// Ticks of sustained surplus before we inflate (reclaim).
     pub inflate_after_ticks: u32,
-    /// Largest single reclaim step, as a fraction of the current target.
-    pub max_inflate_step: f64,
+    /// Ticks to sit out after any resize: /proc/meminfo is skewed while the
+    /// guest moves balloon pages, and acting on those samples causes churn.
+    pub cooldown_ticks: u32,
     /// Ignore target changes smaller than this (MiB).
     pub deadband_mib: u64,
 }
@@ -37,12 +38,16 @@ impl Config {
         Config {
             max_mib,
             min_mib: 1024.min(max_mib),
-            headroom_mib: 768,
-            low_water_mib: 256,
-            psi_deflate_threshold: 5.0,
-            inflate_after_ticks: 8,
-            max_inflate_step: 0.25,
-            deadband_mib: 256,
+            // Generous slack: tight headroom turns routine page-cache and
+            // k3s churn into pressure events and the balloon thrashes
+            // (observed: settle -> avail dips -> deflate-to-max -> reshrink,
+            // every couple of minutes). ~6% of max, at least 1.5 GiB.
+            headroom_mib: (max_mib / 16).max(1536),
+            low_water_mib: 384,
+            psi_deflate_threshold: 10.0,
+            inflate_after_ticks: 45,
+            cooldown_ticks: 5,
+            deadband_mib: 512,
         }
     }
 }
@@ -61,6 +66,7 @@ pub struct Controller {
     /// What we last asked the guest to keep (MiB).
     target_mib: u64,
     surplus_ticks: u32,
+    cooldown: u32,
 }
 
 #[derive(Debug, PartialEq)]
@@ -78,7 +84,15 @@ impl Controller {
             cfg,
             target_mib: target,
             surplus_ticks: 0,
+            cooldown: 0,
         }
+    }
+
+    fn set_target(&mut self, target: u64) -> Action {
+        self.surplus_ticks = 0;
+        self.cooldown = self.cfg.cooldown_ticks;
+        self.target_mib = target;
+        Action::SetTarget(target)
     }
 
     pub fn target_mib(&self) -> u64 {
@@ -104,23 +118,38 @@ impl Controller {
             || s.psi_some_avg10.unwrap_or(0.0) > self.cfg.psi_deflate_threshold;
 
         if pressured {
-            // Emergency deflate: give everything back at once. Correctness
-            // beats elegance here; we re-shrink later when calm returns.
-            self.surplus_ticks = 0;
+            // Graduated emergency deflate: double the allowance each tick
+            // while pressure persists (1s ticks reach max within ~5s) instead
+            // of slamming to max — a brief cache burst no longer swings the
+            // guest by 30 GiB. DEFLATE_ON_OOM backstops the worst case.
+            // Pressure overrides the cooldown: safety beats quiet.
             if self.target_mib < self.cfg.max_mib {
-                self.target_mib = self.cfg.max_mib;
-                return Action::SetTarget(self.target_mib);
+                let t = (self.target_mib * 2).min(self.cfg.max_mib);
+                return self.set_target(t);
             }
+            self.surplus_ticks = 0;
+            return Action::Hold;
+        }
+
+        // Post-resize cooldown: meminfo lags while the guest moves balloon
+        // pages; deciding on those samples causes spurious follow-ups.
+        if self.cooldown > 0 {
+            self.cooldown -= 1;
             return Action::Hold;
         }
 
         let desired = (used + self.cfg.headroom_mib).clamp(self.cfg.min_mib, self.cfg.max_mib);
 
+        if desired > self.target_mib + self.cfg.deadband_mib {
+            // Workload grew materially: deflate to fit immediately (with
+            // headroom). Sub-deadband wiggle is absorbed by the headroom —
+            // resizing the guest for every 100 MiB breathing is thrash.
+            return self.set_target(desired);
+        }
         if desired > self.target_mib {
-            // Workload grew: deflate to fit immediately (with headroom).
+            // Within the deadband: tolerated, but don't count it as surplus.
             self.surplus_ticks = 0;
-            self.target_mib = desired;
-            return Action::SetTarget(self.target_mib);
+            return Action::Hold;
         }
 
         // Surplus: only reclaim after it persists, stepwise, with deadband.
@@ -132,11 +161,9 @@ impl Controller {
         if self.surplus_ticks < self.cfg.inflate_after_ticks {
             return Action::Hold;
         }
-        self.surplus_ticks = 0;
-        let max_step = ((self.target_mib as f64) * self.cfg.max_inflate_step) as u64;
-        let new_target = self.target_mib.saturating_sub(max_step).max(desired);
-        self.target_mib = new_target;
-        Action::SetTarget(new_target)
+        // One jump straight to the steady-state target — a single resize per
+        // workload change instead of a multi-minute staircase of steps.
+        self.set_target(desired)
     }
 }
 
@@ -156,128 +183,154 @@ mod tests {
         }
     }
 
-    #[test]
-    fn idle_guest_shrinks_gradually_to_floor() {
-        let mut c = Controller::new(cfg());
+    /// Run until the controller settles (bounded), returning resize count.
+    fn settle(c: &mut Controller, used_mib: u64, max_ticks: u32) -> u32 {
         let mut sets = 0;
-        let mut last = c.target_mib();
-        for _ in 0..400 {
-            // As the balloon inflates, available shrinks accordingly.
+        for _ in 0..max_ticks {
             let s = Sample {
                 total_mib: 32 * 1024,
-                available_mib: c.target_mib() - 700, // ~700MiB of real use
+                available_mib: c.target_mib().saturating_sub(used_mib).max(600),
                 psi_some_avg10: Some(0.0),
             };
-            if let Action::SetTarget(t) = c.tick(s) {
-                assert!(t < last, "shrink must be monotonic while idle");
-                last = t;
+            if let Action::SetTarget(_) = c.tick(s) {
                 sets += 1;
             }
         }
-        assert!(sets > 3, "needs multiple bounded steps");
-        // 700 used + 768 headroom, bounded below by min and deadband slack.
-        assert!(
-            c.target_mib() <= 1024 + 768,
-            "should approach floor, got {}",
-            c.target_mib()
-        );
+        sets
+    }
+
+    #[test]
+    fn idle_guest_reclaims_in_a_single_jump() {
+        let mut c = Controller::new(cfg());
+        let sets = settle(&mut c, 700, 120);
+        assert_eq!(sets, 1, "one resize per workload change, not a staircase");
+        // 700 used + 2048 headroom (min floor 1024).
+        assert_eq!(c.target_mib(), 700 + 2048);
     }
 
     #[test]
     fn no_reclaim_before_sustained_surplus() {
         let mut c = Controller::new(cfg());
-        for _ in 0..7 {
+        for _ in 0..44 {
             assert_eq!(c.tick(idle_sample()), Action::Hold);
         }
         assert!(matches!(c.tick(idle_sample()), Action::SetTarget(_)));
     }
 
     #[test]
-    fn pressure_deflates_to_max_instantly() {
+    fn settled_guest_stays_quiet() {
         let mut c = Controller::new(cfg());
-        for _ in 0..50 {
-            c.tick(idle_sample());
-        }
-        assert!(c.target_mib() < 32 * 1024);
-        let s = Sample {
-            total_mib: 32 * 1024,
-            available_mib: 100,
-            psi_some_avg10: Some(0.0),
-        };
-        assert_eq!(c.tick(s), Action::SetTarget(32 * 1024));
-    }
-
-    #[test]
-    fn psi_alone_triggers_deflate() {
-        let mut c = Controller::new(cfg());
-        for _ in 0..50 {
-            c.tick(idle_sample());
-        }
-        let s = Sample {
-            total_mib: 32 * 1024,
-            available_mib: 4 * 1024,
-            psi_some_avg10: Some(20.0),
-        };
-        assert_eq!(c.tick(s), Action::SetTarget(32 * 1024));
-    }
-
-    #[test]
-    fn growth_deflates_immediately_without_waiting() {
-        let mut c = Controller::new(cfg());
-        for _ in 0..200 {
-            let s = Sample {
-                total_mib: 32 * 1024,
-                available_mib: c.target_mib() - 700,
-                psi_some_avg10: Some(0.0),
-            };
-            c.tick(s);
-        }
-        let shrunk = c.target_mib();
-        assert!(shrunk < 4096);
-        // Workload jumps to 6 GiB used (still > low_water available).
-        let s = Sample {
-            total_mib: 32 * 1024,
-            available_mib: shrunk.saturating_sub(6 * 1024).max(300),
-            psi_some_avg10: Some(0.0),
-        };
-        match c.tick(s) {
-            Action::SetTarget(t) => assert!(t > shrunk, "must grow, got {t}"),
-            Action::Hold => panic!("must react to growth"),
-        }
-    }
-
-    #[test]
-    fn small_fluctuations_hold_steady() {
-        let mut c = Controller::new(Config {
-            deadband_mib: 512,
-            ..cfg()
-        });
-        for _ in 0..200 {
-            let s = Sample {
-                total_mib: 32 * 1024,
-                available_mib: c.target_mib() - 700,
-                psi_some_avg10: Some(0.0),
-            };
-            c.tick(s);
-        }
-        let settled = c.target_mib();
-        // +-100 MiB wiggle inside the deadband: no churn.
-        for i in 0..50 {
+        settle(&mut c, 700, 120);
+        // 10 minutes of idle ticks with sub-deadband wiggle: zero resizes.
+        for i in 0..600u64 {
             let wiggle = if i % 2 == 0 { 100 } else { 0 };
             let s = Sample {
                 total_mib: 32 * 1024,
                 available_mib: c.target_mib() - 700 - wiggle,
                 psi_some_avg10: Some(0.0),
             };
-            assert_eq!(c.tick(s), Action::Hold);
+            assert_eq!(c.tick(s), Action::Hold, "tick {i} must hold");
         }
-        assert_eq!(c.target_mib(), settled);
+    }
+
+    #[test]
+    fn sustained_pressure_escalates_to_max_quickly() {
+        let mut c = Controller::new(cfg());
+        settle(&mut c, 700, 120);
+        let mut last = c.target_mib();
+        assert!(last < 32 * 1024);
+        for tick in 1..=6 {
+            let s = Sample {
+                total_mib: 32 * 1024,
+                available_mib: 100,
+                psi_some_avg10: Some(0.0),
+            };
+            match c.tick(s) {
+                Action::SetTarget(t) => {
+                    assert!(t > last, "tick {tick}: must grow");
+                    last = t;
+                }
+                Action::Hold => break,
+            }
+        }
+        assert_eq!(c.target_mib(), 32 * 1024);
+    }
+
+    #[test]
+    fn brief_pressure_blip_does_not_slam_to_max() {
+        let mut c = Controller::new(cfg());
+        settle(&mut c, 700, 120);
+        let shrunk = c.target_mib();
+        let s = Sample {
+            total_mib: 32 * 1024,
+            available_mib: 100,
+            psi_some_avg10: Some(0.0),
+        };
+        assert_eq!(c.tick(s), Action::SetTarget((shrunk * 2).min(32 * 1024)));
+        assert!(c.target_mib() < 32 * 1024 / 2);
+    }
+
+    #[test]
+    fn psi_alone_triggers_deflate() {
+        let mut c = Controller::new(cfg());
+        settle(&mut c, 700, 120);
+        let before = c.target_mib();
+        let s = Sample {
+            total_mib: 32 * 1024,
+            available_mib: 4 * 1024,
+            psi_some_avg10: Some(20.0),
+        };
+        match c.tick(s) {
+            Action::SetTarget(t) => assert!(t > before),
+            Action::Hold => panic!("PSI pressure must act"),
+        }
+    }
+
+    #[test]
+    fn growth_deflates_immediately_without_waiting() {
+        let mut c = Controller::new(cfg());
+        settle(&mut c, 700, 120);
+        let shrunk = c.target_mib();
+        // 6 GiB of new use, still above the pressure floor.
+        let s = Sample {
+            total_mib: 32 * 1024,
+            available_mib: shrunk.saturating_sub(6 * 1024).max(500),
+            psi_some_avg10: Some(0.0),
+        };
+        match c.tick(s) {
+            Action::SetTarget(t) => assert!(t > shrunk),
+            Action::Hold => panic!("must react to growth"),
+        }
+    }
+
+    #[test]
+    fn cooldown_swallows_transition_skew() {
+        let mut c = Controller::new(cfg());
+        settle(&mut c, 700, 120);
+        // Material growth triggers a resize…
+        let shrunk = c.target_mib();
+        let s = Sample {
+            total_mib: 32 * 1024,
+            available_mib: shrunk.saturating_sub(6 * 1024).max(500),
+            psi_some_avg10: Some(0.0),
+        };
+        assert!(matches!(c.tick(s), Action::SetTarget(_)));
+        // …then transition-skewed samples (absurd readings) hold for the
+        // cooldown window instead of triggering follow-up resizes.
+        for _ in 0..5 {
+            let skewed = Sample {
+                total_mib: 32 * 1024,
+                available_mib: 31 * 1024, // looks suddenly empty
+                psi_some_avg10: Some(0.0),
+            };
+            assert_eq!(c.tick(skewed), Action::Hold);
+        }
     }
 
     #[test]
     fn never_exceeds_bounds() {
         let mut c = Controller::new(cfg());
-        for i in 0..1000 {
+        for i in 0..1000u64 {
             let s = Sample {
                 total_mib: 32 * 1024,
                 available_mib: (i * 37) % (30 * 1024),

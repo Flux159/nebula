@@ -18,9 +18,12 @@ function renderStatus(status, stats) {
 
   if (stats.guest) {
     const balloonHeld = stats.maxMib - stats.balloonTargetMib;
-    const usedMib = Math.max(
-      0,
-      (stats.guest.total_kib - stats.guest.available_kib) / 1024 - balloonHeld,
+    // Clamp to the current allowance: during balloon transitions the guest
+    // hasn't moved the pages the commanded target implies yet, and the raw
+    // subtraction briefly reads as tens of GiB.
+    const usedMib = Math.min(
+      stats.balloonTargetMib,
+      Math.max(0, (stats.guest.total_kib - stats.guest.available_kib) / 1024 - balloonHeld),
     );
     const pct = Math.min(100, (usedMib / stats.balloonTargetMib) * 100);
     $("mem-bar").style.width = `${pct}%`;

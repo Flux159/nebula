@@ -75,3 +75,12 @@ Findings from the dual-backend bring-up (0.3/0.4). Living doc.
   footprint must be measured there (proc_listallpids + proc_name match).
 - Guest /proc/meminfo keeps MemTotal at the configured max; balloon pages
   vanish from MemAvailable, so workload use = total - available - balloon.
+
+## Vessel boot timing (release build, M-series 16-core, 2026-06-09)
+
+Three cold cycles, identical to the wall clock:
+- `nebula up` CLI wall-clock: **0.62s** (includes daemon spawn + ready poll)
+- inside the daemon: VZ VM create→Running **80–96ms**; kernel boot + nebula-init
+  (mounts, data disk, network, services) + vessel-agent healthy over vsock:
+  **580–595ms total**
+- sandbox microVMs (libkrun): ~250ms boot→run→teardown (phase 7/8 suites)
