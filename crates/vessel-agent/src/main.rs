@@ -66,6 +66,7 @@ mod agent {
         k3s::autostart();
         std::thread::spawn(|| serve_loop("shell", VSOCK_PORT_SHELL, handle_shell));
         std::thread::spawn(|| serve_loop("docker-proxy", VSOCK_PORT_DOCKER, handle_docker_proxy));
+        std::thread::spawn(|| serve_loop("tcp-proxy", VSOCK_PORT_TCPPROXY, handle_tcp_proxy));
         std::thread::spawn(|| {
             serve_loop(
                 "containerd-proxy",
@@ -173,6 +174,53 @@ mod agent {
 
     fn handle_docker_proxy(conn: std::fs::File) {
         forward_to_unix(conn, "/var/run/docker.sock");
+    }
+
+    /// Generic host->guest TCP proxy: the first 2 bytes (BE) name a guest
+    /// TCP port; the rest of the stream splices to 127.0.0.1:<port>. This is
+    /// how published container ports reach the host on backends where the
+    /// guest IP is not host-routable (libkrun/KVM today, WHP later).
+    fn handle_tcp_proxy(conn: std::fs::File) {
+        use std::io::{Read, Write};
+        let mut conn = conn;
+        let mut hdr = [0u8; 2];
+        if conn.read_exact(&mut hdr).is_err() {
+            return;
+        }
+        let port = u16::from_be_bytes(hdr);
+        let Ok(tcp) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
+            return;
+        };
+        let mut conn_r = conn.try_clone().expect("clone conn");
+        let mut conn_w = conn;
+        let mut tcp_r = tcp.try_clone().expect("clone tcp");
+        let mut tcp_w = tcp;
+        let t = std::thread::spawn(move || {
+            let mut buf = [0u8; 65536];
+            loop {
+                match conn_r.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if tcp_w.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            let _ = tcp_w.shutdown(std::net::Shutdown::Write);
+        });
+        let mut buf = [0u8; 65536];
+        loop {
+            match tcp_r.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if conn_w.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = t.join();
     }
 
     fn handle_containerd_proxy(conn: std::fs::File) {

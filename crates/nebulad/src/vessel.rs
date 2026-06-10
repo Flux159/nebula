@@ -55,6 +55,7 @@ impl Vessel {
             };
             vec![
                 m(VSOCK_PORT_CONTROL, "agent.vsock"),
+                m(VSOCK_PORT_TCPPROXY, "tcpproxy.vsock"),
                 m(VSOCK_PORT_SHELL, "shell.vsock"),
                 m(VSOCK_PORT_DOCKER, "docker.vsock"),
                 m(VSOCK_PORT_CONTAINERD, "containerd.vsock"),

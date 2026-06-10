@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 pub const PROTO_VERSION: u32 = 1;
 pub const VSOCK_PORT_CONTROL: u32 = 1024;
 pub const VSOCK_PORT_SHELL: u32 = 1025;
+/// Generic host->guest TCP proxy: 2-byte BE dst port header, then a raw
+/// splice to 127.0.0.1:<port> inside the guest (published-ports path on
+/// backends where the guest IP is not host-routable).
+pub const VSOCK_PORT_TCPPROXY: u32 = 1026;
 /// Stream proxy to the guest's /var/run/docker.sock.
 pub const VSOCK_PORT_DOCKER: u32 = 2375;
 /// Stream proxy to the guest's /run/containerd/containerd.sock.

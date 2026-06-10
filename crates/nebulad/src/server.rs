@@ -153,7 +153,12 @@ fn handle(
                 daemon_version: env!("CARGO_PKG_VERSION").into(),
                 daemon_pid: std::process::id(),
                 vm_state: format!("{:?}", vessel.state()),
-                backend: if cfg!(target_os = "macos") { "vz" } else { "krun" }.into(),
+                backend: if cfg!(target_os = "macos") {
+                    "vz"
+                } else {
+                    "krun"
+                }
+                .into(),
                 cpus: vessel.spec.cpus,
                 mem_mib: vessel.spec.mem_mib,
                 agent,

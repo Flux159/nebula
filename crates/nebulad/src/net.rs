@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nebula_core::dns;
-use nebula_core::proto::{AgentRequest, AgentResponse};
+use nebula_core::proto::{AgentRequest, AgentResponse, VSOCK_PORT_TCPPROXY};
 
 use crate::vessel::Vessel;
 
@@ -83,15 +83,19 @@ fn spawn_docker_watcher(
                 st.published_tcp = ports.clone();
             }
 
-            // Reconcile forwarders. Linux: passt (-t all) already mirrors
-            // every guest-bound port onto the host, and the guest IP is not
-            // host-routable behind it — dialing forwarders would bind-fight
-            // passt and route nowhere. The state bookkeeping above still
-            // feeds status/DNS.
-            if cfg!(target_os = "linux") {
-                continue;
-            }
-            let Some(ip) = guest_ip else { continue };
+            // Reconcile forwarders. macOS dials the guest IP directly (VZ
+            // NAT subnet is host-routable); Linux tunnels through the
+            // agent's vsock TCP proxy (the guest IP is not host-routable
+            // behind the usermode NAT).
+            let target = if cfg!(target_os = "linux") {
+                ForwardTarget::Vsock(vessel.clone())
+            } else {
+                match guest_ip {
+                    Some(ip) => ForwardTarget::Ip(ip),
+                    None => continue,
+                }
+            };
+            let ip = guest_ip.unwrap_or(Ipv4Addr::UNSPECIFIED);
             forwarders.retain(|port, (stop, fwd_ip)| {
                 if ports.contains(port) && *fwd_ip == ip {
                     true
@@ -106,7 +110,7 @@ fn spawn_docker_watcher(
             for port in ports {
                 if let std::collections::hash_map::Entry::Vacant(e) = forwarders.entry(port) {
                     let stop = Arc::new(AtomicBool::new(false));
-                    if spawn_port_forward(port, ip, stop.clone()) {
+                    if spawn_port_forward(port, target.clone(), stop.clone()) {
                         tracing::info!(
                             port,
                             "port forward added (127.0.0.1:{port} -> {ip}:{port})"
@@ -119,7 +123,16 @@ fn spawn_docker_watcher(
     });
 }
 
-fn spawn_port_forward(port: u16, guest_ip: Ipv4Addr, stop: Arc<AtomicBool>) -> bool {
+/// Where a host-port forwarder sends bytes.
+#[derive(Clone)]
+enum ForwardTarget {
+    /// Dial <guest_ip>:<port> directly (VZ NAT).
+    Ip(Ipv4Addr),
+    /// Tunnel through the agent vsock TCP proxy (libkrun/KVM, WHP later).
+    Vsock(Arc<Vessel>),
+}
+
+fn spawn_port_forward(port: u16, target: ForwardTarget, stop: Arc<AtomicBool>) -> bool {
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
         Err(e) => {
@@ -133,17 +146,63 @@ fn spawn_port_forward(port: u16, guest_ip: Ipv4Addr, stop: Arc<AtomicBool>) -> b
                 break;
             }
             let Ok(client) = conn else { continue };
-            std::thread::spawn(move || {
-                let Ok(upstream) =
-                    TcpStream::connect_timeout(&(guest_ip, port).into(), Duration::from_secs(5))
-                else {
-                    return;
-                };
-                pump(client, upstream);
+            let target = target.clone();
+            std::thread::spawn(move || match target {
+                ForwardTarget::Ip(ip) => {
+                    let Ok(upstream) =
+                        TcpStream::connect_timeout(&(ip, port).into(), Duration::from_secs(5))
+                    else {
+                        return;
+                    };
+                    pump(client, upstream);
+                }
+                ForwardTarget::Vsock(vessel) => {
+                    let Ok(mut upstream) = vessel.vsock_connect(VSOCK_PORT_TCPPROXY) else {
+                        return;
+                    };
+                    if upstream.write_all(&port.to_be_bytes()).is_err() {
+                        return;
+                    }
+                    pump_unix(client, upstream);
+                }
             });
         }
     });
     true
+}
+
+/// pump() for a TcpStream<->UnixStream pair (the vsock proxy path).
+fn pump_unix(a: TcpStream, b: std::os::unix::net::UnixStream) {
+    let _ = a.set_nodelay(true);
+    let (mut ar, mut aw) = (a.try_clone().unwrap(), a);
+    let (mut br, mut bw) = (b.try_clone().unwrap(), b);
+    let t = std::thread::spawn(move || {
+        let mut buf = [0u8; 65536];
+        loop {
+            match ar.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if bw.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = bw.shutdown(std::net::Shutdown::Write);
+    });
+    let mut buf = [0u8; 65536];
+    loop {
+        match br.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if aw.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = aw.shutdown(std::net::Shutdown::Write);
+    let _ = t.join();
 }
 
 fn pump(a: TcpStream, b: TcpStream) {
