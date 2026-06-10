@@ -188,9 +188,19 @@ mod init {
             .unwrap_or(false);
         if !is_ext4 {
             println!("nebula-init: formatting data disk {DATA_DEV}");
-            let _ = std::process::Command::new("/sbin/mkfs.ext4")
-                .args(["-q", "-L", "nebula-data", DATA_DEV])
-                .status();
+            // Leave 1 MiB of tail slack: the libkrun raw-image layer shaves
+            // 64 KiB off sparse backing files on first open, and ext4 refuses
+            // to mount when its block count exceeds the device.
+            let blocks = std::fs::read_to_string("/sys/class/block/vdb/size")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .map(|sectors| (sectors * 512 / 4096).saturating_sub(256));
+            let mut cmd = std::process::Command::new("/sbin/mkfs.ext4");
+            cmd.args(["-q", "-L", "nebula-data", DATA_DEV]);
+            if let Some(blocks) = blocks {
+                cmd.arg(blocks.to_string());
+            }
+            let _ = cmd.status();
         }
         mount(DATA_DEV, DATA_MNT, "ext4", 0, None);
     }
@@ -213,10 +223,27 @@ mod init {
         // DHCP-provided nameserver is dead weight. Public resolvers until the
         // Phase 3 host-backed resolver lands (see tasks/issues.md).
         std::thread::spawn(|| {
-            // The agent's DNS relay (127.0.0.1:53) resolves via the HOST.
-            let want = "nameserver 127.0.0.1\n";
-            for _ in 0..20 {
+            // VZ (real NIC + gateway): the agent's DNS relay on 127.0.0.1
+            // resolves via the host. libkrun (TSI, no NIC): outbound UDP is
+            // hijacked and proxied by the VMM, so a public resolver works.
+            for i in 0..20 {
                 std::thread::sleep(Duration::from_millis(500));
+                let has_gw = std::fs::read_to_string("/proc/net/route")
+                    .map(|r| {
+                        r.lines()
+                            .skip(1)
+                            .any(|l| l.split_whitespace().nth(1) == Some("00000000"))
+                    })
+                    .unwrap_or(false);
+                // Give DHCP a moment before concluding there is no gateway.
+                if !has_gw && i < 6 {
+                    continue;
+                }
+                let want = if has_gw {
+                    "nameserver 127.0.0.1\n"
+                } else {
+                    "nameserver 1.1.1.1\n"
+                };
                 let cur = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
                 if cur != want {
                     let _ = std::fs::write("/etc/resolv.conf", want);
@@ -333,6 +360,7 @@ mod init {
             uname_line()
         );
 
+        let agent_only = std::env::var_os("NEBULA_AGENT_ONLY").is_some();
         let mut services = vec![
             Service {
                 name: "vessel-agent",
@@ -359,6 +387,11 @@ mod init {
                 pid: -1,
             },
         ];
+        if agent_only {
+            // Named vessels: a clean Linux VM with just the agent (the user
+            // installs what they want; docker/k8s live in the engine vessel).
+            services.truncate(1);
+        }
         // Stagger startup so wait_for dependencies resolve in order.
         for svc in services.iter_mut() {
             svc.pid = spawn_service(svc);

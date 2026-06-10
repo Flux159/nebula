@@ -68,6 +68,7 @@ impl Vessel {
             rng: true,
             rosetta: true,
             gpu: false,
+            vsock_ports: vec![],
         };
 
         let backend = backend_by_name("vz")?;

@@ -103,6 +103,7 @@ pub fn run(opts: SandboxOpts) -> anyhow::Result<()> {
         rng: true,
         rosetta: false,
         gpu: opts.gpu,
+        vsock_ports: vec![],
     };
 
     let backend = backend_by_name("krun")?;

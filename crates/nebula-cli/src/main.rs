@@ -8,6 +8,7 @@ mod contexts;
 mod kube;
 mod sandbox;
 mod spike;
+mod vessels;
 mod wrap;
 
 #[derive(Parser)]
@@ -109,6 +110,11 @@ enum Commands {
         #[arg(long)]
         rootfs: Option<PathBuf>,
     },
+    /// Manage persistent named microVMs (separate from the engine vessel).
+    Vessels {
+        #[command(subcommand)]
+        action: VesselsAction,
+    },
     /// Run a command in an ephemeral, isolated microVM (libkrun sidecar).
     Sandbox {
         #[command(subcommand)]
@@ -130,6 +136,47 @@ enum AutostartAction {
     Disable,
     /// Show autostart + engine state.
     Status,
+}
+
+#[derive(Subcommand)]
+enum VesselsAction {
+    /// Create and start a new named vessel.
+    New {
+        name: String,
+        #[arg(long, default_value_t = 2)]
+        cpus: u32,
+        /// Guest RAM in MiB.
+        #[arg(long, default_value_t = 2048)]
+        mem: u64,
+        /// Attach the host GPU (virtio-gpu Venus).
+        #[arg(long)]
+        gpu: bool,
+        /// Data disk size in GiB (sparse).
+        #[arg(long, default_value_t = 16)]
+        disk: u64,
+    },
+    /// List vessels (including the engine vessel).
+    Ls,
+    /// Start a stopped vessel.
+    Start { name: String },
+    /// Stop a running vessel (the engine vessel is managed by nebula down).
+    Stop { name: String },
+    /// Remove a vessel and its disks.
+    Rm {
+        name: String,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show a vessel's configuration and live state.
+    Info { name: String },
+    /// Run a command inside a vessel.
+    Exec {
+        name: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        cmd: Vec<String>,
+    },
+    /// Open an interactive shell inside a vessel.
+    Shell { name: String },
 }
 
 #[derive(Subcommand)]
@@ -197,6 +244,28 @@ fn main() -> anyhow::Result<()> {
         Commands::Quickstart => commands::quickstart(),
         Commands::Doctor => commands::doctor(),
         Commands::InstallImage { kernel, rootfs } => commands::install_image(kernel, rootfs),
+        Commands::Vessels { action } => match action {
+            VesselsAction::New {
+                name,
+                cpus,
+                mem,
+                gpu,
+                disk,
+            } => vessels::new(vessels::NewOpts {
+                name,
+                cpus,
+                mem,
+                gpu,
+                data_gib: disk,
+            }),
+            VesselsAction::Ls => vessels::ls(),
+            VesselsAction::Start { name } => vessels::start(&name),
+            VesselsAction::Stop { name } => vessels::stop(&name),
+            VesselsAction::Rm { name, force } => vessels::rm(&name, force),
+            VesselsAction::Info { name } => vessels::info(&name),
+            VesselsAction::Exec { name, cmd } => vessels::exec(&name, cmd),
+            VesselsAction::Shell { name } => vessels::shell(&name),
+        },
         Commands::Sandbox { action } => match action {
             SandboxAction::Run {
                 cpus,

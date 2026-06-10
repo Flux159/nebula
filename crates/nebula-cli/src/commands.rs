@@ -46,7 +46,9 @@ pub fn up() -> anyhow::Result<()> {
                         t0.elapsed(),
                         s.vm_state
                     );
-                    println!("next: nebula setup docker — or run `nebula quickstart` for the guide");
+                    println!(
+                        "next: nebula setup docker — or run `nebula quickstart` for the guide"
+                    );
                     return Ok(());
                 }
             }
@@ -162,16 +164,25 @@ pub fn shell() -> anyhow::Result<()> {
         rows,
     };
     let stream = client::connect()?;
-    let (resp, (mut reader, writer)) = client::request_on(stream, &DaemonRequest::Shell { open })?;
+    let (resp, (reader, writer)) = client::request_on(stream, &DaemonRequest::Shell { open })?;
     match resp {
         DaemonResponse::ShellStarted => {}
         DaemonResponse::Error { message } => bail!("shell failed: {message}"),
         other => bail!("unexpected response: {other:?}"),
     }
 
+    interactive_pump(reader, writer)
+}
+
+/// Raw-mode TTY <-> stream pump shared by `nebula shell` and
+/// `nebula vessels shell`. Consumes the connection.
+pub fn interactive_pump(
+    mut reader: std::io::BufReader<std::os::unix::net::UnixStream>,
+    writer: std::os::unix::net::UnixStream,
+) -> anyhow::Result<()> {
     let _raw = RawTerm::enable()?;
 
-    // stdin -> daemon
+    // stdin -> remote
     let mut writer_in = writer.try_clone()?;
     std::thread::spawn(move || {
         let mut stdin = std::io::stdin();
@@ -189,7 +200,7 @@ pub fn shell() -> anyhow::Result<()> {
         let _ = writer_in.shutdown(std::net::Shutdown::Write);
     });
 
-    // daemon -> stdout
+    // remote -> stdout
     let mut stdout = std::io::stdout();
     let mut buf = [0u8; 4096];
     loop {
@@ -250,9 +261,9 @@ pub fn quickstart() -> anyhow::Result<()> {
     println!("{}", bold("1. Engine"));
     if running {
         println!("   ✓ the engine is running");
-    } else {
-        println!("   nebula up                          start the engine (~0.6s)");
     }
+    println!("   nebula up                          start the engine (~0.6s)");
+    println!("   nebula down                        stop it (containers stop too)");
     println!("   nebula autostart enable            start it at login + restart on failure");
     println!("   nebula status                      see where you stand anytime");
     println!();
@@ -270,11 +281,13 @@ pub fn quickstart() -> anyhow::Result<()> {
     println!("   nebula kubectl get nodes           one-off, never touches your contexts");
     println!();
     println!("{}", bold("4. Helm"));
+    println!("   helm uses your kubectl context — `nebula setup kubectl` covers it too");
     println!("   nebula helm install my-redis oci://registry-1.docker.io/bitnamicharts/redis");
     println!();
-    println!("{}", bold("5. Isolated microVMs"));
-    println!("   nebula sandbox run -- uname -a     boots, runs, exits in ~250ms");
-    println!("   nebula sandbox run --gpu -- ls /dev/dri");
+    println!("{}", bold("5. Your own VMs"));
+    println!("   nebula vessels new dev             persistent named microVM (--gpu for GPU)");
+    println!("   nebula vessels shell dev           drop into it (ls/stop/rm to manage)");
+    println!("   nebula sandbox run -- uname -a     or ephemeral: boots+runs+exits in ~250ms");
     println!();
     println!("{}", bold("6. Desktop app & stats"));
     println!("   nebula ui                          open the app");
@@ -442,7 +455,7 @@ fn find_repo_vessel_out() -> anyhow::Result<PathBuf> {
     bail!("not in a nebula repo (vessel/out not found)")
 }
 
-fn term_size() -> Option<(u16, u16)> {
+pub fn term_size() -> Option<(u16, u16)> {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     let rc = unsafe { libc::ioctl(0, libc::TIOCGWINSZ, &mut ws) };
     (rc == 0 && ws.ws_col > 0).then_some((ws.ws_col, ws.ws_row))

@@ -15,4 +15,4 @@ pub mod spec;
 
 pub use backend::{VmHandle, VmState, VmmBackend};
 pub use error::{Error, Result};
-pub use spec::{BootSpec, ConsoleSpec, DiskSpec, NetSpec, ShareSpec, VmSpec};
+pub use spec::{BootSpec, ConsoleSpec, DiskSpec, NetSpec, ShareSpec, VmSpec, VsockPortMap};

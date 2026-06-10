@@ -124,10 +124,18 @@ pub fn open_ui() -> anyhow::Result<()> {
         println!("opened Nebula app");
         return Ok(());
     }
-    // Dev build relative to the repo (binary next to target/…/nebula).
+    // Repo-built bundle, then the bare dev binary.
     let exe = std::env::current_exe()?;
     for dir in exe.ancestors() {
         if dir.join("Cargo.toml").is_file() && dir.join("ui/src-tauri").is_dir() {
+            let bundle = dir.join("ui/src-tauri/target/release/bundle/macos/nebula-ui.app");
+            if bundle.is_dir() {
+                let status = std::process::Command::new("open").arg(&bundle).status()?;
+                if status.success() {
+                    println!("opened Nebula app ({})", bundle.display());
+                    return Ok(());
+                }
+            }
             for profile in ["release", "debug"] {
                 let bin = dir.join(format!("ui/src-tauri/target/{profile}/nebula-ui"));
                 if bin.is_file() {

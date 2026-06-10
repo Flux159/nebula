@@ -35,6 +35,16 @@ pub struct VmSpec {
     /// Attach a virtio-gpu with Venus (Vulkan) support (libkrun only).
     #[serde(default)]
     pub gpu: bool,
+    /// Host unix socket <-> guest vsock port maps (libkrun only): connecting
+    /// to `host_path` reaches a guest listener on `port`.
+    #[serde(default)]
+    pub vsock_ports: Vec<VsockPortMap>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VsockPortMap {
+    pub port: u32,
+    pub host_path: PathBuf,
 }
 
 fn default_true() -> bool {
@@ -156,6 +166,7 @@ mod tests {
             rng: true,
             rosetta: false,
             gpu: false,
+            vsock_ports: vec![],
         }
     }
 

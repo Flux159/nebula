@@ -43,6 +43,8 @@ struct KrunApi {
     krun_add_virtiofs: unsafe extern "C" fn(u32, *const c_char, *const c_char) -> i32,
     /// Optional: only exported when libkrun is built with GPU=1.
     krun_set_gpu_options: Option<unsafe extern "C" fn(u32, u32) -> i32>,
+    /// Map a host unix socket to a guest vsock port (listen=true: host-initiated).
+    krun_add_vsock_port2: unsafe extern "C" fn(u32, u32, *const c_char, bool) -> i32,
     krun_start_enter: unsafe extern "C" fn(u32) -> i32,
 }
 
@@ -100,6 +102,7 @@ fn load_api() -> Result<&'static KrunApi> {
                 krun_add_disk2: sym(handle, "krun_add_disk2").ok(),
                 krun_add_virtiofs: sym(handle, "krun_add_virtiofs")?,
                 krun_set_gpu_options: sym(handle, "krun_set_gpu_options").ok(),
+                krun_add_vsock_port2: sym(handle, "krun_add_vsock_port2")?,
                 krun_start_enter: sym(handle, "krun_start_enter")?,
             })
         }
@@ -321,6 +324,16 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
             check(
                 "krun_add_virtiofs",
                 (api.krun_add_virtiofs)(ctx, tag.as_ptr(), path_c.as_ptr()),
+            )?;
+        }
+
+        for m in &spec.vsock_ports {
+            // Stale sockets make the worker fail to bind on restart.
+            let _ = std::fs::remove_file(&m.host_path);
+            let path_c = cstr(&m.host_path.to_string_lossy());
+            check(
+                "krun_add_vsock_port2",
+                (api.krun_add_vsock_port2)(ctx, m.port, path_c.as_ptr(), true),
             )?;
         }
 
