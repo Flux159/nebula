@@ -6,6 +6,24 @@ limitations; routine TODOs live in code.)
 
 ## Open (being worked / next phase)
 
+- **(2026-06-10 PM) VZ memory-RESTORE suddenly fails with "permission
+  denied" on the dev Mac — environmental, evidence says reboot first.**
+  saveMachineStateToURL still works (200ms); restoreMachineStateFromURL
+  fails for freshly saved state, same binary, seconds apart. Bisect facts:
+  the commit that passed 24/24 last night fails identically today; a
+  Developer-ID-signed (hardened runtime) binary fails identically to
+  ad-hoc; no macOS update (same 25F80, uptime spans the working period);
+  no sandbox denials in the unified log; nothing logged by the
+  Virtualization subsystem during the failure. Day's churn included ~14
+  hard-killed VMs (pkill -9 cycles during Linux bring-up) — prime suspect
+  is wedged per-VM `com.apple.Virtualization.VirtualMachine` service state.
+  NEXT: reboot the Mac, rerun scripts/test-vessels.sh (expect 24/24);
+  if it persists, write a 50-line standalone VZ save/restore repro for
+  Apple feedback. Note for the roadmap: this is exactly the
+  Apple-opacity class of failure that the fork-native krun-snapshot track
+  (above) eliminates. The OS-aware suite passes 17/17 on macOS for
+  everything except the restore-dependent checks; Linux passes 17/17.
+
 - **(2026-06-10) Fork snapshot/restore ("krun-snapshot") — the Firecracker
   design, agreed as the next fork track.** Supersedes the old "memory-state
   snapshots are vz-only" limitation with a cross-platform plan:
