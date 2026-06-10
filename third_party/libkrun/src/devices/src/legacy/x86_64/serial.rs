@@ -272,6 +272,7 @@ impl Subscriber for Serial {
             return;
         }
 
+        #[cfg(unix)]
         if let Some(input) = self.input.as_mut()
             && input.as_raw_fd() == source
         {
@@ -290,11 +291,19 @@ impl Subscriber for Serial {
 
     /// Initial registration of pollable objects.
     /// If serial input is present, register the serial input FD as readable.
+    #[cfg(unix)]
     fn interest_list(&self) -> Vec<EpollEvent> {
         match &self.input {
             Some(input) => vec![EpollEvent::new(EventSet::IN, input.as_raw_fd() as u64)],
             None => vec![],
         }
+    }
+
+    // Legacy serial input needs pollable fds; on Windows the guest console
+    // goes through virtio-console (port_io/windows) instead.
+    #[cfg(windows)]
+    fn interest_list(&self) -> Vec<EpollEvent> {
+        vec![]
     }
 }
 

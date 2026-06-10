@@ -1,7 +1,10 @@
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::unix::io::RawFd;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
+#[cfg(windows)]
+use utils::windows::RawFd;
 
 use super::super::Queue as VirtQueue;
 use super::TsiFlags;
@@ -15,9 +18,14 @@ use super::proxy::{Proxy, ProxyRemoval, ProxyUpdate};
 use super::reaper::ReaperThread;
 #[cfg(target_os = "macos")]
 use super::timesync::TimesyncThread;
+#[cfg(unix)]
 use super::tsi_dgram::TsiDgramProxy;
+#[cfg(unix)]
 use super::tsi_stream::TsiStreamProxy;
-use super::unix::UnixProxy;
+#[cfg(unix)]
+use super::unix::UnixProxy as HostProxy;
+#[cfg(windows)]
+use super::windows::TcpProxy as HostProxy;
 use crossbeam_channel::{Sender, unbounded};
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 use vm_memory::GuestMemoryMmap;
@@ -270,6 +278,7 @@ impl VsockMuxer {
         }
     }
 
+    #[cfg(unix)]
     fn process_proxy_create(&self, pkt: &VsockPacket) {
         debug!("proxy create request");
         if let Some(req) = pkt.read_proxy_create() {
@@ -365,6 +374,7 @@ impl VsockMuxer {
         }
     }
 
+    #[cfg(unix)]
     fn process_connect(&self, pkt: &VsockPacket) {
         debug!("proxy connect request");
         if let Some(req) = pkt.read_connect_req() {
@@ -383,6 +393,7 @@ impl VsockMuxer {
         }
     }
 
+    #[cfg(unix)]
     fn process_getname(&self, pkt: &VsockPacket) {
         debug!("new getname request");
         if let Some(req) = pkt.read_getname_req() {
@@ -407,6 +418,7 @@ impl VsockMuxer {
         }
     }
 
+    #[cfg(unix)]
     fn process_sendto_addr(&self, pkt: &VsockPacket) {
         debug!("new DGRAM sendto addr: src={}", pkt.src_port());
         if let Some(req) = pkt.read_sendto_addr() {
@@ -425,6 +437,7 @@ impl VsockMuxer {
         }
     }
 
+    #[cfg(unix)]
     fn process_sendto_data(&self, pkt: &VsockPacket) {
         let id = ((pkt.src_port() as u64) << 32) | (defs::TSI_PROXY_PORT as u64);
         debug!("DGRAM sendto data: id={} src={}", id, pkt.src_port());
@@ -433,6 +446,7 @@ impl VsockMuxer {
         }
     }
 
+    #[cfg(unix)]
     fn process_listen_request(&self, pkt: &VsockPacket) {
         debug!("DGRAM listen request: src={}", pkt.src_port());
         if let Some(req) = pkt.read_listen_req() {
@@ -452,6 +466,7 @@ impl VsockMuxer {
         }
     }
 
+    #[cfg(unix)]
     fn process_accept_request(&self, pkt: &VsockPacket) {
         debug!("DGRAM accept request: src={}", pkt.src_port());
         if let Some(req) = pkt.read_accept_req() {
@@ -468,6 +483,7 @@ impl VsockMuxer {
         }
     }
 
+    #[cfg(unix)]
     fn process_proxy_release(&self, pkt: &VsockPacket) {
         debug!("DGRAM release request: src={}", pkt.src_port());
         if let Some(req) = pkt.read_release_req() {
@@ -497,6 +513,7 @@ impl VsockMuxer {
         );
     }
 
+    #[cfg(unix)]
     fn process_dgram_rw(&self, pkt: &VsockPacket) {
         debug!("DGRAM OP_RW");
         let id = ((pkt.src_port() as u64) << 32) | (defs::TSI_PROXY_PORT as u64);
@@ -524,24 +541,35 @@ impl VsockMuxer {
         }
 
         match pkt.dst_port() {
+            #[cfg(unix)]
             defs::TSI_PROXY_CREATE if self.tsi_flags.tsi_enabled() => {
                 self.process_proxy_create(pkt)
             }
+            #[cfg(unix)]
             defs::TSI_CONNECT if self.tsi_flags.tsi_enabled() => self.process_connect(pkt),
+            #[cfg(unix)]
             defs::TSI_GETNAME if self.tsi_flags.tsi_enabled() => self.process_getname(pkt),
+            #[cfg(unix)]
             defs::TSI_SENDTO_ADDR if self.tsi_flags.tsi_enabled() => self.process_sendto_addr(pkt),
+            #[cfg(unix)]
             defs::TSI_SENDTO_DATA if self.tsi_flags.tsi_enabled() => self.process_sendto_data(pkt),
+            #[cfg(unix)]
             defs::TSI_LISTEN if self.tsi_flags.tsi_enabled() => self.process_listen_request(pkt),
+            #[cfg(unix)]
             defs::TSI_ACCEPT if self.tsi_flags.tsi_enabled() => self.process_accept_request(pkt),
+            #[cfg(unix)]
             defs::TSI_PROXY_RELEASE if self.tsi_flags.tsi_enabled() => {
                 self.process_proxy_release(pkt)
             }
             _ => {
+                #[cfg(unix)]
                 if pkt.op() == uapi::VSOCK_OP_RW {
                     self.process_dgram_rw(pkt);
                 } else {
                     error!("unexpected dgram pkt: {}", pkt.op());
                 }
+                #[cfg(windows)]
+                error!("unexpected dgram pkt on windows: {}", pkt.op());
             }
         }
 
@@ -573,7 +601,7 @@ impl VsockMuxer {
             }
             let rxq = self.rxq.clone();
 
-            let mut unix = UnixProxy::new(
+            let mut unix = HostProxy::new(
                 id,
                 self.cid,
                 pkt.dst_port(),

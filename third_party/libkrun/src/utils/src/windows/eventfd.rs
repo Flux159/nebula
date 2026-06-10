@@ -122,6 +122,15 @@ impl EventFd {
     /// On signal, consumes one unit (semaphore mode) or drains the counter
     /// (standard mode).  The kernel event is only reset when the counter
     /// reaches zero.
+    /// Non-consuming check: is the event currently signaled?
+    ///
+    /// Unlike [`wait_timeout`](Self::wait_timeout) this does NOT decrement
+    /// the counter or reset the kernel event, so an exit signal stays
+    /// visible to every observer (vCPU loops poll this on HLT).
+    pub fn is_signaled(&self) -> bool {
+        unsafe { WaitForSingleObject(self.inner.event, 0) == WAIT_OBJECT_0 }
+    }
+
     pub fn wait_timeout(&self, ms: u32) -> bool {
         let result = unsafe { WaitForSingleObject(self.inner.event, ms) };
         if result == WAIT_OBJECT_0 {

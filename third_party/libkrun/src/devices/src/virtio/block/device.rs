@@ -106,6 +106,7 @@ impl DiskProperties {
         &self.image_id
     }
 
+    #[cfg(unix)]
     fn build_device_id(disk_file: &File) -> result::Result<String, Error> {
         let blk_metadata = disk_file.metadata().map_err(Error::GetFileMetadata)?;
         // This is how kvmtool does it.
@@ -114,6 +115,21 @@ impl DiskProperties {
             blk_metadata.st_dev(),
             blk_metadata.st_rdev(),
             blk_metadata.st_ino()
+        );
+        Ok(device_id)
+    }
+
+    // No stable dev/inode triple on Windows; derive a stable ID from file
+    // times and size, which is enough to distinguish attached disks.
+    #[cfg(windows)]
+    fn build_device_id(disk_file: &File) -> result::Result<String, Error> {
+        use std::os::windows::fs::MetadataExt;
+        let blk_metadata = disk_file.metadata().map_err(Error::GetFileMetadata)?;
+        let device_id = format!(
+            "{}{}{}",
+            blk_metadata.creation_time(),
+            blk_metadata.last_write_time(),
+            blk_metadata.file_size()
         );
         Ok(device_id)
     }

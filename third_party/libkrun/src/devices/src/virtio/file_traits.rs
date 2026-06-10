@@ -4,14 +4,17 @@
 
 use std::fs::File;
 use std::io::{Error, ErrorKind, Result};
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
 #[cfg(feature = "blk")]
 use imago::io_buffers::{IoVector, IoVectorMut};
 use vm_memory::VolatileSlice;
 
+#[cfg(unix)]
 use libc::{c_int, c_void, read, readv, size_t, write, writev};
 
+#[cfg(unix)]
 use super::bindings::{off64_t, pread64, preadv64, pwrite64, pwritev64};
 #[cfg(feature = "blk")]
 use super::block::device::DiskProperties;
@@ -220,6 +223,7 @@ impl<T: FileReadWriteAtVolatile + ?Sized> FileReadWriteAtVolatile for &T {
     }
 }
 
+#[cfg(unix)]
 macro_rules! volatile_impl {
     ($ty:ty) => {
         impl FileReadWriteVolatile for $ty {
@@ -414,7 +418,51 @@ macro_rules! volatile_impl {
     };
 }
 
+#[cfg(unix)]
 volatile_impl!(File);
+
+// Windows: positional IO via FileExt::seek_read/seek_write. The volatile
+// slices wrap guest memory that stays mapped for the VM's lifetime, so
+// borrowing it as a byte slice for the duration of one syscall is sound —
+// the same contract the unix impl relies on when handing libc the raw
+// pointer. seek_read/seek_write move the OS file pointer as a side effect;
+// every caller of these traits is either purely positional (blk) or owns
+// the file exclusively (console/log sinks), so that is acceptable.
+#[cfg(windows)]
+impl FileReadWriteVolatile for File {
+    fn read_volatile(&mut self, slice: VolatileSlice) -> Result<usize> {
+        use std::io::Read;
+        let buf = unsafe {
+            std::slice::from_raw_parts_mut(slice.ptr_guard_mut().as_ptr(), slice.len())
+        };
+        self.read(buf)
+    }
+
+    fn write_volatile(&mut self, slice: VolatileSlice) -> Result<usize> {
+        use std::io::Write;
+        let buf =
+            unsafe { std::slice::from_raw_parts(slice.ptr_guard().as_ptr(), slice.len()) };
+        self.write(buf)
+    }
+}
+
+#[cfg(windows)]
+impl FileReadWriteAtVolatile for File {
+    fn read_at_volatile(&self, slice: VolatileSlice, offset: u64) -> Result<usize> {
+        use std::os::windows::fs::FileExt;
+        let buf = unsafe {
+            std::slice::from_raw_parts_mut(slice.ptr_guard_mut().as_ptr(), slice.len())
+        };
+        self.seek_read(buf, offset)
+    }
+
+    fn write_at_volatile(&self, slice: VolatileSlice, offset: u64) -> Result<usize> {
+        use std::os::windows::fs::FileExt;
+        let buf =
+            unsafe { std::slice::from_raw_parts(slice.ptr_guard().as_ptr(), slice.len()) };
+        self.seek_write(buf, offset)
+    }
+}
 
 #[cfg(feature = "blk")]
 impl FileReadWriteAtVolatile for DiskProperties {

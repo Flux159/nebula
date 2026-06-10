@@ -279,6 +279,25 @@ impl Vmm {
         Ok(())
     }
 
+    #[cfg(target_os = "windows")]
+    pub fn resume_vcpus(&mut self) -> Result<()> {
+        for handle in self.vcpus_handles.iter() {
+            handle
+                .send_event(VcpuEvent::Resume)
+                .map_err(Error::VcpuEvent)?;
+        }
+        for handle in self.vcpus_handles.iter() {
+            match handle
+                .response_receiver()
+                .recv_timeout(Duration::from_millis(1000))
+            {
+                Ok(VcpuResponse::Resumed) => (),
+                _ => return Err(Error::VcpuResume),
+            }
+        }
+        Ok(())
+    }
+
     /// Configures the system for boot.
     pub fn configure_system(
         &self,

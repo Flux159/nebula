@@ -87,10 +87,39 @@ const LINUX_ENOTRECOVERABLE: i32 = 131;
 // Errors to be directly used.
 pub const LINUX_ERANGE: i32 = 34;
 
+#[cfg(unix)]
 pub fn linux_error(error: std::io::Error) -> std::io::Error {
     std::io::Error::from_raw_os_error(linux_errno_raw(error.raw_os_error().unwrap_or(libc::EIO)))
 }
 
+// On Windows raw_os_error() is a Win32 error code, not an errno, so map
+// through ErrorKind instead. The guest only ever sees Linux errno values.
+#[cfg(windows)]
+pub fn linux_error(error: std::io::Error) -> std::io::Error {
+    use std::io::ErrorKind;
+    let errno = match error.kind() {
+        ErrorKind::NotFound => LINUX_ENOENT,
+        ErrorKind::PermissionDenied => LINUX_EACCES,
+        ErrorKind::ConnectionRefused => LINUX_ECONNREFUSED,
+        ErrorKind::ConnectionReset => LINUX_ECONNRESET,
+        ErrorKind::ConnectionAborted => LINUX_ECONNABORTED,
+        ErrorKind::NotConnected => LINUX_ENOTCONN,
+        ErrorKind::AddrInUse => LINUX_EADDRINUSE,
+        ErrorKind::AddrNotAvailable => LINUX_EADDRNOTAVAIL,
+        ErrorKind::BrokenPipe => LINUX_EPIPE,
+        ErrorKind::AlreadyExists => LINUX_EEXIST,
+        ErrorKind::WouldBlock => LINUX_EAGAIN,
+        ErrorKind::InvalidInput => LINUX_EINVAL,
+        ErrorKind::TimedOut => LINUX_ETIMEDOUT,
+        ErrorKind::Interrupted => LINUX_EINTR,
+        ErrorKind::Unsupported => LINUX_EOPNOTSUPP,
+        ErrorKind::OutOfMemory => LINUX_ENOMEM,
+        _ => LINUX_EIO,
+    };
+    std::io::Error::from_raw_os_error(errno)
+}
+
+#[cfg(unix)]
 pub fn linux_errno_raw(errno: i32) -> i32 {
     match errno {
         libc::EPERM => LINUX_EPERM,

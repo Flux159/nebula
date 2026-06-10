@@ -1,4 +1,4 @@
-#[cfg(not(feature = "aws-nitro"))]
+#[cfg(all(unix, not(feature = "aws-nitro")))]
 use devices::virtio::fs::virtual_entry::VirtualDirEntry;
 
 #[derive(Clone, Debug)]
@@ -9,6 +9,6 @@ pub struct FsDeviceConfig {
     pub shared_dir: Option<String>,
     pub shm_size: Option<usize>,
     pub read_only: bool,
-    #[cfg(not(feature = "aws-nitro"))]
+    #[cfg(all(unix, not(feature = "aws-nitro")))]
     pub virtual_entries: Vec<VirtualDirEntry>,
 }

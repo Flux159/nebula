@@ -18,14 +18,23 @@
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::net::{Ipv4Addr, SocketAddrV4};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::os::raw::c_char;
 use std::result;
 
 #[cfg(target_os = "linux")]
 use nix::sys::socket::{AddressFamily, sockaddr};
+#[cfg(unix)]
 use nix::sys::socket::{SockaddrLike, SockaddrStorage};
+
+/// Socket address type carried inside TSI requests/responses. nix's
+/// `SockaddrStorage` doesn't exist on Windows; TSI is unix-only there, so a
+/// plain `SocketAddr` keeps the shared struct definitions compiling.
+#[cfg(unix)]
+pub type TsiSockAddr = SockaddrStorage;
+#[cfg(windows)]
+pub type TsiSockAddr = std::net::SocketAddr;
 use utils::byte_order;
 use vm_memory::{self, Address, GuestAddress, GuestMemory, GuestMemoryError};
 
@@ -108,7 +117,7 @@ pub struct TsiProxyCreate {
 #[repr(C)]
 pub struct TsiConnectReq {
     pub peer_port: u32,
-    pub addr: SockaddrStorage,
+    pub addr: TsiSockAddr,
 }
 
 #[repr(C)]
@@ -128,9 +137,10 @@ pub struct TsiGetnameReq {
 pub struct TsiGetnameRsp {
     pub result: i32,
     pub addr_len: u32,
-    pub addr: SockaddrStorage,
+    pub addr: TsiSockAddr,
 }
 
+#[cfg(unix)]
 impl Default for TsiGetnameRsp {
     fn default() -> Self {
         let addr: SockaddrStorage = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0).into();
@@ -143,11 +153,23 @@ impl Default for TsiGetnameRsp {
     }
 }
 
+#[cfg(windows)]
+impl Default for TsiGetnameRsp {
+    fn default() -> Self {
+        TsiGetnameRsp {
+            result: -1,
+            // Linux sockaddr_in wire size; TSI is never enabled on Windows.
+            addr_len: 16,
+            addr: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0).into(),
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug)]
 pub struct TsiSendtoAddr {
     pub peer_port: u32,
-    pub addr: SockaddrStorage,
+    pub addr: TsiSockAddr,
 }
 
 #[repr(C)]
@@ -156,7 +178,7 @@ pub struct TsiListenReq {
     pub peer_port: u32,
     pub vm_port: u32,
     pub backlog: i32,
-    pub addr: SockaddrStorage,
+    pub addr: TsiSockAddr,
 }
 
 #[repr(C)]
@@ -586,6 +608,38 @@ impl VsockPacket {
         Some(sockaddr)
     }
 
+    // Like the macOS parser: TSI requests carry Linux wire-format sockaddrs,
+    // decode them byte-by-byte. AF_UNIX is unsupported off-Linux.
+    #[cfg(windows)]
+    fn parse_address(buf: &[u8], _addr_len: u32) -> Option<TsiSockAddr> {
+        let family: u16 = byte_order::read_le_u16(&buf[0..2]);
+
+        match family {
+            defs::LINUX_AF_INET => {
+                let in_port: u16 = byte_order::read_be_u16(&buf[2..4]);
+                let in_addr = Ipv4Addr::new(buf[4], buf[5], buf[6], buf[7]);
+                Some(SocketAddrV4::new(in_addr, in_port).into())
+            }
+            defs::LINUX_AF_INET6 => {
+                let in_port: u16 = byte_order::read_be_u16(&buf[2..4]);
+                let flowinfo: u32 = byte_order::read_be_u32(&buf[4..8]);
+                let in6_addr = Ipv6Addr::new(
+                    byte_order::read_be_u16(&buf[8..10]),
+                    byte_order::read_be_u16(&buf[10..12]),
+                    byte_order::read_be_u16(&buf[12..14]),
+                    byte_order::read_be_u16(&buf[14..16]),
+                    byte_order::read_be_u16(&buf[16..18]),
+                    byte_order::read_be_u16(&buf[18..20]),
+                    byte_order::read_be_u16(&buf[20..22]),
+                    byte_order::read_be_u16(&buf[22..24]),
+                );
+                let scope_id: u32 = byte_order::read_be_u32(&buf[24..28]);
+                Some(SocketAddrV6::new(in6_addr, in_port, flowinfo, scope_id).into())
+            }
+            _ => None,
+        }
+    }
+
     #[cfg(target_os = "macos")]
     fn parse_address(buf: &[u8], _addr_len: u32) -> Option<SockaddrStorage> {
         let family: u16 = byte_order::read_le_u16(&buf[0..2]);
@@ -676,6 +730,18 @@ impl VsockPacket {
         }
     }
 
+    // TSI is never enabled on Windows: just report the result, no sockaddr.
+    #[cfg(windows)]
+    pub fn write_getname_rsp(&mut self, rsp: TsiGetnameRsp) {
+        if self.buf_size >= 132
+            && let Some(buf) = self.buf_mut()
+        {
+            byte_order::write_le_u32(&mut buf[0..], rsp.result as u32);
+            byte_order::write_le_u32(&mut buf[4..], 0);
+        }
+    }
+
+    #[cfg(unix)]
     pub fn write_getname_rsp(&mut self, rsp: TsiGetnameRsp) {
         if self.buf_size >= 132
             && let Some(buf) = self.buf_mut()

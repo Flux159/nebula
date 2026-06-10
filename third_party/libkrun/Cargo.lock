@@ -758,6 +758,7 @@ dependencies = [
  "vm-fdt",
  "vm-memory",
  "vmm-sys-util 0.15.0",
+ "windows-sys",
  "zerocopy",
 ]
 
@@ -950,6 +951,7 @@ dependencies = [
  "once_cell",
  "usernet",
  "vm-memory",
+ "windows-sys",
 ]
 
 [[package]]

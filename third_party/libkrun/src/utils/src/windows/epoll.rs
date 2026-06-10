@@ -223,6 +223,12 @@ impl Clone for Epoll {
     }
 }
 
+// `entries` is a per-instance scratch buffer (each clone gets its own and
+// only `wait(&mut self)` touches it); the raw pointers inside
+// `OVERLAPPED_ENTRY` are kernel-owned completion data with no thread
+// affinity. `iocp` is Send + Sync on its own (see above).
+unsafe impl Send for Epoll {}
+
 impl Epoll {
     /// Create a new polling instance backed by a fresh I/O Completion Port.
     pub fn new() -> io::Result<Self> {

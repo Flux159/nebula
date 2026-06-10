@@ -1,18 +1,29 @@
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::unix::io::RawFd;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
+#[cfg(windows)]
+use utils::windows::RawFd;
 
 use super::super::Queue as VirtQueue;
 use super::muxer::{MuxerRx, ProxyMap, push_packet};
 use super::muxer_rxq::MuxerRxQ;
 use super::proxy::{NewProxyType, Proxy, ProxyRemoval, ProxyUpdate};
+#[cfg(unix)]
 use super::tsi_stream::TsiStreamProxy;
 
 use crate::virtio::InterruptTransport;
 use crate::virtio::vsock::defs;
-use crate::virtio::vsock::unix::{UnixAcceptorProxy, UnixProxy};
+#[cfg(unix)]
+use crate::virtio::vsock::unix::{
+    UnixAcceptorProxy as HostAcceptorProxy, UnixProxy as HostProxy,
+};
+#[cfg(windows)]
+use crate::virtio::vsock::windows::{
+    TcpAcceptorProxy as HostAcceptorProxy, TcpProxy as HostProxy,
+};
 use crossbeam_channel::Sender;
 use rand::{Rng, rng, rngs::ThreadRng};
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
@@ -110,6 +121,7 @@ impl MuxerThread {
             let local_port: u32 = thread_rng.random_range(1024..u32::MAX);
             let new_id: u64 = ((peer_port as u64) << 32) | (local_port as u64);
             let new_proxy: Box<dyn Proxy> = match proxy_type {
+                #[cfg(unix)]
                 NewProxyType::Tcp => Box::new(TsiStreamProxy::new_reverse(
                     new_id,
                     self.cid,
@@ -122,7 +134,12 @@ impl MuxerThread {
                     self.queue.clone(),
                     self.rxq.clone(),
                 )),
-                NewProxyType::Unix => Box::new(UnixProxy::new_reverse(
+                #[cfg(windows)]
+                NewProxyType::Tcp => {
+                    let _ = family;
+                    unreachable!("TSI is not supported on Windows")
+                }
+                NewProxyType::Unix => Box::new(HostProxy::new_reverse(
                     new_id,
                     self.cid,
                     local_port,
@@ -155,7 +172,7 @@ impl MuxerThread {
                 continue;
             }
             let id = ((*port as u64) << 32) | (defs::TSI_PROXY_PORT as u64);
-            let proxy = match UnixAcceptorProxy::new(id, path, *port) {
+            let proxy = match HostAcceptorProxy::new(id, path, *port) {
                 Ok(proxy) => proxy,
                 Err(e) => {
                     warn!("Failed to create listening proxy at {path:?}: {e:?}");
@@ -183,7 +200,7 @@ impl MuxerThread {
             {
                 Ok(ev_cnt) => {
                     for ev in &epoll_events[0..ev_cnt] {
-                        debug!("Event: ev.data={} ev.fd={}", ev.data(), ev.fd());
+                        debug!("Event: ev.data={}", ev.data());
                         let evset = EventSet::from_bits(ev.events).unwrap();
                         let id = ev.data();
 

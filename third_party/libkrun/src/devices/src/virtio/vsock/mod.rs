@@ -16,9 +16,14 @@ mod proxy;
 mod reaper;
 #[cfg(target_os = "macos")]
 mod timesync;
+#[cfg(unix)]
 mod tsi_dgram;
+#[cfg(unix)]
 mod tsi_stream;
+#[cfg(unix)]
 mod unix;
+#[cfg(windows)]
+mod windows;
 
 pub use self::defs::TsiFlags;
 pub use self::defs::uapi::VIRTIO_ID_VSOCK as TYPE_VSOCK;
