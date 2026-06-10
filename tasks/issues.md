@@ -6,6 +6,19 @@ limitations; routine TODOs live in code.)
 
 ## Open (being worked / next phase)
 
+- **(2026-06-10, Linux) Guest networking strategy for the Linux/krun engine
+  needs deciding.** Findings from the KVM spike: our x86_64 vmlinux boots on
+  KVM ✓ (reached userspace), but libkrun's TSI on Linux is delivered via a
+  `tsi_hijack` LD_PRELOAD helper baked into libkrunfw's initramfs + its
+  chroot-mode init — our disk-boot flow (init=/sbin/nebula-init) bypasses
+  both, so TSI may not apply to the engine path on Linux the way it does on
+  macOS. Options to evaluate once the x86_64 rootfs exists: (a) verify
+  whether fork TSI works with custom kernel/init at the vsock layer alone;
+  (b) build the fork with NET=1 and use `krun_add_net_unixstream` + passt
+  (gives a real NIC; vessel-init's eth0/DHCP path already handles that);
+  (c) virtio-net + host TAP (needs privileges). Leaning (b) — passt is
+  packaged everywhere and the guest path is identical to the VZ NAT shape.
+
 - **(2026-06-09, Phase 1) libkrun console-to-file needs a fork patch eventually.**
   With a non-tty output fd, libkrun sends guest hvc0 to its *log* and only a
   secondary "krun-stdout" virtio port reaches our fd. Worked around by also
