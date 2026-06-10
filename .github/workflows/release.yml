@@ -1,0 +1,70 @@
+name: Release build
+
+# Signed + notarized + stapled Nebula DMG (Developer ID), from the same
+# pipeline as dev-build but finished by scripts/sign-release.sh with the
+# Apple secrets. Runs on demand and on version tags (which also attach the
+# DMG to the GitHub release).
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # attach release assets
+  actions: read # download guest-images artifacts
+
+jobs:
+  mac-release:
+    runs-on: macos-15 # arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Brew deps (libkrun fork toolchain + GPU userspace)
+        run: |
+          brew tap slp/krunkit
+          brew install zig llvm virglrenderer molten-vk
+
+      - name: Tauri CLI
+        run: cargo install tauri-cli --locked
+
+      - name: Fetch latest guest images (built by guest-images.yml)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id=$(gh run list --workflow guest-images.yml --status success --limit 1 \
+                     --json databaseId -q '.[0].databaseId')
+          if [ -z "$run_id" ]; then
+            echo "::error::no successful guest-images run — dispatch that workflow first"
+            exit 1
+          fi
+          mkdir -p dist vessel/out
+          gh run download "$run_id" --name guest-images --dir dist
+          gzip -dc dist/kernel-Image.gz > vessel/out/Image
+          gzip -dc dist/rootfs.img.gz > vessel/out/rootfs.img
+
+      - name: Build Nebula.app
+        run: scripts/bundle-app.sh
+
+      - name: Sign, notarize, staple
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: scripts/sign-release.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nebula-dmg-signed
+          path: dist/Nebula_*_aarch64.dmg
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Nebula_*_aarch64.dmg
