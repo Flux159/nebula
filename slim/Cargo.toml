@@ -9,6 +9,7 @@ members = [
     "crates/slim-build",
     "crates/slim-client",
     "crates/slim-kube",
+    "crates/slim-kubeapi",
     "crates/slim-helm",
     "crates/slim-tmpl",
     "crates/slimd",
@@ -42,6 +43,7 @@ slim-net = { path = "crates/slim-net" }
 slim-build = { path = "crates/slim-build" }
 slim-client = { path = "crates/slim-client" }
 slim-kube = { path = "crates/slim-kube" }
+slim-kubeapi = { path = "crates/slim-kubeapi" }
 slim-helm = { path = "crates/slim-helm" }
 slim-tmpl = { path = "crates/slim-tmpl" }
 

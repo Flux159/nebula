@@ -1,5 +1,20 @@
 # Better slim Kubernetes — the apiserver-lite roadmap
 
+> **Status (2026-06): Tier A is built.** `slim-kubeapi` is a passive
+> apiserver-lite — discovery, generic CRUD, **watch** (resourceVersion +
+> 410-on-stale), and **dynamic CRD registration** over an in-memory store.
+> Validated against **real `kubectl` v1.35** (12/12): `api-resources`, core
+> CRUD, applying a CRD → it appears in discovery → custom-resource round-trip,
+> and `kubectl get -w` streaming both replayed and live events. It does NOT
+> reconcile (a stored Deployment doesn't run — that's the facade / Tier B).
+> One caveat: `kubectl apply` does a client-side OpenAPI-v2-*protobuf*
+> preflight slim doesn't serve, so CLI users pass `--validate=false`;
+> client-go operators don't do that preflight and need no flag. Remaining to
+> ship it to in-pod operators: host it in the vessel on a TLS port + project a
+> ServiceAccount token/CA + a `kubernetes.default` Service (integration, below).
+
+
+
 Today's slim k8s is a [facade over the Docker engine](./slim-k8s-shim.md): it
 maps a useful subset of manifests onto containers, and **skips** CRDs,
 CustomResources, RBAC, and anything operator-shaped. This doc scopes what it

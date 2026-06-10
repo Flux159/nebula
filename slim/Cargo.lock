@@ -640,6 +640,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "slim-kubeapi"
+version = "0.1.0"
+dependencies = [
+ "httparse",
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "slim-net"
 version = "0.1.0"
 dependencies = [
