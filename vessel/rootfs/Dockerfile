@@ -25,7 +25,15 @@ RUN if [ "$FLAVOR" = "full" ]; then \
         && chmod 755 /usr/local/bin/k3s; \
     fi
 
-# Nebula guest binaries (cross-built on the host, passed via build context).
+# Embedder customization (staged by build-rootfs.sh; empty by default):
+# overlay/ is copied over / (embedder files win), then setup.sh runs inside
+# the image. Both happen BEFORE the Nebula guest binaries land below, so the
+# boot/manage contract can't be broken by an overlay.
+COPY overlay/ /
+COPY setup.sh /nebula-setup.sh
+RUN sh /nebula-setup.sh && rm -f /nebula-setup.sh
+
+# Nebula guest binaries last — always authoritative.
 COPY bin/vessel-init /sbin/nebula-init
 COPY bin/vessel-agent /usr/bin/vessel-agent
 RUN chmod 755 /sbin/nebula-init /usr/bin/vessel-agent

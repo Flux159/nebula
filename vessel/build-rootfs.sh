@@ -27,6 +27,27 @@ mkdir -p vessel/rootfs/bin
 cp target/aarch64-unknown-linux-musl/release/vessel-init vessel/rootfs/bin/
 cp target/aarch64-unknown-linux-musl/release/vessel-agent vessel/rootfs/bin/
 
+# Embedder hooks: OVERLAY=dir (copied over /), SETUP=script (runs in build).
+OVERLAY="${OVERLAY:-}"
+SETUP="${SETUP:-}"
+rm -rf vessel/rootfs/overlay vessel/rootfs/setup.sh
+mkdir -p vessel/rootfs/overlay
+if [ -n "$OVERLAY" ]; then
+    test -d "$OVERLAY" || { echo "ERROR: OVERLAY dir not found: $OVERLAY" >&2; exit 1; }
+    cp -R "$OVERLAY"/ vessel/rootfs/overlay/
+    echo "overlay: $OVERLAY"
+fi
+if [ -n "$SETUP" ]; then
+    test -f "$SETUP" || { echo "ERROR: SETUP script not found: $SETUP" >&2; exit 1; }
+    cp "$SETUP" vessel/rootfs/setup.sh
+    echo "setup: $SETUP"
+else
+    printf '#!/bin/sh
+true
+' > vessel/rootfs/setup.sh
+fi
+trap 'rm -rf vessel/rootfs/overlay vessel/rootfs/setup.sh' EXIT
+
 FLAVOR="${FLAVOR:-full}"
 if [ "$FLAVOR" = "full" ]; then OUT_NAME=rootfs.img; else OUT_NAME="rootfs-$FLAVOR.img"; fi
 SIZE_MB="${ROOTFS_SIZE_MB:-2048}"

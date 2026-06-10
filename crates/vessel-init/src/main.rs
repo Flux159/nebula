@@ -254,14 +254,14 @@ mod init {
             "nameserver 1.1.1.1\n"
         };
         let _ = std::fs::write("/etc/resolv.conf", want);
-        // Keep it pinned afterwards (udhcpc renewals rewrite it).
-        std::thread::spawn(move || {
-            for _ in 0..30 {
-                std::thread::sleep(Duration::from_millis(500));
-                let cur = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
-                if cur != want {
-                    let _ = std::fs::write("/etc/resolv.conf", want);
-                }
+        // Keep it pinned FOREVER: udhcpc rewrites resolv.conf on every lease
+        // renewal (observed hours into uptime), and any service restarting
+        // after that would inherit the dead DHCP nameserver.
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(2));
+            let cur = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+            if cur != want {
+                let _ = std::fs::write("/etc/resolv.conf", want);
             }
         });
     }

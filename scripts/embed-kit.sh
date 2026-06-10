@@ -15,11 +15,15 @@ cd "$(dirname "$0")/.."
 
 FLAVOR=full
 OUT=dist-embed
+OVERLAY=""
+SETUP=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --flavor) FLAVOR="$2"; shift 2 ;;
         --out) OUT="$2"; shift 2 ;;
-        *) echo "usage: $0 [--flavor full|docker|minimal] [--out DIR]" >&2; exit 2 ;;
+        --overlay) OVERLAY="$2"; shift 2 ;;
+        --setup) SETUP="$2"; shift 2 ;;
+        *) echo "usage: $0 [--flavor full|docker|minimal] [--out DIR] [--overlay DIR] [--setup SCRIPT]" >&2; exit 2 ;;
     esac
 done
 
@@ -29,8 +33,9 @@ scripts/sign-dev.sh target/release/nebula target/release/nebulad
 
 echo "==> guest images (flavor: $FLAVOR)"
 if [ "$FLAVOR" = "full" ]; then IMG=vessel/out/rootfs.img; else IMG="vessel/out/rootfs-$FLAVOR.img"; fi
-if [ ! -f "$IMG" ]; then
-    FLAVOR="$FLAVOR" vessel/build-rootfs.sh
+if [ -n "$OVERLAY$SETUP" ] || [ ! -f "$IMG" ]; then
+    # Custom content always forces a fresh build.
+    FLAVOR="$FLAVOR" OVERLAY="$OVERLAY" SETUP="$SETUP" vessel/build-rootfs.sh
 fi
 test -f vessel/out/Image || vessel/build-kernel.sh
 
