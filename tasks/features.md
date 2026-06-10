@@ -69,6 +69,21 @@ both behind a VMM-backend trait from day one.
   Desktop ships a 10 GB Hyper-V bundle to run bash safely
   (anthropics/claude-code#29045 + HN 48479452) — "the embeddable VM layer
   for AI apps" is the slot Nebula + nebula-slim (slim/BRIEF.md) target.
+  **Execution notes (2026-06-11, machine in hand — Win11 Pro x64 32c, ssh):**
+  WSL2/nested-KVM explicitly REJECTED as a tier (Suyog: flaky; also wouldn't
+  be honest native support). Native plan: (a) host toolchain ready (rustup
+  1.96 + VS Build Tools; HypervisorPlatform + VirtualMachinePlatform
+  features enabled); (b) fork gains a `whp` backend — vCPU/partition via
+  WinHvPlatform (the `libwhp` crate, insula-rs/libwhp, is prior-art Rust
+  bindings to vendor or crib from), reusing the fork's existing virtio-mmio
+  device layer, with usernet as the network backend (built for this — no
+  passt on Windows) and the agent vsock TCP proxy for inbound; (c) host-side
+  nebula/nebulad port: unix-socket seams -> AF_UNIX-on-Windows/uds for our
+  internal sockets, 127.0.0.1 TCP or named pipe for the docker surface
+  (docker.exe speaks npipe + tcp), USERPROFILE paths, libc call gates,
+  Task Scheduler/service for autostart; (d) x86_64 guest kernel + rootfs
+  from the Linux track boot unchanged. CI/CD: windows-latest runner job
+  (build + unit) after the port compiles; release artifacts after WHP boots.
 
 ### x86/amd64 containers — decided approach (dual backend)
 
