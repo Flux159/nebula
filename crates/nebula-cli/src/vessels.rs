@@ -20,8 +20,14 @@ use nebula_core::{BootSpec, ConsoleSpec, DiskSpec, NetSpec, VmSpec, VsockPortMap
 
 use crate::client;
 
-/// Names that would collide with the engine vessel or confuse routing.
+/// Names that refer to the engine vessel (docker/k8s). Read-style commands
+/// route there transparently; destructive ones refuse and point at
+/// `nebula up` / `nebula down`.
 const RESERVED: &[&str] = &["vessel", "default", "engine", "nebula"];
+
+fn is_engine(name: &str) -> bool {
+    RESERVED.contains(&name)
+}
 
 pub struct NewOpts {
     pub name: String,
@@ -139,6 +145,9 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
 }
 
 pub fn start(name: &str) -> anyhow::Result<()> {
+    if is_engine(name) {
+        return crate::commands::up();
+    }
     let dir = dir_of(name)?;
     let spec = read_spec(&dir)?;
     if live_pid(&dir).is_some() {
@@ -268,6 +277,11 @@ pub fn ls() -> anyhow::Result<()> {
 }
 
 pub fn info(name: &str) -> anyhow::Result<()> {
+    if is_engine(name) {
+        println!("vessel:   vessel (engine — docker/kubernetes)");
+        println!("managed:  nebula up / nebula down / nebula status");
+        return crate::commands::status();
+    }
     let dir = dir_of(name)?;
     let spec = read_spec(&dir)?;
     let running = live_pid(&dir);
@@ -317,6 +331,9 @@ pub fn exec(name: &str, cmd: Vec<String>) -> anyhow::Result<()> {
         !cmd.is_empty(),
         "usage: nebula vessels exec <name> -- <cmd> [args…]"
     );
+    if is_engine(name) {
+        return crate::commands::exec(cmd);
+    }
     let dir = dir_of(name)?;
     anyhow::ensure!(live_pid(&dir).is_some(), "vessel `{name}` is not running");
     let resp = agent_request(
@@ -340,6 +357,9 @@ pub fn exec(name: &str, cmd: Vec<String>) -> anyhow::Result<()> {
 }
 
 pub fn shell(name: &str) -> anyhow::Result<()> {
+    if is_engine(name) {
+        return crate::commands::shell();
+    }
     let dir = dir_of(name)?;
     anyhow::ensure!(live_pid(&dir).is_some(), "vessel `{name}` is not running");
     let stream = UnixStream::connect(dir.join("shell.sock"))?;
