@@ -80,7 +80,10 @@ impl Vessel {
                 },
             ],
             shares: home_share(),
-            net: if macos { NetSpec::Nat } else { NetSpec::None },
+            // Nat everywhere: VZ NAT on macOS; passt-backed virtio-net on
+            // Linux (the engine needs outbound for image pulls — TSI's
+            // guest-side hijack doesn't apply to our own-init disk boots).
+            net: NetSpec::Nat,
             vsock: macos,
             console: ConsoleSpec::File(paths.console_log()),
             balloon: macos,

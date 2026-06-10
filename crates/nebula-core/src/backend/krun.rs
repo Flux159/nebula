@@ -72,6 +72,10 @@ struct KrunApi {
     krun_set_gpu_options: Option<unsafe extern "C" fn(u32, u32) -> i32>,
     /// Map a host unix socket to a guest vsock port (listen=true: host-initiated).
     krun_add_vsock_port2: unsafe extern "C" fn(u32, u32, *const c_char, bool) -> i32,
+    /// Optional: only exported when libkrun is built with NET=1. Attaches a
+    /// virtio-net device backed by a userspace proxy (passt) unix socket.
+    krun_add_net_unixstream:
+        Option<unsafe extern "C" fn(u32, *const c_char, i32, *const u8, u32, u32) -> i32>,
     krun_start_enter: unsafe extern "C" fn(u32) -> i32,
 }
 
@@ -143,6 +147,7 @@ fn load_api() -> Result<&'static KrunApi> {
                 krun_add_virtiofs: sym(handle, "krun_add_virtiofs")?,
                 krun_set_gpu_options: sym(handle, "krun_set_gpu_options").ok(),
                 krun_add_vsock_port2: sym(handle, "krun_add_vsock_port2")?,
+                krun_add_net_unixstream: sym(handle, "krun_add_net_unixstream").ok(),
                 krun_start_enter: sym(handle, "krun_start_enter")?,
             })
         }
@@ -295,6 +300,39 @@ impl Drop for KrunVm {
 
 /// Entry point for the worker subprocess. Configures the microVM from the JSON
 /// spec and enters it; never returns (the process becomes the VM).
+/// Find passt for NetSpec::Nat NICs. Env override, PATH, then ~/.local/bin
+/// (the sudo-free dpkg-extract location).
+fn passt_path() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("NEBULA_PASST_PATH") {
+        let p = PathBuf::from(p);
+        return p.is_file().then_some(p);
+    }
+    let path = std::env::var("PATH").unwrap_or_default();
+    for dir in path.split(':') {
+        let candidate = PathBuf::from(dir).join("passt");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    let local = PathBuf::from(home).join(".local/bin/passt");
+    local.is_file().then_some(local)
+}
+
+fn parse_mac(mac: Option<&str>) -> Option<[u8; 6]> {
+    let mac = mac?;
+    let mut out = [0u8; 6];
+    let mut n = 0;
+    for part in mac.split(':') {
+        if n == 6 {
+            return None;
+        }
+        out[n] = u8::from_str_radix(part, 16).ok()?;
+        n += 1;
+    }
+    (n == 6).then_some(out)
+}
+
 pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
     let spec: VmSpec = serde_json::from_str(spec_json)
         .map_err(|e| Error::backend(BACKEND, format!("bad spec: {e}")))?;
@@ -356,6 +394,51 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
             check(
                 "krun_add_virtio_console_default",
                 (api.krun_add_virtio_console_default)(ctx, devnull, out, err),
+            )?;
+        }
+
+        // Networking: with no net device libkrun uses TSI (transparent
+        // outbound, used by sidecars). NetSpec::Nat attaches a passt-backed
+        // virtio-net NIC instead — the guest sees eth0 + DHCP, same shape as
+        // VZ NAT (this is the Linux engine's outbound path: TSI's guest-side
+        // hijack doesn't apply to our disk-boot/own-init flow).
+        if matches!(spec.net, crate::spec::NetSpec::Nat) {
+            let add_net = api.krun_add_net_unixstream.ok_or_else(|| {
+                Error::backend(
+                    BACKEND,
+                    "NetSpec::Nat needs a libkrun built with NET=1 (krun_add_net_unixstream missing)",
+                )
+            })?;
+            let passt = passt_path().ok_or_else(|| {
+                Error::backend(
+                    BACKEND,
+                    "passt not found (apt/brew install passt, or set NEBULA_PASST_PATH)",
+                )
+            })?;
+            let sock =
+                std::env::temp_dir().join(format!("nebula-passt-{}.sock", std::process::id()));
+            let _ = std::fs::remove_file(&sock);
+            // --one-off: passt exits when the VM closes the connection, so it
+            // shares the worker's lifetime even though it daemonizes.
+            Command::new(&passt)
+                .arg("--quiet")
+                .arg("--one-off")
+                .arg("--socket")
+                .arg(&sock)
+                .spawn()
+                .map_err(|e| Error::backend(BACKEND, format!("spawn {}: {e}", passt.display())))?;
+            for _ in 0..50 {
+                if sock.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let mac: [u8; 6] =
+                parse_mac(spec.mac.as_deref()).unwrap_or([0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee]);
+            let sock_c = cstr(&sock.to_string_lossy());
+            check(
+                "krun_add_net_unixstream",
+                add_net(ctx, sock_c.as_ptr(), -1, mac.as_ptr(), 0, 0),
             )?;
         }
 
