@@ -107,6 +107,23 @@ pub fn rx_to_pkt(cid: u64, rx: MuxerRx, pkt: &mut VsockPacket) {
                 .set_buf_alloc(0)
                 .set_fwd_cnt(0);
         }
+        MuxerRx::ShutdownSend {
+            local_port,
+            peer_port,
+            buf_alloc,
+            fwd_cnt,
+        } => {
+            pkt.set_op(uapi::VSOCK_OP_SHUTDOWN)
+                .set_src_cid(uapi::VSOCK_HOST_CID)
+                .set_dst_cid(cid)
+                .set_src_port(local_port)
+                .set_dst_port(peer_port)
+                .set_len(0)
+                .set_type(uapi::VSOCK_TYPE_STREAM)
+                .set_flags(uapi::VSOCK_FLAGS_SHUTDOWN_SEND)
+                .set_buf_alloc(buf_alloc)
+                .set_fwd_cnt(fwd_cnt);
+        }
         MuxerRx::ConnResponse {
             local_port,
             peer_port,

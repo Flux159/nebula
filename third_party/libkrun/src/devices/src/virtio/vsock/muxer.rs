@@ -34,6 +34,18 @@ pub enum MuxerRx {
         local_port: u32,
         peer_port: u32,
     },
+    /// Half-close: the host peer stopped sending (read EOF). The guest sees
+    /// EOF on reads but its own send direction stays open — required for
+    /// hijacked streams like docker attach/exec.
+    ShutdownSend {
+        local_port: u32,
+        peer_port: u32,
+        /// Live credit info: unlike RST the connection stays up, and the
+        /// guest updates peer credit from EVERY packet — zeros here freeze
+        /// the guest's send direction.
+        buf_alloc: u32,
+        fwd_cnt: u32,
+    },
     GetnameResponse {
         local_port: u32,
         peer_port: u32,

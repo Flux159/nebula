@@ -28,6 +28,8 @@ use utils::epoll::EventSet;
 use vm_memory::GuestMemoryMmap;
 
 pub struct UnixProxy {
+    /// Host peer half-closed its write side; guest already got SHUTDOWN(SEND).
+    half_closed: bool,
     id: u64,
     cid: u64,
     fd: OwnedFd,
@@ -108,6 +110,7 @@ impl UnixProxy {
             peer_port: 0,
             control_port,
             fd,
+            half_closed: false,
             status: ProxyStatus::Idle,
             mem,
             queue,
@@ -141,6 +144,7 @@ impl UnixProxy {
             peer_port,
             control_port: 0,
             fd,
+            half_closed: false,
             status: ProxyStatus::ReverseInit,
             mem,
             queue,
@@ -196,6 +200,20 @@ impl UnixProxy {
             peer_port: self.peer_port,
         };
 
+        push_packet(self.cid, rx, &self.rxq, &self.queue, &self.mem);
+    }
+
+    fn push_shutdown_send(&self) {
+        debug!(
+            "push_shutdown_send: id: {}, peer_port: {}, local_port: {}",
+            self.id, self.peer_port, self.local_port
+        );
+        let rx = MuxerRx::ShutdownSend {
+            local_port: self.local_port,
+            peer_port: self.peer_port,
+            buf_alloc: defs::CONN_TX_BUF_SIZE as u32,
+            fwd_cnt: self.tx_cnt.0,
+        };
         push_packet(self.cid, rx, &self.rxq, &self.queue, &self.mem);
     }
 
@@ -564,7 +582,7 @@ impl Proxy for UnixProxy {
 
         if evset.contains(EventSet::IN) {
             debug!("process_event: IN");
-            if self.status == ProxyStatus::Connected {
+            if self.status == ProxyStatus::Connected && !self.half_closed {
                 let (signal_queue, wait_credit) = self.recv_pkt();
                 update.signal_queue = signal_queue;
 
@@ -579,12 +597,19 @@ impl Proxy for UnixProxy {
                 }
 
                 if self.status == ProxyStatus::Closed {
+                    // Host peer stopped sending (read EOF). That is a HALF
+                    // close: propagate SHUTDOWN(SEND) so the guest sees EOF
+                    // on reads while its own send direction stays open —
+                    // hijacked streams (docker run/exec attach) break if we
+                    // RST here. Full teardown happens on HANG_UP or when the
+                    // guest closes its side.
                     debug!(
-                        "process_event: endpoint closed, sending reset: id={}",
+                        "process_event: host read EOF, half-closing: id={}",
                         self.id
                     );
-
-                    self.push_reset();
+                    self.status = ProxyStatus::Connected;
+                    self.half_closed = true;
+                    self.push_shutdown_send();
                     update.signal_queue = true;
                     update.polling = Some((self.id(), self.fd.as_raw_fd(), EventSet::empty()));
                     return update;

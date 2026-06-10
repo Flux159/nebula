@@ -252,9 +252,9 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
         },
         disks,
         shares: vec![],
-        // krun: TSI handles outbound transparently with no NIC.
-        // vz: a NAT NIC (DHCP via vessel-init; DNS through the engine's relay).
-        net: if vz { NetSpec::Nat } else { NetSpec::None },
+        // NICs everywhere: VZ NAT on vz; the fork's in-process usernet NAT
+        // on krun (TSI never applied to our own-init disk boots).
+        net: NetSpec::Nat,
         vsock: vz, // VZ needs the device for the worker's socket proxies
         console: ConsoleSpec::File(dir.join("console.log")),
         balloon: false,

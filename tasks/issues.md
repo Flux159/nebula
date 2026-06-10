@@ -26,17 +26,20 @@ limitations; routine TODOs live in code.)
     (gives GPU vessels snapshots — impossible on vz). VZ vessels keep
     Apple's save/restore as the slow tier (~400-600ms, opaque sharing).
 
-- **(2026-06-10, Linux) docker attach/exec streams through the vsock unix
-  proxy — half-close saga, in progress.** Hijacked HTTP connections (docker
+- ~~docker attach/exec streams half-close saga~~ **RESOLVED (2026-06-10):
+  two fork patches.** Hijacked HTTP connections (docker
   run/exec output) lost server->guest bytes: docker CLI half-closes its
   write side when stdin isn't attached, and libkrun's host-side unix proxy
   answered read-EOF with a full VSOCK RST, killing dockerd's response.
   Fork patch adds MuxerRx::ShutdownSend (VSOCK_OP_SHUTDOWN +
   SHUTDOWN_SEND flags) so host EOF half-closes the guest side instead.
-  First test after the patch HANGS at docker run (failure mode moved from
-  lost-output to no-teardown) — likely the guest's later full-close path or
-  credit accounting needs the same care. Plain request/response, logs,
-  pulls, published ports, k8s ALL work; only attach-style streams affected.
+  Patch 1 alone HUNG instead: the ShutdownSend packet copied Reset's
+  buf_alloc=0/fwd_cnt=0 — and virtio-vsock updates peer credit from EVERY
+  packet, so the guest's send window froze and the response never flowed.
+  Patch 2 carries live credit (CONN_TX_BUF_SIZE + tx_cnt) in the shutdown
+  packet. Verified: docker run / run -i / exec all stream correctly; pulls,
+  ports, k8s unaffected. Watch-item: one transient guest-DNS timeout on the
+  first query right after boot (relay/UDP-flow race; retry clean).
 
 - **(2026-06-10, Linux) Guest networking strategy for the Linux/krun engine
   needs deciding.** Findings from the KVM spike: our x86_64 vmlinux boots on
