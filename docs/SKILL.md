@@ -49,6 +49,10 @@ nebula vessels new dev                          # libkrun: ~0.1s boot; --gpu for
 nebula vessels new agent --backend vz           # VZ: enables LIVE memory snapshots
 nebula vessels new deb --from-image debian:bookworm-slim   # any arm64 docker image
                                                 # (local `docker build` tags work too)
+nebula vessels new ml --volume models:50 --volume scratch:10
+                                                # extra persistent volumes: auto-
+                                                # formatted ext4, mounted /mnt/<name>,
+                                                # included in snapshots/branches
 nebula vessels exec dev -- uname -a             # run a command (vsock, no ssh)
 nebula vessels shell dev                        # interactive shell
 nebula vessels ls / info / stop / start / rm / reset

@@ -39,6 +39,32 @@ limitations; routine TODOs live in code.)
 
 ## Needs discussion
 
+- **(2026-06-10) The right way to embed Nebula in another app — discussion
+  with Suyog (scheduled 10:00 PST).** Current story is sidecar-shaped
+  (embed kit: bin/ + lib/ + images/, NEBULA_HOME isolation, REST/SDKs,
+  docs/embedding.md). Open questions to settle:
+  * sidecar CLI vs in-process `nebula-core` vs a long-lived supervisor API —
+    where's the supported line?
+  * engine lifecycle ownership: who starts/stops/updates the engine when
+    several apps embed it (shared engine vs per-app NEBULA_HOME — resource
+    cost says share, isolation says split);
+  * update channel: app ships pinned sidecars — how do guest images +
+    binaries upgrade together (version-compat matrix, `install-image` flow);
+  * API surface to freeze for embedders (REST v1alpha1 vs gRPC vs typed
+    SDKs as the contract), incl. vessel/snapshot APIs which are CLI-only
+    today;
+  * agent-image distribution: vessel-base on Docker Hub + convert-image vs
+    --vessel-image prebaked kits;
+  * embeddable UI pieces (status panel / containers list as web components
+    the host app drops in?).
+
+- **(2026-06-10) UI direction for the user-facing window — discussion with
+  Suyog (scheduled 10:00 PST).** Synology-style app catalog as the headline
+  (see features.md Phase 12 update): app manifests over compose/helm,
+  one-click install, snapshot-before-upgrade rollback; what the default
+  window shows non-technical users vs the current containers/k8s developer
+  views; logs/shell affordances (in-app terminal vs copyable commands).
+
 - **(2026-06-10) `nebula sandbox` from the bundled app can't build its
   initramfs.** Ephemeral sandboxes assemble an initramfs from the dev tree's
   musl `vessel-init` binary, which isn't shipped in Nebula.app — so sandbox

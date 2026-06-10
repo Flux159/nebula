@@ -44,6 +44,61 @@ pub struct NewOpts {
     pub rootfs_mb: u64,
     /// VMM: `krun` (fastest boot, GPU) or `vz` (live memory snapshots).
     pub backend: String,
+    /// Extra persistent volumes (`name:GiB`), mounted at /mnt/<name>.
+    pub volumes: Vec<String>,
+}
+
+/// Parse `--volume name:GiB` specs. Names become mount points (/mnt/<name>)
+/// and disk files (vol-<name>.img), so they're strictly validated.
+fn parse_volumes(specs: &[String]) -> anyhow::Result<Vec<(String, u64)>> {
+    let mut out: Vec<(String, u64)> = Vec::new();
+    for s in specs {
+        let (name, size) = s
+            .split_once(':')
+            .with_context(|| format!("--volume wants name:GiB, got `{s}`"))?;
+        anyhow::ensure!(
+            !name.is_empty()
+                && name.len() <= 32
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'),
+            "volume names must be [a-z0-9_-] (max 32 chars), got `{name}`"
+        );
+        anyhow::ensure!(
+            name != "data",
+            "`data` is the built-in data disk (size it with --disk)"
+        );
+        anyhow::ensure!(
+            !out.iter().any(|(n, _)| n == name),
+            "duplicate volume `{name}`"
+        );
+        let gib: u64 = size
+            .parse()
+            .with_context(|| format!("volume `{name}`: bad size `{size}` (GiB)"))?;
+        anyhow::ensure!(
+            (1..=2048).contains(&gib),
+            "volume `{name}`: size must be 1..=2048 GiB"
+        );
+        out.push((name.to_string(), gib));
+    }
+    anyhow::ensure!(out.len() <= 8, "at most 8 extra volumes per vessel");
+    Ok(out)
+}
+
+/// Every disk image a vessel owns, in device order (rootfs=vda, data=vdb,
+/// volumes from vdc) — the set snapshots/branches must clone.
+fn disk_images(dir: &std::path::Path) -> Vec<String> {
+    let mut v = vec!["rootfs.img".to_string(), "data.img".to_string()];
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        let mut vols: Vec<String> = rd
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|n| n.starts_with("vol-") && n.ends_with(".img"))
+            .collect();
+        vols.sort();
+        v.extend(vols);
+    }
+    v
 }
 
 fn vessels_root() -> anyhow::Result<PathBuf> {
@@ -100,6 +155,7 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
         !(opts.from_image.is_some() && opts.rootfs_img.is_some()),
         "--from-image and --rootfs-img are mutually exclusive"
     );
+    let volumes = parse_volumes(&opts.volumes)?;
     let dir = dir_of(&opts.name)?;
     anyhow::ensure!(
         !dir.exists(),
@@ -146,6 +202,40 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
         data.set_len(opts.data_gib * 1024 * 1024 * 1024)?;
     }
 
+    // Extra volumes: sparse files; the guest formats + mounts them by name.
+    let mut disks = vec![
+        DiskSpec {
+            path: dir.join("rootfs.img"),
+            read_only: false,
+        },
+        DiskSpec {
+            path: dir.join("data.img"),
+            read_only: false,
+        },
+    ];
+    for (vname, gib) in &volumes {
+        let path = dir.join(format!("vol-{vname}.img"));
+        let f = std::fs::File::create(&path)?;
+        f.set_len(gib * 1024 * 1024 * 1024)?;
+        disks.push(DiskSpec {
+            path,
+            read_only: false,
+        });
+    }
+    let mut cmdline = String::from(
+        "console=hvc0 root=/dev/vda rw rootfstype=ext4 init=/sbin/nebula-init reboot=k panic=10 NEBULA_AGENT_ONLY=1",
+    );
+    if !volumes.is_empty() {
+        cmdline.push_str(" NEBULA_VOLUMES=");
+        cmdline.push_str(
+            &volumes
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+
     let vz = opts.backend == "vz";
     let spec = VmSpec {
         name: format!("vessel-{}", opts.name),
@@ -154,14 +244,9 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
         boot: BootSpec::Kernel {
             kernel,
             initramfs: None,
-            cmdline:
-                "console=hvc0 root=/dev/vda rw rootfstype=ext4 init=/sbin/nebula-init reboot=k panic=10 NEBULA_AGENT_ONLY=1"
-                    .into(),
+            cmdline,
         },
-        disks: vec![
-            DiskSpec { path: dir.join("rootfs.img"), read_only: false },
-            DiskSpec { path: dir.join("data.img"), read_only: false },
-        ],
+        disks,
         shares: vec![],
         // krun: TSI handles outbound transparently with no NIC.
         // vz: a NAT NIC (DHCP via vessel-init; DNS through the engine's relay).
@@ -173,8 +258,14 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
         rosetta: false,
         gpu: opts.gpu,
         vsock_ports: vec![
-            VsockPortMap { port: VSOCK_PORT_CONTROL, host_path: dir.join("agent.sock") },
-            VsockPortMap { port: VSOCK_PORT_SHELL, host_path: dir.join("shell.sock") },
+            VsockPortMap {
+                port: VSOCK_PORT_CONTROL,
+                host_path: dir.join("agent.sock"),
+            },
+            VsockPortMap {
+                port: VSOCK_PORT_SHELL,
+                host_path: dir.join("shell.sock"),
+            },
         ],
         backend: Some(opts.backend.clone()),
         // Stable MAC + machine id: keep the DHCP lease across restarts and
@@ -188,11 +279,23 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
     };
     std::fs::write(dir.join("spec.json"), serde_json::to_vec_pretty(&spec)?)?;
     println!(
-        "created vessel `{}` ({} cpus, {} MiB{})",
+        "created vessel `{}` ({} cpus, {} MiB{}{})",
         opts.name,
         opts.cpus,
         spec.mem_mib,
-        if opts.gpu { ", gpu" } else { "" }
+        if opts.gpu { ", gpu" } else { "" },
+        if volumes.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ", volumes: {}",
+                volumes
+                    .iter()
+                    .map(|(n, g)| format!("/mnt/{n} ({g}G)"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        }
     );
     start(&opts.name)
 }
@@ -712,10 +815,11 @@ pub fn snapshot(name: &str, label: &str, mode: SnapMode) -> anyhow::Result<()> {
                 path: sdir.join("memory.vzstate"),
             })
             // Disks cloned while still paused = consistent with the state file.
-            .and_then(|()| clone_file(&dir.join("rootfs.img"), &sdir.join("rootfs.img")))
             .and_then(|()| {
-                if dir.join("data.img").is_file() {
-                    clone_file(&dir.join("data.img"), &sdir.join("data.img"))?;
+                for img in disk_images(&dir) {
+                    if dir.join(&img).is_file() {
+                        clone_file(&dir.join(&img), &sdir.join(&img))?;
+                    }
                 }
                 Ok(())
             });
@@ -740,9 +844,10 @@ pub fn snapshot(name: &str, label: &str, mode: SnapMode) -> anyhow::Result<()> {
     }
     std::fs::create_dir_all(&sdir)?;
     let t0 = Instant::now();
-    clone_file(&dir.join("rootfs.img"), &sdir.join("rootfs.img"))?;
-    if dir.join("data.img").is_file() {
-        clone_file(&dir.join("data.img"), &sdir.join("data.img"))?;
+    for img in disk_images(&dir) {
+        if dir.join(&img).is_file() {
+            clone_file(&dir.join(&img), &sdir.join(&img))?;
+        }
     }
     println!("snapshot `{name}@{label}` taken in {:.0?}", t0.elapsed());
     if running {
@@ -800,10 +905,10 @@ pub fn restore(name: &str, label: &str) -> anyhow::Result<()> {
     if was_running {
         stop(name)?;
     }
-    for img in ["rootfs.img", "data.img"] {
-        if sdir.join(img).is_file() {
-            let _ = std::fs::remove_file(dir.join(img));
-            clone_file(&sdir.join(img), &dir.join(img))?;
+    for img in disk_images(&sdir) {
+        if sdir.join(&img).is_file() {
+            let _ = std::fs::remove_file(dir.join(&img));
+            clone_file(&sdir.join(&img), &dir.join(&img))?;
         }
     }
     if has_memory {
@@ -838,21 +943,20 @@ pub fn branch(name: &str, new_name: &str, label: Option<&str>, count: u32) -> an
     let spec = read_spec(&dir)?;
 
     // Branch source: a snapshot, or a transient clone of the current state.
-    let (src_root, src_data, _tmp_guard);
+    let (src_dir, _tmp_guard);
     let mut src_state: Option<PathBuf> = None;
     match label {
         Some(l) => {
             validate_label(l)?;
             let sdir = snap_dir(&dir, l);
             anyhow::ensure!(sdir.exists(), "no snapshot `{name}@{l}`");
-            src_root = sdir.join("rootfs.img");
-            src_data = sdir.join("data.img");
             // Memory snapshots fan out as LIVE resumes: every branch wakes
             // mid-execution at the exact saved instant.
             let state = sdir.join("memory.vzstate");
             if state.is_file() {
                 src_state = Some(state);
             }
+            src_dir = sdir;
             _tmp_guard = None::<tempdir::Guard>;
         }
         None => {
@@ -863,15 +967,15 @@ pub fn branch(name: &str, new_name: &str, label: Option<&str>, count: u32) -> an
             let tmp = dir.join(".branch-src");
             let _ = std::fs::remove_dir_all(&tmp);
             std::fs::create_dir_all(&tmp)?;
-            clone_file(&dir.join("rootfs.img"), &tmp.join("rootfs.img"))?;
-            if dir.join("data.img").is_file() {
-                clone_file(&dir.join("data.img"), &tmp.join("data.img"))?;
+            for img in disk_images(&dir) {
+                if dir.join(&img).is_file() {
+                    clone_file(&dir.join(&img), &tmp.join(&img))?;
+                }
             }
             if was_running {
                 start(name)?;
             }
-            src_root = tmp.join("rootfs.img");
-            src_data = tmp.join("data.img");
+            src_dir = tmp.clone();
             _tmp_guard = Some(tempdir::Guard(tmp));
         }
     }
@@ -887,9 +991,10 @@ pub fn branch(name: &str, new_name: &str, label: Option<&str>, count: u32) -> an
         let ndir = vessels_root()?.join(n);
         anyhow::ensure!(!ndir.exists(), "vessel `{n}` already exists");
         std::fs::create_dir_all(&ndir)?;
-        clone_file(&src_root, &ndir.join("rootfs.img"))?;
-        if src_data.is_file() {
-            clone_file(&src_data, &ndir.join("data.img"))?;
+        for img in disk_images(&src_dir) {
+            if src_dir.join(&img).is_file() {
+                clone_file(&src_dir.join(&img), &ndir.join(&img))?;
+            }
         }
         let mut nspec = spec.clone();
         nspec.name = format!("vessel-{n}");
@@ -1063,6 +1168,16 @@ pub fn info(name: &str) -> anyhow::Result<()> {
     );
     println!("disks:    {}", dir.join("rootfs.img").display());
     println!("          {}", dir.join("data.img").display());
+    for d in spec.disks.iter().skip(2) {
+        let mount = d
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_prefix("vol-"))
+            .map(|n| format!("  -> /mnt/{n}"))
+            .unwrap_or_default();
+        println!("          {}{mount}", d.path.display());
+    }
     println!("console:  {}", dir.join("console.log").display());
     Ok(())
 }

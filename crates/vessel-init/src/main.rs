@@ -171,13 +171,10 @@ mod init {
         poweroff();
     }
 
-    /// Format (first boot) and mount the data disk.
-    fn setup_data_disk() {
-        if !std::path::Path::new(DATA_DEV).exists() {
-            return;
-        }
-        // Blank disk detection: no ext4 superblock magic at offset 0x438.
-        let is_ext4 = std::fs::File::open(DATA_DEV)
+    /// Format `dev` as ext4 unless it already is (no superblock magic at
+    /// 0x438 = blank first boot).
+    fn ensure_ext4(dev: &str, block: &str, label: &str) {
+        let is_ext4 = std::fs::File::open(dev)
             .and_then(|mut f| {
                 use std::io::{Read, Seek, SeekFrom};
                 let mut magic = [0u8; 2];
@@ -186,23 +183,54 @@ mod init {
                 Ok(magic == [0x53, 0xef])
             })
             .unwrap_or(false);
-        if !is_ext4 {
-            println!("nebula-init: formatting data disk {DATA_DEV}");
-            // Leave 1 MiB of tail slack: the libkrun raw-image layer shaves
-            // 64 KiB off sparse backing files on first open, and ext4 refuses
-            // to mount when its block count exceeds the device.
-            let blocks = std::fs::read_to_string("/sys/class/block/vdb/size")
-                .ok()
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .map(|sectors| (sectors * 512 / 4096).saturating_sub(256));
-            let mut cmd = std::process::Command::new("/sbin/mkfs.ext4");
-            cmd.args(["-q", "-L", "nebula-data", DATA_DEV]);
-            if let Some(blocks) = blocks {
-                cmd.arg(blocks.to_string());
-            }
-            let _ = cmd.status();
+        if is_ext4 {
+            return;
         }
+        println!("nebula-init: formatting {dev} ({label})");
+        // Leave 1 MiB of tail slack: the libkrun raw-image layer shaves
+        // 64 KiB off sparse backing files on first open, and ext4 refuses
+        // to mount when its block count exceeds the device.
+        let blocks = std::fs::read_to_string(format!("/sys/class/block/{block}/size"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(|sectors| (sectors * 512 / 4096).saturating_sub(256));
+        let mut cmd = std::process::Command::new("/sbin/mkfs.ext4");
+        // -b 4096 pins the unit our block count is computed in: without it
+        // mke2fs picks 1k blocks for small filesystems and a 1 GiB volume
+        // silently becomes 256 MB.
+        cmd.args(["-q", "-b", "4096", "-L", label, dev]);
+        if let Some(blocks) = blocks {
+            cmd.arg(blocks.to_string());
+        }
+        let _ = cmd.status();
+    }
+
+    /// Format (first boot) and mount the data disk.
+    fn setup_data_disk() {
+        if !std::path::Path::new(DATA_DEV).exists() {
+            return;
+        }
+        ensure_ext4(DATA_DEV, "vdb", "nebula-data");
         mount(DATA_DEV, DATA_MNT, "ext4", 0, None);
+    }
+
+    /// Extra named volumes: `NEBULA_VOLUMES=models,scratch` (kernel cmdline →
+    /// init env) maps /dev/vdc → /mnt/models, /dev/vdd → /mnt/scratch, …,
+    /// each auto-formatted ext4 on first boot.
+    fn setup_volumes() {
+        let Ok(names) = std::env::var("NEBULA_VOLUMES") else {
+            return;
+        };
+        for (i, name) in names.split(',').filter(|s| !s.is_empty()).enumerate() {
+            let block = format!("vd{}", (b'c' + i as u8) as char);
+            let dev = format!("/dev/{block}");
+            if !std::path::Path::new(&dev).exists() {
+                println!("nebula-init: volume `{name}` expected at {dev} but no device");
+                continue;
+            }
+            ensure_ext4(&dev, &block, name);
+            mount(&dev, &format!("/mnt/{name}"), "ext4", 0, None);
+        }
     }
 
     /// Bring up eth0 via busybox udhcpc (writes resolv.conf via its default script).
@@ -369,6 +397,7 @@ mod init {
         let _ = std::fs::write("/proc/sys/kernel/hostname", "nebula");
         let _ = std::fs::create_dir_all("/var/log");
         setup_data_disk();
+        setup_volumes();
         setup_network();
         setup_rosetta();
         setup_home_share();

@@ -190,6 +190,11 @@ enum VesselsAction {
         /// (Virtualization.framework — enables live memory-state snapshots).
         #[arg(long, default_value = "krun")]
         backend: String,
+        /// Attach an extra persistent volume `name:GiB` (repeatable).
+        /// Auto-formatted ext4 on first boot, mounted at /mnt/<name>;
+        /// included in snapshots/branches.
+        #[arg(long = "volume")]
+        volumes: Vec<String>,
     },
     /// Convert a docker image (local or remote) into a bootable vessel rootfs
     /// file. Ship it with your app; create vessels offline via --rootfs-img.
@@ -361,6 +366,7 @@ fn main() -> anyhow::Result<()> {
                 rootfs_img,
                 rootfs_size,
                 backend,
+                volumes,
             } => vessels::new(vessels::NewOpts {
                 name,
                 cpus,
@@ -371,6 +377,7 @@ fn main() -> anyhow::Result<()> {
                 rootfs_img,
                 rootfs_mb: rootfs_size,
                 backend,
+                volumes,
             }),
             VesselsAction::ConvertImage {
                 image,

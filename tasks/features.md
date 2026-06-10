@@ -668,9 +668,12 @@ headline UI thesis:
   technical users get the CLI/docker/kubectl underneath (same state, no
   lock-in); agents get `nebula skill` (shipped — prints the machine-readable
   usage guide incl. snapshot/MCTS patterns; `nebula skill > SKILL.md`).
-- **Vessel disk attach UX (small gap).** VmSpec already supports N disks but
-  the CLI only provisions rootfs+data; apps-in-vessels may want named extra
-  volumes (`vessels new --volume name:size`). Trivial plumbing when needed.
+- ~~Vessel disk attach UX (small gap)~~ SHIPPED (2026-06-10):
+  `vessels new --volume name:GiB` (repeatable, ≤8) attaches extra persistent
+  disks; vessel-init auto-formats ext4 (first boot, `-b 4096` pinned — mke2fs
+  silently shrinks small fs to 1k blocks otherwise) and mounts at
+  `/mnt/<name>`; snapshots/restore/branch clone all `vol-*.img`, verified
+  consistent through a live memory snapshot round-trip.
 - Current UI state (2026-06-10): sidebar nav with Containers and Kubernetes
   views; container logs modal (tail 400 via sidecar) + copyable
   `nebula docker exec -it <id> sh` line; Kubernetes view lists

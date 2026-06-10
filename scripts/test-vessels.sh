@@ -24,30 +24,33 @@ done
 
 echo "--- both backends boot a named vessel"
 check "krun vessel boots"            "$NEBULA vessels new tv-krun --mem 1024 && $NEBULA vessels exec tv-krun -- uname -r"
-check "vz vessel boots"              "$NEBULA vessels new tv-vz --backend vz --mem 1024 && $NEBULA vessels exec tv-vz -- uname -r"
-check "vz backend recorded"          "$NEBULA vessels info tv-vz | grep -q 'backend:  vz'"
+check "vz vessel boots"              "$NEBULA vessels new tv-vz --backend vz --mem 1024 --volume vtest:1 && $NEBULA vessels exec tv-vz -- uname -r"
+check "vz backend recorded"          "out=\$($NEBULA vessels info tv-vz); echo \"\$out\" | grep -q 'backend:  vz'"
 check "vz outbound network"          "$NEBULA vessels exec tv-vz -- wget -q -T 10 -O /dev/null http://1.1.1.1"
+check "extra volume mounted ext4"    "$NEBULA vessels exec tv-vz -- sh -c 'mount | grep -q \"/mnt/vtest type ext4\"'"
+check "volume sized right (-b 4096)" "$NEBULA vessels exec tv-vz -- sh -c 'df -m /mnt/vtest | tail -1 | awk \"{exit (\\\$2 > 900 && \\\$2 < 1100) ? 0 : 1}\"'"
 
 echo "--- snapshot defaults: memory+disk on vz, graceful disk-only elsewhere"
 check "krun snapshot (auto->disk)"   "out=\$($NEBULA vessels snapshot tv-krun base); echo \"\$out\" | grep -q 'disk-only'"
-check "vz --no-memory is disk-only"  "$NEBULA vessels snapshot tv-vz base --no-memory && { $NEBULA vessels snapshots tv-vz | grep 'base' | grep -vq memory; }"
+check "vz --no-memory is disk-only"  "$NEBULA vessels snapshot tv-vz base --no-memory && { out=\$($NEBULA vessels snapshots tv-vz); echo \"\$out\" | grep 'base' | grep -vq memory; }"
 
 echo "--- live memory snapshot (vz, the default)"
 # RAM-only witnesses: a tmpfs file and a background process. Disk snapshots
 # cannot preserve either; only a true memory-state snapshot can.
-check "plant RAM-only state"         "$NEBULA vessels exec tv-vz -- sh -c 'echo golden > /tmp/witness; nohup sleep 86400 >/dev/null 2>&1 & sleep 0.2; pgrep -x sleep'"
-check "default snapshot is memory"   "$NEBULA vessels snapshot tv-vz cp | grep -q 'memory snapshot' && $NEBULA vessels exec tv-vz -- true"
-check "snapshot listed with memory"  "$NEBULA vessels snapshots tv-vz | grep -q 'cp.*memory'"
-check "corrupt RAM state"            "$NEBULA vessels exec tv-vz -- sh -c 'echo corrupted > /tmp/witness; pkill -x sleep; true'"
-check "restore resumes mid-exec"     "$NEBULA vessels restore tv-vz cp | grep -q 'live resume'"
-check "tmpfs witness restored"       "$NEBULA vessels exec tv-vz -- cat /tmp/witness | grep -q golden"
+check "plant RAM-only state"         "$NEBULA vessels exec tv-vz -- sh -c 'echo golden > /tmp/witness; echo vol-golden > /mnt/vtest/witness; nohup sleep 86400 >/dev/null 2>&1 & sleep 0.2; pgrep -x sleep'"
+check "default snapshot is memory"   "out=\$($NEBULA vessels snapshot tv-vz cp); echo \"\$out\" | grep -q 'memory snapshot' && $NEBULA vessels exec tv-vz -- true"
+check "snapshot listed with memory"  "out=\$($NEBULA vessels snapshots tv-vz); echo \"\$out\" | grep -q 'cp.*memory'"
+check "corrupt RAM state"            "$NEBULA vessels exec tv-vz -- sh -c 'echo corrupted > /tmp/witness; echo vol-corrupted > /mnt/vtest/witness; pkill -x sleep; true'"
+check "restore resumes mid-exec"     "out=\$($NEBULA vessels restore tv-vz cp); echo \"\$out\" | grep -q 'live resume'"
+check "tmpfs witness restored"       "out=\$($NEBULA vessels exec tv-vz -- cat /tmp/witness); echo \"\$out\" | grep -q golden"
+check "volume witness restored"      "out=\$($NEBULA vessels exec tv-vz -- cat /mnt/vtest/witness); echo \"\$out\" | grep -q vol-golden"
 check "killed process is alive"      "$NEBULA vessels exec tv-vz -- pgrep -x sleep"
 
 echo "--- live branch fan-out from a memory snapshot"
-check "branch 2 live clones"         "$NEBULA vessels branch tv-vz tv-fork --snapshot cp --count 2 | grep -q 'live resume'"
+check "branch 2 live clones"         "out=\$($NEBULA vessels branch tv-vz tv-fork --snapshot cp --count 2); echo \"\$out\" | grep -q 'live resume'"
 check "fork-1 woke mid-execution"    "$NEBULA vessels exec tv-fork-1 -- sh -c 'cat /tmp/witness | grep -q golden && pgrep -x sleep'"
 check "fork-2 woke mid-execution"    "$NEBULA vessels exec tv-fork-2 -- sh -c 'cat /tmp/witness | grep -q golden && pgrep -x sleep'"
-check "forks are independent"        "$NEBULA vessels exec tv-fork-1 -- sh -c 'echo diverged > /tmp/witness' && $NEBULA vessels exec tv-fork-2 -- cat /tmp/witness | grep -q golden"
+check "forks are independent"        "$NEBULA vessels exec tv-fork-1 -- sh -c 'echo diverged > /tmp/witness' && out=\$($NEBULA vessels exec tv-fork-2 -- cat /tmp/witness); echo \"\$out\" | grep -q golden"
 
 echo "--- guardrails"
 # capture-then-grep: pipefail + an intentionally-failing left side would
