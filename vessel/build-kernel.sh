@@ -2,8 +2,24 @@
 # Build the Nebula guest kernel (arm64 Image) in a Linux container.
 # Output: vessel/out/Image + vessel/out/kernel.config
 set -euo pipefail
-# Build on the host engine even when `nebula use docker` is active.
-export DOCKER_CONTEXT="${NEBULA_BUILD_DOCKER_CONTEXT:-default}"
+# Pick a working build engine. Honor an explicit override; otherwise prefer
+# the current context unless it is nebula-while-down, falling back to any
+# context whose daemon responds. (Building via the Nebula engine itself is
+# fine — the output is just a file.)
+if [ -n "${NEBULA_BUILD_DOCKER_CONTEXT:-}" ]; then
+    export DOCKER_CONTEXT="$NEBULA_BUILD_DOCKER_CONTEXT"
+elif docker version >/dev/null 2>&1; then
+    : # current context works
+else
+    for ctx in $(docker context ls -q); do
+        if DOCKER_CONTEXT="$ctx" docker version >/dev/null 2>&1; then
+            export DOCKER_CONTEXT="$ctx"
+            echo "using docker context: $ctx" >&2
+            break
+        fi
+    done
+fi
+docker version >/dev/null 2>&1 || { echo "ERROR: no working docker engine for the build" >&2; exit 1; }
 cd "$(dirname "$0")"
 KERNEL_VERSION="${KERNEL_VERSION:-6.12.58}"
 docker build \

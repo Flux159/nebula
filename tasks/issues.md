@@ -21,6 +21,22 @@ limitations; routine TODOs live in code.)
   dylib, same kernel+initramfs as VZ (which passes in ~330ms). Both backends
   boot the same image through the same `VmmBackend` trait.
 
+## Incident log
+
+- **(2026-06-09, Phase 5) Near-miss: acceptance test mutated a real cluster.**
+  First run of test-phase5.sh: `nebula use kubectl` failed (k3s binary missing
+  from rootfs — a build-context bug had silently produced a stale image), but
+  the script kept going, so its `kubectl create deployment nebula-p5` ran
+  against the then-current context — your GKE cluster. The test's own cleanup
+  deleted it (`kubectl get deploy,svc nebula-p5` → NotFound, verified) and an
+  EXIT trap restored the context; no residue. Fixes shipped: the test now
+  hard-aborts unless `kubectl config current-context` == nebula before any
+  mutating step, and the build scripts fail loudly instead of silently reusing
+  a stale image. Lesson for the product: `nebula use kubectl` printing the
+  loud prod-context warning is not enough — our own tooling must treat
+  "context != nebula" as a stop condition, and the same gate belongs in any
+  future `nebula k8s …` convenience commands.
+
 ## Needs discussion
 
 - **(2026-06-09, Phase 4) VZ balloon = high-water-mark semantics, not true

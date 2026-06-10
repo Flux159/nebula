@@ -67,6 +67,7 @@ impl Vessel {
             balloon: true,
             rng: true,
             rosetta: true,
+            gpu: false,
         };
 
         let backend = backend_by_name("vz")?;

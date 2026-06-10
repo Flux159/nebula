@@ -31,8 +31,9 @@ pub fn use_kubectl() -> anyhow::Result<()> {
     // 3. Rewrite the server address to the guest IP (in the cert SANs via
     //    --tls-san) and merge into ~/.kube/config as cluster/user/context
     //    `nebula`, never touching other entries.
-    let guest_ip = guest_ip()?;
-    let merged = merge_kubeconfig(&kubeconfig, &guest_ip)?;
+    // Server is the host-side forward: stable across guest reboots (the
+    // guest IP changes with every DHCP lease; 127.0.0.1 is in k3s's SANs).
+    let merged = merge_kubeconfig(&kubeconfig, "127.0.0.1")?;
     if let Some(prev) = merged {
         println!("kubectl → nebula (was: {prev})");
         if prev != CONTEXT_NAME && looks_remote(&prev) {
@@ -40,9 +41,25 @@ pub fn use_kubectl() -> anyhow::Result<()> {
             eprintln!("    `nebula revert kubectl` restores it exactly.\n");
         }
     }
-    // 4. Smoke check.
+    // 4. Smoke check (guest-side Ready, then the host-side 6443 forward,
+    //    which nebulad's watcher brings up on its next tick).
     println!("waiting for node to be Ready…");
     wait_node_ready(Duration::from_secs(120))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if std::net::TcpStream::connect_timeout(
+            &"127.0.0.1:6443".parse().unwrap(),
+            Duration::from_millis(500),
+        )
+        .is_ok()
+        {
+            break;
+        }
+        if Instant::now() > deadline {
+            bail!("host forward 127.0.0.1:6443 did not come up within 30s");
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
     println!("kubectl ready — try: kubectl get nodes");
     Ok(())
 }
@@ -98,16 +115,6 @@ fn write_yaml(path: &std::path::Path, value: &Value) -> anyhow::Result<()> {
     }
     std::fs::write(path, serde_yaml::to_string(value)?)?;
     Ok(())
-}
-
-fn guest_ip() -> anyhow::Result<String> {
-    match client::request(&DaemonRequest::Status)? {
-        DaemonResponse::Status(s) => s
-            .agent
-            .and_then(|a| a.ip)
-            .context("guest IP unknown (agent unhealthy?)"),
-        _ => bail!("status unavailable"),
-    }
 }
 
 fn agent_exec(cmd: &str, args: &[&str]) -> anyhow::Result<ExecResult> {

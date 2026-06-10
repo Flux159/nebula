@@ -32,6 +32,9 @@ pub struct VmSpec {
     /// amd64 binaries via binfmt_misc.
     #[serde(default)]
     pub rosetta: bool,
+    /// Attach a virtio-gpu with Venus (Vulkan) support (libkrun only).
+    #[serde(default)]
+    pub gpu: bool,
 }
 
 fn default_true() -> bool {
@@ -152,6 +155,7 @@ mod tests {
             balloon: false,
             rng: true,
             rosetta: false,
+            gpu: false,
         }
     }
 

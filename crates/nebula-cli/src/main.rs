@@ -5,6 +5,7 @@ mod client;
 mod commands;
 mod contexts;
 mod kube;
+mod sandbox;
 mod spike;
 
 #[derive(Parser)]
@@ -80,11 +81,33 @@ enum Commands {
         #[arg(long)]
         rootfs: Option<PathBuf>,
     },
+    /// Run a command in an ephemeral, isolated microVM (libkrun sidecar).
+    Sandbox {
+        #[command(subcommand)]
+        action: SandboxAction,
+    },
     /// Internal: libkrun worker process (takes over and becomes the microVM).
     #[command(name = "krun-worker", hide = true)]
     KrunWorker {
         #[arg(long)]
         spec: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SandboxAction {
+    /// Boot a microVM, run CMD, print its output, exit with its code.
+    Run {
+        #[arg(long, default_value_t = 2)]
+        cpus: u32,
+        /// Guest RAM in MiB.
+        #[arg(long, default_value_t = 1024)]
+        mem: u64,
+        /// Share the current directory into the sandbox at /workdir.
+        #[arg(long)]
+        share_cwd: bool,
+        #[arg(trailing_var_arg = true, required = true)]
+        cmd: Vec<String>,
     },
 }
 
@@ -123,6 +146,19 @@ fn main() -> anyhow::Result<()> {
         Commands::Stats { watch } => commands::stats(watch),
         Commands::Doctor => commands::doctor(),
         Commands::InstallImage { kernel, rootfs } => commands::install_image(kernel, rootfs),
+        Commands::Sandbox { action } => match action {
+            SandboxAction::Run {
+                cpus,
+                mem,
+                share_cwd,
+                cmd,
+            } => sandbox::run(sandbox::SandboxOpts {
+                cpus,
+                mem,
+                share_cwd,
+                cmd,
+            }),
+        },
         Commands::KrunWorker { spec } => match nebula_core::backend::krun::run_worker(&spec) {
             Ok(never) => match never {},
             Err(e) => {

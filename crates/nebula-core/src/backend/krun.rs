@@ -41,8 +41,16 @@ struct KrunApi {
     krun_add_disk2:
         Option<unsafe extern "C" fn(u32, *const c_char, *const c_char, u32, bool) -> i32>,
     krun_add_virtiofs: unsafe extern "C" fn(u32, *const c_char, *const c_char) -> i32,
+    /// Optional: only exported when libkrun is built with GPU=1.
+    krun_set_gpu_options: Option<unsafe extern "C" fn(u32, u32) -> i32>,
     krun_start_enter: unsafe extern "C" fn(u32) -> i32,
 }
+
+/// virglrenderer flags (libkrun.h): VENUS | no_virgl | thread_sync | external_blob.
+const VIRGLRENDERER_THREAD_SYNC: u32 = 1 << 1;
+const VIRGLRENDERER_USE_EXTERNAL_BLOB: u32 = 1 << 5;
+const VIRGLRENDERER_VENUS: u32 = 1 << 6;
+const VIRGLRENDERER_NO_VIRGL: u32 = 1 << 7;
 
 fn dylib_path() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("NEBULA_LIBKRUN_PATH") {
@@ -91,6 +99,7 @@ fn load_api() -> Result<&'static KrunApi> {
                 krun_add_virtio_console_default: sym(handle, "krun_add_virtio_console_default")?,
                 krun_add_disk2: sym(handle, "krun_add_disk2").ok(),
                 krun_add_virtiofs: sym(handle, "krun_add_virtiofs")?,
+                krun_set_gpu_options: sym(handle, "krun_set_gpu_options").ok(),
                 krun_start_enter: sym(handle, "krun_start_enter")?,
             })
         }
@@ -312,6 +321,25 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
             check(
                 "krun_add_virtiofs",
                 (api.krun_add_virtiofs)(ctx, tag.as_ptr(), path_c.as_ptr()),
+            )?;
+        }
+
+        if spec.gpu {
+            let set_gpu = api.krun_set_gpu_options.ok_or_else(|| {
+                Error::backend(
+                    BACKEND,
+                    "this libkrun build lacks GPU support (rebuild with GPU=1)",
+                )
+            })?;
+            check(
+                "krun_set_gpu_options",
+                set_gpu(
+                    ctx,
+                    VIRGLRENDERER_VENUS
+                        | VIRGLRENDERER_NO_VIRGL
+                        | VIRGLRENDERER_THREAD_SYNC
+                        | VIRGLRENDERER_USE_EXTERNAL_BLOB,
+                ),
             )?;
         }
 

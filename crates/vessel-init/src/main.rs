@@ -151,6 +151,18 @@ mod init {
                 std::thread::sleep(Duration::from_secs(3600));
             }
         }
+        // Sandbox mode: run the bundled command, bracketed by markers the
+        // host parses, then power off.
+        if std::path::Path::new("/sandbox-cmd").exists() {
+            println!("NEBULA_SANDBOX_BEGIN");
+            let _ = std::io::stdout().flush();
+            let status = std::process::Command::new("/bin/sh")
+                .arg("/sandbox-cmd")
+                .status();
+            let code = status.ok().and_then(|s| s.code()).unwrap_or(127);
+            println!("NEBULA_SANDBOX_END={code}");
+            poweroff();
+        }
         println!(
             "NEBULA_SPIKE_OK init={} uname={}",
             env!("CARGO_PKG_VERSION"),

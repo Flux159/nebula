@@ -16,6 +16,8 @@ check() {
     fi
 }
 
+# Fresh daemon so the just-built binaries are the ones under test.
+$NEBULA down --force >/dev/null 2>&1; sleep 1
 $NEBULA up >/dev/null || { echo "FATAL: up failed"; exit 1; }
 
 BEFORE_CTX=$(kubectl config current-context 2>/dev/null || echo "default (unset)")
@@ -34,6 +36,14 @@ trap restore_ctx EXIT
 
 echo "--- nebula use kubectl"
 check "use kubectl succeeds"           "$NEBULA use kubectl"
+# HARD GATE: everything below mutates the cluster kubectl points at. If the
+# switch did not land on `nebula`, abort instead of touching the user's
+# (possibly production) context.
+if [ "$(kubectl config current-context 2>/dev/null)" != "nebula" ]; then
+    echo "FATAL: kubectl context is not nebula — refusing to run cluster-mutating tests"
+    restore_ctx
+    exit 1
+fi
 check "current context is nebula"      "[ \"\$(kubectl config current-context)\" = nebula ]"
 check "get nodes Ready"                "kubectl get nodes --no-headers | grep -q ' Ready'"
 
@@ -43,7 +53,7 @@ check "create deployment"              "kubectl create deployment nebula-p5 --im
 check "rollout completes"              "kubectl rollout status deploy/nebula-p5 --timeout=120s"
 check "expose NodePort"                "kubectl expose deploy nebula-p5 --port 80 --type NodePort"
 NODEPORT=$(kubectl get svc nebula-p5 -o jsonpath='{.spec.ports[0].nodePort}')
-GUEST_IP=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' | sed -E 's|https://([0-9.]+):.*|\1|')
+GUEST_IP=$($NEBULA exec sh -c "ip addr show eth0" | grep -oE 'inet [0-9.]+' | awk '{print $2}')
 SVC_OK=0
 for _ in $(seq 1 20); do
     curl -fsS -m 2 "http://$GUEST_IP:$NODEPORT/" 2>/dev/null | grep -q nginx && { SVC_OK=1; break; }

@@ -582,6 +582,31 @@ run a customized container, stream its logs — without shelling out to any CLI.
 
 ---
 
+## Phase 12 — UI direction & "local apps" platform (to discuss after core work)
+
+Captured from discussion 2026-06-09; refine together before Phase 9 (Tauri UI)
+implementation starts, since it shapes the UI's information architecture.
+
+- **Layout inspiration.** Proxmox-style left nav (totals at a glance: RAM, CPU,
+  disk; tree of containers/VMs/images) is a proven shape for "infrastructure
+  at a glance" — but evaluate nicer modern takes too (OrbStack's minimal list
+  + detail pane, Portainer's resource views, Rancher's cluster dash). Bias
+  toward developer-platform ergonomics over datacenter-admin ergonomics.
+- **Developer-centric per-container detail** (the differentiator vs Proxmox):
+  - exposed ports, clickable (localhost:PORT / name.nebula.local)
+  - whether the workload is a GPU VM/container or plain
+  - image provenance: built locally (possibly untagged/dangling) vs pulled
+    from a registry — surfaced clearly, homelab-style
+  - what's actually running: compose project grouping, k8s workload grouping
+- **"Apps" use case (homelab mode).** Make it trivially easy to run real apps:
+  one-click/one-command docker-compose apps and helm-chart apps on the local
+  k3s. Curated example configs live in our docs as quick installs.
+- **Test scenarios double as marketing.** The example-app gallery is both an
+  acceptance-test corpus (real compose/helm workloads) and standalone
+  publicity for Nebula, independent of orchestrator/galaxy (the opinionated
+  agent-orchestration system in ~/Projects/mystral) which embeds Nebula via
+  the Phase 10 SDK.
+
 ## Cross-cutting risks (watch from day 1)
 
 1. **Elastic memory on VZ's balloon device** (Phase 4.1). Lower risk than before

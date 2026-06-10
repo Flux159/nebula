@@ -41,7 +41,9 @@ fn spawn_docker_watcher(
     state: Arc<Mutex<NetState>>,
 ) {
     std::thread::spawn(move || {
-        let mut forwarders: HashMap<u16, Arc<AtomicBool>> = HashMap::new();
+        // port -> (stop flag, target ip). Recreated when the guest IP moves
+        // (DHCP hands out a fresh address on every boot).
+        let mut forwarders: HashMap<u16, (Arc<AtomicBool>, Ipv4Addr)> = HashMap::new();
         loop {
             std::thread::sleep(Duration::from_secs(2));
 
@@ -60,6 +62,8 @@ fn spawn_docker_watcher(
                 }
                 ports.extend(c.tcp_ports.iter().copied());
             }
+            // Static service forwards (k3s API; certs cover 127.0.0.1).
+            ports.insert(6443);
 
             {
                 let mut st = state.lock().unwrap();
@@ -70,14 +74,14 @@ fn spawn_docker_watcher(
 
             // Reconcile forwarders.
             let Some(ip) = guest_ip else { continue };
-            forwarders.retain(|port, stop| {
-                if ports.contains(port) {
+            forwarders.retain(|port, (stop, fwd_ip)| {
+                if ports.contains(port) && *fwd_ip == ip {
                     true
                 } else {
                     stop.store(true, Ordering::SeqCst);
                     // Nudge the blocking accept() so the listener thread exits.
                     let _ = TcpStream::connect(("127.0.0.1", *port));
-                    tracing::info!(port, "port forward removed");
+                    tracing::info!(port, "port forward removed (gone or IP moved)");
                     false
                 }
             });
@@ -89,7 +93,7 @@ fn spawn_docker_watcher(
                             port,
                             "port forward added (127.0.0.1:{port} -> {ip}:{port})"
                         );
-                        e.insert(stop);
+                        e.insert((stop, ip));
                     }
                 }
             }

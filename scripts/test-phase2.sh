@@ -17,6 +17,7 @@ check() {
     fi
 }
 
+$NEBULA down --force >/dev/null 2>&1; sleep 1
 $NEBULA up >/dev/null || { echo "FATAL: nebula up failed"; exit 1; }
 
 # Wait for dockerd inside the guest (first boot pulls nothing; just service start).
