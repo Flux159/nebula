@@ -396,11 +396,32 @@ mod init {
         attach_console();
         let _ = std::fs::write("/proc/sys/kernel/hostname", "nebula");
         let _ = std::fs::create_dir_all("/var/log");
+        let phase = |label: &str| {
+            let up = std::fs::read_to_string("/proc/uptime").unwrap_or_default();
+            let secs = up.split_whitespace().next().unwrap_or("?").to_string();
+            println!("nebula-init: t={secs}s {label}");
+        };
+        // vsock needs no network or disks: launch the agent FIRST so the host
+        // sees "healthy" in ~1s regardless of DHCP/mkfs latency. It joins the
+        // supervised service list below with its live pid.
+        let mut agent_svc = Service {
+            name: "vessel-agent",
+            cmd: AGENT_PATH,
+            args: &[],
+            wait_for: None,
+            pid: -1,
+        };
+        agent_svc.pid = spawn_service(&agent_svc);
+        phase("agent spawned");
         setup_data_disk();
+        phase("data disk");
         setup_volumes();
+        phase("volumes");
         setup_network();
+        phase("network");
         setup_rosetta();
         setup_home_share();
+        phase("rosetta+home-share");
         // dockerd requires forwarding for container NAT.
         let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
         println!(
@@ -414,13 +435,7 @@ mod init {
         // serves the same /var/run/docker.sock, so the host socket proxy and
         // the docker/kubectl/helm clients work unchanged.
         let slim = std::path::Path::new("/usr/local/bin/slimd").exists();
-        let mut services = vec![Service {
-            name: "vessel-agent",
-            cmd: AGENT_PATH,
-            args: &[],
-            wait_for: None,
-            pid: -1,
-        }];
+        let mut services = vec![agent_svc];
         if slim {
             services.push(Service {
                 name: "slimd",

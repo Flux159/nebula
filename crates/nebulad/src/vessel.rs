@@ -119,7 +119,12 @@ impl Vessel {
     fn wait_agent(&self, timeout: Duration) -> anyhow::Result<Health> {
         let start = Instant::now();
         loop {
-            match self.agent_request(&AgentRequest::Health) {
+            // Short read timeout: a probe sent before the guest agent binds
+            // its vsock port can be held open by the VMM instead of being
+            // refused, and an untimed read_line would eat seconds of boot.
+            match self
+                .agent_request_with_timeout(&AgentRequest::Health, Some(Duration::from_millis(500)))
+            {
                 Ok(AgentResponse::Health(h)) => return Ok(h),
                 _ if start.elapsed() > timeout => {
                     anyhow::bail!(
@@ -140,7 +145,17 @@ impl Vessel {
     }
 
     pub fn agent_request(&self, req: &AgentRequest) -> anyhow::Result<AgentResponse> {
+        // No read timeout: exec requests legitimately stream for minutes.
+        self.agent_request_with_timeout(req, None)
+    }
+
+    fn agent_request_with_timeout(
+        &self,
+        req: &AgentRequest,
+        read_timeout: Option<Duration>,
+    ) -> anyhow::Result<AgentResponse> {
         let stream = self.vm.lock().unwrap().vsock_connect(VSOCK_PORT_CONTROL)?;
+        stream.set_read_timeout(read_timeout)?;
         let mut writer = stream.try_clone()?;
         let mut line = serde_json::to_string(req)?;
         line.push('\n');
