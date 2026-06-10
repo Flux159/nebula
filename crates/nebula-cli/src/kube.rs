@@ -15,7 +15,16 @@ const CONTEXT_NAME: &str = "nebula";
 /// Bring k3s up (idempotent) and return the path of a standalone kubeconfig
 /// containing only the nebula cluster — used by `nebula kubectl|helm` and as
 /// the source for the `setup` merge.
+fn instance_net() -> InstanceNet {
+    match client::request(&DaemonRequest::Status) {
+        Ok(DaemonResponse::Status(s)) => s.net,
+        _ => InstanceNet::default(),
+    }
+}
+
 pub fn ensure_ready() -> anyhow::Result<std::path::PathBuf> {
+    let net = instance_net();
+    let k8s_port = net.k8s_port;
     let resp = client::request(&DaemonRequest::Agent {
         request: AgentRequest::ServiceCtl {
             name: "k3s".into(),
@@ -32,7 +41,7 @@ pub fn ensure_ready() -> anyhow::Result<std::path::PathBuf> {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if std::net::TcpStream::connect_timeout(
-            &"127.0.0.1:6443".parse().unwrap(),
+            &format!("127.0.0.1:{k8s_port}").parse().unwrap(),
             Duration::from_millis(500),
         )
         .is_ok()
@@ -40,14 +49,15 @@ pub fn ensure_ready() -> anyhow::Result<std::path::PathBuf> {
             break;
         }
         if Instant::now() > deadline {
-            bail!("host forward 127.0.0.1:6443 did not come up within 30s");
+            bail!("host forward 127.0.0.1:{k8s_port} did not come up within 30s");
         }
         std::thread::sleep(Duration::from_millis(250));
     }
 
     // Standalone kubeconfig with the server pointed at the stable forward.
     let mut doc: Value = serde_yaml::from_str(&guest_yaml)?;
-    doc["clusters"][0]["cluster"]["server"] = Value::String("https://127.0.0.1:6443".into());
+    doc["clusters"][0]["cluster"]["server"] =
+        Value::String(format!("https://127.0.0.1:{k8s_port}"));
     doc["clusters"][0]["name"] = Value::String(CONTEXT_NAME.into());
     doc["contexts"][0]["context"]["cluster"] = Value::String(CONTEXT_NAME.into());
     doc["contexts"][0]["context"]["user"] = Value::String(CONTEXT_NAME.into());
@@ -194,7 +204,8 @@ fn merge_kubeconfig(guest_yaml: &str, guest_ip: &str) -> anyhow::Result<Option<S
     anyhow::ensure!(!cluster_data.is_null(), "guest kubeconfig missing cluster");
 
     let mut cluster = cluster_data;
-    cluster["server"] = Value::String(format!("https://{guest_ip}:6443"));
+    let k8s_port = instance_net().k8s_port;
+    cluster["server"] = Value::String(format!("https://{guest_ip}:{k8s_port}"));
 
     let path = kubeconfig_path()?;
     let mut root = read_yaml(&path)?;

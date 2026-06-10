@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nebula_core::dns;
-use nebula_core::proto::{AgentRequest, AgentResponse, HOST_DNS_UDP_PORT};
+use nebula_core::proto::{AgentRequest, AgentResponse};
 
 use crate::vessel::Vessel;
 
@@ -26,10 +26,20 @@ pub struct NetState {
     pub published_tcp: HashSet<u16>,
 }
 
-pub fn start(vessel: Arc<Vessel>, docker_sock: std::path::PathBuf) -> Arc<Mutex<NetState>> {
+pub struct NetConfig {
+    pub dns_zone: String,
+    pub dns_port: u16,
+    pub k8s_port: u16,
+}
+
+pub fn start(
+    vessel: Arc<Vessel>,
+    docker_sock: std::path::PathBuf,
+    cfg: NetConfig,
+) -> Arc<Mutex<NetState>> {
     let state = Arc::new(Mutex::new(NetState::default()));
-    spawn_docker_watcher(vessel.clone(), docker_sock, state.clone());
-    spawn_dns_server(state.clone());
+    spawn_docker_watcher(vessel.clone(), docker_sock, state.clone(), cfg.k8s_port);
+    spawn_dns_server(state.clone(), cfg.dns_zone, cfg.dns_port);
     state
 }
 
@@ -39,6 +49,7 @@ fn spawn_docker_watcher(
     vessel: Arc<Vessel>,
     docker_sock: std::path::PathBuf,
     state: Arc<Mutex<NetState>>,
+    k8s_port: u16,
 ) {
     std::thread::spawn(move || {
         // port -> (stop flag, target ip). Recreated when the guest IP moves
@@ -63,7 +74,7 @@ fn spawn_docker_watcher(
                 ports.extend(c.tcp_ports.iter().copied());
             }
             // Static service forwards (k3s API; certs cover 127.0.0.1).
-            ports.insert(6443);
+            ports.insert(k8s_port);
 
             {
                 let mut st = state.lock().unwrap();
@@ -164,16 +175,16 @@ fn pump(a: TcpStream, b: TcpStream) {
 
 // --- DNS server ---------------------------------------------------------------
 
-fn spawn_dns_server(state: Arc<Mutex<NetState>>) {
+fn spawn_dns_server(state: Arc<Mutex<NetState>>, zone: String, port: u16) {
     std::thread::spawn(move || {
-        let sock = match UdpSocket::bind(("0.0.0.0", HOST_DNS_UDP_PORT)) {
+        let sock = match UdpSocket::bind(("0.0.0.0", port)) {
             Ok(s) => s,
             Err(e) => {
-                tracing::error!("dns bind :{HOST_DNS_UDP_PORT} failed: {e}");
+                tracing::error!("dns bind :{port} failed: {e}");
                 return;
             }
         };
-        tracing::info!("dns resolver on udp:{HOST_DNS_UDP_PORT}");
+        tracing::info!("dns resolver on udp:{port} (zone {zone})");
         let mut buf = [0u8; 1500];
         loop {
             let Ok((n, peer)) = sock.recv_from(&mut buf) else {
@@ -182,23 +193,24 @@ fn spawn_dns_server(state: Arc<Mutex<NetState>>) {
             let Some((id, q)) = dns::parse_query(&buf[..n]) else {
                 continue;
             };
-            let resp = answer(id, &q, &state);
+            let resp = answer(id, &q, &state, &zone);
             let _ = sock.send_to(&resp, peer);
         }
     });
 }
 
-fn answer(id: u16, q: &dns::Question, state: &Arc<Mutex<NetState>>) -> Vec<u8> {
+fn answer(id: u16, q: &dns::Question, state: &Arc<Mutex<NetState>>, zone: &str) -> Vec<u8> {
     let name = q.name.trim_end_matches('.').to_ascii_lowercase();
 
-    // Our zone: <container>.nebula.local (and bare nebula.local) -> guest IP.
-    if name == "nebula.local" || name.ends_with(".nebula.local") {
+    // Our zone: <container>.<zone> (and the bare zone) -> guest IP.
+    let suffix = format!(".{zone}");
+    if name == zone || name.ends_with(&suffix) {
         let st = state.lock().unwrap();
         let Some(ip) = st.guest_ip else {
             return dns::build_error(id, q, false);
         };
-        let label = name.trim_end_matches(".nebula.local");
-        let known = name == "nebula.local" || label == "vessel" || st.names.contains(label);
+        let label = name.trim_end_matches(&suffix);
+        let known = name == zone || label == "vessel" || st.names.contains(label);
         return if known {
             dns::build_response(id, q, &[IpAddr::V4(ip)], 5)
         } else {

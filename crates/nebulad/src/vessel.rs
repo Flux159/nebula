@@ -48,7 +48,7 @@ impl Vessel {
             boot: BootSpec::Kernel {
                 kernel,
                 initramfs: None,
-                cmdline: vessel_cmdline(),
+                cmdline: vessel_cmdline(cfg),
             },
             disks: vec![
                 DiskSpec {
@@ -173,13 +173,17 @@ fn home_share() -> Vec<nebula_core::ShareSpec> {
     }
 }
 
-fn vessel_cmdline() -> String {
+fn vessel_cmdline(cfg: &Config) -> String {
     let mut cmdline = String::from(
         "console=hvc0 root=/dev/vda rw rootfstype=ext4 init=/sbin/nebula-init reboot=k panic=10",
     );
     if let Ok(home) = std::env::var("HOME") {
         // Kernel passes unknown key=value words to init's environment.
         cmdline.push_str(&format!(" NEBULA_HOME={home}"));
+    }
+    if let Some(port) = cfg.dns_port {
+        // The guest agent relays 127.0.0.1:53 to the host gateway at this port.
+        cmdline.push_str(&format!(" NEBULA_DNS_PORT={port}"));
     }
     cmdline
 }

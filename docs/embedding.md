@@ -17,10 +17,13 @@ multi-instance story.
 | `libkrun.dylib` (fork) | 5 MB | `scripts/build-libkrun.sh` | only for sandboxes/GPU/named vessels |
 | docker / kubectl / helm CLIs | 39/55/59 MB | `scripts/fetch-host-clis.sh` | only if your users need raw CLIs |
 
-Minimum viable embed for an orchestrator that runs agents in docker
-containers: **`nebula` + `nebulad` + kernel + `docker`-flavor rootfs ≈ 78 MB
-compressed.** Your app's UI talks to the REST API; no host CLIs needed
-(your code uses a docker client library against the socket).
+Pick the flavor by how you schedule agents. An orchestrator that treats
+agents as a mix of workflows and services and wants restarts/health/Jobs
+semantics runs them on **Kubernetes**: ship the `full` flavor
+(**sidecars + kernel + full rootfs ≈ 138 MB compressed**) and drive k3s
+through the standalone kubeconfig — kube-rs in a Rust app, or the bundled
+kubectl. Plain-docker embedders use the `docker` flavor (≈ 78 MB total).
+No host CLIs needed either way when your code speaks the APIs directly.
 
 Layout inside your `.app` (Tauri example — see our own `tauri.conf.json` +
 `ui/src-tauri/src/lib.rs` for working code):
@@ -45,7 +48,10 @@ engine logic.
 export NEBULA_HOME="$HOME/Library/Application Support/YourApp/nebula"  # isolation — see §3
 mkdir -p "$NEBULA_HOME"
 cat > "$NEBULA_HOME/config.toml" <<EOF
-api_port = 7461          # your private port (0 disables the REST API)
+api_port = 7461          # your private REST port (0 disables)
+dns_port = 42061         # private guest-DNS relay port
+k8s_port = 6461          # private k3s API forward
+dns_zone = "galaxy.local" # brand the container DNS zone
 max_ram_mib = 8192       # ceiling only; ballooning returns idle RAM
 cpus = 4
 data_disk_gib = 32
@@ -85,8 +91,8 @@ pristine while keeping container data; 0.9s). Your app stays the only UI.
 
 **Lifecycle:** your app owns it. Spawn `nebula up` on launch (or lazily);
 either leave the engine running on quit (containers keep working) or
-`nebula down`. Do NOT use `nebula autostart` from an embedded instance — the
-launchd label is global (see seams below).
+`nebula down`. For start-at-login, `nebula autostart enable` works per
+instance (the launchd label derives from `NEBULA_HOME`).
 
 **Rust in-process option:** `nebula-core` is a library crate (VMM backends,
 specs, vsock). Embedding it directly instead of sidecars is possible but you
@@ -109,34 +115,39 @@ Resource math still works in your favor: each engine has its own balloon, so
 an idle embedded engine costs ~1-2 GB host-visible regardless of its
 configured ceiling.
 
-Known seams when N > 1 (single-instance users unaffected):
+Everything that was port- or name-shaped is per-instance config:
 
-- **Guest DNS resolver (UDP 42053):** first daemon binds it; later daemons
-  log a bind failure. Harmless for public names (any guest's queries reach
-  the bound daemon, which resolves via the host), but `*.nebula.local`
-  answers reflect the first engine's containers only.
-- **k3s API forward (127.0.0.1:6443):** fixed port — only one engine should
-  enable Kubernetes today. Embedders on the docker flavor are unaffected.
-- **`nebula autostart` / launchd:** one global label (`dev.nebula.nebulad`),
-  always the standalone instance. Embedded instances manage their own
-  lifecycle.
-
-Making those per-instance (ports in config, label derived from NEBULA_HOME)
-is tracked in tasks/issues.md.
+- **DNS:** `dns_zone` brands the container zone (`api.galaxy.local`), and
+  `dns_port` gives each instance its own resolver — the engine passes the
+  port to the guest via kernel cmdline, so the whole chain follows config.
+- **Kubernetes:** `k8s_port` moves the k3s API forward; kubeconfigs (both the
+  merged context and `$NEBULA_HOME/kubeconfig`) are written against it
+  automatically — clients read the effective value from
+  `/v1alpha1/status`/`nebula status` rather than assuming 6443.
+- **Autostart:** the launchd label derives from `NEBULA_HOME`
+  (`dev.nebula.nebulad.<hash>`) and the agent carries `NEBULA_HOME` in its
+  environment — each embedded product can independently start at login.
 
 ## 4. Worked example: the agent-orchestrator shape
 
-A thin local webapp (its own UI, SQLite state) running agents in containers:
+A thin local webapp (its own UI, SQLite state) scheduling agents on the
+embedded Kubernetes — agents as Jobs when they look like workflows,
+Deployments/Services when they look like services:
 
 1. Bundle: your webapp binary, `nebula` + `nebulad` sidecars, kernel +
-   `docker`-flavor rootfs (≈ 78 MB of Nebula payload), optionally a slim
+   `full`-flavor rootfs (≈ 138 MB of Nebula payload), optionally a slim
    devcontainer tarball.
-2. First launch: write `config.toml` (private `NEBULA_HOME` + `api_port`),
-   `install-image`, `up`, `docker load` or pull your agent image.
-3. Each agent run: create a container from the devcontainer image with
-   `luminal` bind-mounted, workspace dir bind-mounted (virtiofs, host-path
-   identical), ports published as needed (they appear on localhost).
-4. Health panel: proxy `/v1alpha1/status` + `/stats`; "Repair" button =
-   `vessels reset vessel`; "Restart engine" = `down` + `up`.
-5. Later, k8s-scheduled agents: same engine, `nebula setup kubectl`
-   equivalent via the sidecar, helm charts against the local k3s.
+2. First launch: write `config.toml` (private `NEBULA_HOME`, ports,
+   `dns_zone = "galaxy.local"`), `install-image`, `up`; first k8s call
+   starts k3s (~20s once, persisted across boots).
+3. Seed the agent image: `docker load` a bundled tarball or background-pull
+   from Docker Hub — k3s shares the engine's containerd store, so images
+   loaded via the docker socket are schedulable without a registry.
+4. Each agent: a Job (workflow-shaped) or Deployment+Service
+   (service-shaped) from the devcontainer image, with `luminal`
+   bind-mounted via hostPath (the user's `$HOME` is mounted at identical
+   paths) and the workspace as a hostPath volume. Services resolve at
+   `<name>.galaxy.local`; NodePorts appear on localhost.
+5. Health panel: proxy `/v1alpha1/status` + `/stats`; "Repair" =
+   `vessels reset vessel` (k8s state lives on the data disk and survives);
+   "Restart engine" = `down` + `up`; k3s restarts automatically.

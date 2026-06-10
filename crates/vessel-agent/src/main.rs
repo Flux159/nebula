@@ -86,7 +86,11 @@ mod agent {
             eprintln!("vessel-agent: dns: no default gateway; relay disabled");
             return;
         };
-        let upstream = format!("{gw}:{HOST_DNS_UDP_PORT}");
+        let port: u16 = std::env::var("NEBULA_DNS_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(HOST_DNS_UDP_PORT);
+        let upstream = format!("{gw}:{port}");
         let sock = loop {
             // 0.0.0.0: containers query via the docker0 address (daemon.json
             // sets "dns": ["172.17.0.1"]), the guest itself via 127.0.0.1.

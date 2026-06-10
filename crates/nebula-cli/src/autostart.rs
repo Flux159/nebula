@@ -9,13 +9,26 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context};
 
-const LABEL: &str = "dev.nebula.nebulad";
+/// Per-instance launchd label: the standalone install keeps the plain name;
+/// embedded instances (NEBULA_HOME set) get a stable hash suffix so multiple
+/// products can each autostart their own engine.
+fn label() -> String {
+    match std::env::var("NEBULA_HOME") {
+        Ok(home) => {
+            use sha2::Digest;
+            let digest = sha2::Sha256::digest(home.as_bytes());
+            let hex: String = digest[..4].iter().map(|b| format!("{b:02x}")).collect();
+            format!("dev.nebula.nebulad.{hex}")
+        }
+        Err(_) => "dev.nebula.nebulad".to_string(),
+    }
+}
 
 fn plist_path() -> anyhow::Result<PathBuf> {
     Ok(
         PathBuf::from(std::env::var_os("HOME").context("HOME not set")?)
             .join("Library/LaunchAgents")
-            .join(format!("{LABEL}.plist")),
+            .join(format!("{}.plist", label())),
     )
 }
 
@@ -34,15 +47,21 @@ pub fn enable() -> anyhow::Result<()> {
     let nebulad = nebulad_path()?;
     let logs = crate::client::nebula_home()?.join("logs");
     std::fs::create_dir_all(&logs)?;
+    let env_block = match std::env::var("NEBULA_HOME") {
+        Ok(home) => format!(
+            "    <key>EnvironmentVariables</key>\n    <dict><key>NEBULA_HOME</key><string>{home}</string></dict>\n"
+        ),
+        Err(_) => String::new(),
+    };
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Label</key><string>{LABEL}</string>
+    <key>Label</key><string>{label}</string>
     <key>ProgramArguments</key>
     <array><string>{nebulad}</string></array>
-    <key>RunAtLoad</key><true/>
+{env_block}    <key>RunAtLoad</key><true/>
     <key>KeepAlive</key>
     <dict><key>SuccessfulExit</key><false/></dict>
     <key>StandardOutPath</key><string>{logs}/launchd.out.log</string>
@@ -50,6 +69,7 @@ pub fn enable() -> anyhow::Result<()> {
 </dict>
 </plist>
 "#,
+        label = label(),
         nebulad = nebulad.display(),
         logs = logs.display(),
     );
@@ -62,7 +82,7 @@ pub fn enable() -> anyhow::Result<()> {
     // bootout first so re-enabling picks up a changed binary path.
     let uid = unsafe { libc::getuid() };
     let _ = std::process::Command::new("launchctl")
-        .args(["bootout", &format!("gui/{uid}/{LABEL}")])
+        .args(["bootout", &format!("gui/{uid}/{}", label())])
         .output();
     let status = std::process::Command::new("launchctl")
         .args(["bootstrap", &format!("gui/{uid}")])
@@ -77,7 +97,7 @@ pub fn enable() -> anyhow::Result<()> {
 pub fn disable() -> anyhow::Result<()> {
     let uid = unsafe { libc::getuid() };
     let _ = std::process::Command::new("launchctl")
-        .args(["bootout", &format!("gui/{uid}/{LABEL}")])
+        .args(["bootout", &format!("gui/{uid}/{}", label())])
         .output();
     let path = plist_path()?;
     if path.is_file() {
@@ -91,7 +111,7 @@ pub fn status() -> anyhow::Result<()> {
     let installed = plist_path()?.is_file();
     let uid = unsafe { libc::getuid() };
     let loaded = std::process::Command::new("launchctl")
-        .args(["print", &format!("gui/{uid}/{LABEL}")])
+        .args(["print", &format!("gui/{uid}/{}", label())])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);

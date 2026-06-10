@@ -318,6 +318,12 @@ mod init {
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         );
         cmd.env("HOME", "/root");
+        // Forward instance config the host passed via kernel cmdline.
+        for (k, v) in std::env::vars() {
+            if k.starts_with("NEBULA_") {
+                cmd.env(k, v);
+            }
+        }
         if let Some(log) = log {
             let log2 = log.try_clone().ok();
             cmd.stdout(log);

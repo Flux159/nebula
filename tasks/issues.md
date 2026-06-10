@@ -39,16 +39,15 @@ limitations; routine TODOs live in code.)
 
 ## Needs discussion
 
-- **(2026-06-09, embedding) Multi-instance seams.** NEBULA_HOME + api_port
-  give full per-instance isolation (verified: embedded engine alongside the
-  standalone one, both running docker). Remaining shared globals when N>1:
-  guest-DNS resolver UDP 42053 (first daemon wins; public DNS still works
-  cross-instance, *.nebula.local is first-engine-only), k3s API forward
-  127.0.0.1:6443 (one k8s-enabled engine at a time), launchd autostart label
-  (standalone-only by convention). Fix shape: move both ports into
-  config.toml (guest learns the DNS port via kernel cmdline), derive the
-  launchd label from a NEBULA_HOME hash. docs/embedding.md documents the
-  current behavior.
+- ~~Multi-instance seams~~ **RESOLVED (2026-06-09):** dns_zone/dns_port/
+  k8s_port are per-instance config (guest learns the DNS port via kernel
+  cmdline; kubeconfigs are written against the configured k8s port; clients
+  read effective values from status); launchd label derives from a
+  NEBULA_HOME hash with NEBULA_HOME in the agent env. Verified: branded
+  galaxy.local instance with private ports running beside the standalone
+  engine. Bonus root-cause fix: a starting nebulad now refuses to steal a
+  live sibling's control socket (stray daemons used to accumulate and hold
+  the shared ports — that's what broke kubectl mid-evening).
 
 - **(2026-06-09, Phase 8) GPU shipped at device level; Venus userspace is
   follow-up.** `nebula sandbox run --gpu` attaches virtio-gpu via our GPU=1

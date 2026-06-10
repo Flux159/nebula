@@ -154,6 +154,34 @@ pub struct DaemonStatus {
     pub agent: Option<Health>,
     pub mem: Option<MemStats>,
     pub uptime_secs: u64,
+    /// Effective per-instance network config (clients self-configure from
+    /// this rather than assuming default ports/zone).
+    #[serde(default)]
+    pub net: InstanceNet,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstanceNet {
+    #[serde(default = "default_k8s_port")]
+    pub k8s_port: u16,
+    #[serde(default = "default_dns_zone")]
+    pub dns_zone: String,
+}
+
+fn default_k8s_port() -> u16 {
+    6443
+}
+fn default_dns_zone() -> String {
+    "nebula.local".into()
+}
+
+impl Default for InstanceNet {
+    fn default() -> Self {
+        Self {
+            k8s_port: default_k8s_port(),
+            dns_zone: default_dns_zone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

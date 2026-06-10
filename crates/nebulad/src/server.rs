@@ -13,6 +13,15 @@ use crate::vessel::Vessel;
 
 pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
     let sock_path = paths.control_sock();
+    // A live sibling answers on the socket; a stale file from a crash does
+    // not. Never steal a live daemon's socket — that orphans it (and its VM)
+    // while it still holds the DNS/k8s/API ports.
+    if UnixStream::connect(&sock_path).is_ok() {
+        anyhow::bail!(
+            "another nebulad is already serving {} — refusing to start",
+            sock_path.display()
+        );
+    }
     let _ = std::fs::remove_file(&sock_path);
     let listener = UnixListener::bind(&sock_path)?;
     tracing::info!(sock = %sock_path.display(), "control socket ready");
@@ -29,7 +38,20 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
     );
 
     // DNS resolver + dynamic port forwarding (Phase 3).
-    let _net = crate::net::start(vessel.clone(), paths.docker_sock());
+    let cfg0 = crate::config::Config::load(&paths.config_toml()).unwrap_or_default();
+    let net_cfg = crate::net::NetConfig {
+        dns_zone: cfg0
+            .dns_zone
+            .clone()
+            .unwrap_or_else(|| "nebula.local".into()),
+        dns_port: cfg0.dns_port.unwrap_or(HOST_DNS_UDP_PORT),
+        k8s_port: cfg0.k8s_port.unwrap_or(6443),
+    };
+    let instance_net = InstanceNet {
+        k8s_port: net_cfg.k8s_port,
+        dns_zone: net_cfg.dns_zone.clone(),
+    };
+    let _net = crate::net::start(vessel.clone(), paths.docker_sock(), net_cfg);
 
     // Elastic memory (Phase 4).
     let balloon = crate::balloon::start(vessel.clone());
@@ -72,9 +94,10 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
         let Ok(conn) = conn else { continue };
         let vessel = vessel.clone();
         let balloon = balloon.clone();
+        let inet = instance_net.clone();
         let shutdown_for_conn = shutdown.clone();
         std::thread::spawn(move || {
-            if let Err(e) = handle(conn, &vessel, &balloon, &shutdown_for_conn) {
+            if let Err(e) = handle(conn, &vessel, &balloon, &inet, &shutdown_for_conn) {
                 tracing::debug!("connection error: {e:#}");
             }
         });
@@ -94,6 +117,7 @@ fn handle(
     conn: UnixStream,
     vessel: &Vessel,
     balloon: &crate::balloon::BalloonState,
+    instance_net: &InstanceNet,
     shutdown: &AtomicBool,
 ) -> anyhow::Result<()> {
     let mut reader = BufReader::new(conn.try_clone()?);
@@ -135,6 +159,7 @@ fn handle(
                 agent,
                 mem,
                 uptime_secs: vessel.started_at.elapsed().as_secs(),
+                net: instance_net.clone(),
             };
             respond(&mut writer, &DaemonResponse::Status(status))
         }

@@ -20,6 +20,15 @@ pub struct Config {
     /// REST API port on 127.0.0.1 (default 7440; 0 disables the API).
     /// Embedders running alongside a standalone Nebula should set this.
     pub api_port: Option<u16>,
+    /// Local DNS zone for container names (default "nebula.local").
+    /// Embedders can brand it: dns_zone = "galaxy.local".
+    pub dns_zone: Option<String>,
+    /// Host UDP port for the guest DNS relay (default 42053). Must be unique
+    /// per instance when running multiple Nebulas.
+    pub dns_port: Option<u16>,
+    /// Host port forwarding to the k3s API (default 6443). Unique per
+    /// k8s-enabled instance.
+    pub k8s_port: Option<u16>,
 }
 
 pub struct Effective {
