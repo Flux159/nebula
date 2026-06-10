@@ -167,6 +167,13 @@ enum VesselsAction {
         #[arg(long)]
         force: bool,
     },
+    /// Restore a vessel's rootfs to pristine (works on the engine vessel too).
+    Reset {
+        name: String,
+        /// Also wipe the data disk (containers/images/k8s state).
+        #[arg(long)]
+        wipe_data: bool,
+    },
     /// Show a vessel's configuration and live state.
     Info { name: String },
     /// Run a command inside a vessel.
@@ -262,6 +269,7 @@ fn main() -> anyhow::Result<()> {
             VesselsAction::Start { name } => vessels::start(&name),
             VesselsAction::Stop { name } => vessels::stop(&name),
             VesselsAction::Rm { name, force } => vessels::rm(&name, force),
+            VesselsAction::Reset { name, wipe_data } => vessels::reset(&name, wipe_data),
             VesselsAction::Info { name } => vessels::info(&name),
             VesselsAction::Exec { name, cmd } => vessels::exec(&name, cmd),
             VesselsAction::Shell { name } => vessels::shell(&name),

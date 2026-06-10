@@ -87,7 +87,12 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
     );
 
     let home = client::nebula_home()?;
-    let base_rootfs = home.join("disks/rootfs.img");
+    // Clone from the pristine store, not the engine's live (mutated) disk.
+    let base_rootfs = if home.join("images/rootfs-pristine.img").is_file() {
+        home.join("images/rootfs-pristine.img")
+    } else {
+        home.join("disks/rootfs.img")
+    };
     let kernel = home.join("kernel/Image");
     anyhow::ensure!(
         base_rootfs.is_file() && kernel.is_file(),
@@ -213,6 +218,79 @@ pub fn stop(name: &str) -> anyhow::Result<()> {
     unsafe { libc::kill(pid, libc::SIGKILL) };
     let _ = std::fs::remove_file(dir.join("pid"));
     println!("vessel `{name}` stopped (forced)");
+    Ok(())
+}
+
+/// Restore a vessel's rootfs from the pristine image (data disk kept unless
+/// wipe_data). The fix for "I shelled in and broke something".
+pub fn reset(name: &str, wipe_data: bool) -> anyhow::Result<()> {
+    let home = client::nebula_home()?;
+    let pristine = home.join("images/rootfs-pristine.img");
+    anyhow::ensure!(
+        pristine.is_file(),
+        "no pristine image at {} — run `nebula install-image` once",
+        pristine.display()
+    );
+
+    if is_engine(name) {
+        let was_running = client::daemon_running();
+        if was_running {
+            println!("stopping the engine…");
+            crate::commands::down(false)?;
+        }
+        let live = home.join("disks/rootfs.img");
+        let _ = std::fs::remove_file(&live);
+        clone_file(&pristine, &live)?;
+        if wipe_data {
+            let _ = std::fs::remove_file(home.join("disks/data.img"));
+            println!("data disk wiped (containers/images/k8s state gone)");
+        }
+        println!("engine rootfs restored to pristine");
+        if was_running {
+            return crate::commands::up();
+        }
+        return Ok(());
+    }
+
+    let dir = dir_of(name)?;
+    anyhow::ensure!(dir.exists(), "no vessel named `{name}`");
+    let was_running = live_pid(&dir).is_some();
+    if was_running {
+        stop(name)?;
+    }
+    let live = dir.join("rootfs.img");
+    let _ = std::fs::remove_file(&live);
+    clone_file(&pristine, &live)?;
+    if wipe_data {
+        let spec = read_spec(&dir)?;
+        let size = std::fs::metadata(dir.join("data.img"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let _ = std::fs::remove_file(dir.join("data.img"));
+        let f = std::fs::File::create(dir.join("data.img"))?;
+        f.set_len(size)?;
+        let _ = spec; // sizes live on disk, spec unchanged
+        println!("data disk wiped");
+    }
+    println!("vessel `{name}` rootfs restored to pristine");
+    if was_running {
+        return start(name);
+    }
+    Ok(())
+}
+
+fn clone_file(from: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()> {
+    let status = std::process::Command::new("cp")
+        .arg("-c")
+        .arg(from)
+        .arg(to)
+        .status()?;
+    anyhow::ensure!(
+        status.success(),
+        "clone {} -> {} failed",
+        from.display(),
+        to.display()
+    );
     Ok(())
 }
 

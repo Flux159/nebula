@@ -419,6 +419,10 @@ pub fn install_image(kernel: Option<PathBuf>, rootfs: Option<PathBuf>) -> anyhow
     );
 
     std::fs::copy(&kernel_src, home.join("kernel/Image"))?;
+    // Pristine store: the live engine disk mutates from here; resets
+    // (`nebula vessels reset`) re-clone from this untouched copy.
+    std::fs::create_dir_all(home.join("images"))?;
+    std::fs::copy(&rootfs_src, home.join("images/rootfs-pristine.img"))?;
     std::fs::copy(&rootfs_src, home.join("disks/rootfs.img"))?;
     println!("installed kernel:  {}", kernel_src.display());
     println!("installed rootfs:  {}", rootfs_src.display());
