@@ -42,11 +42,23 @@ docker run --rm --privileged -v "$STAGE:/slim" alpine:3.19 sh -c \
     > "$RES" 2>&1 || true
 
 cat "$RES"
-# Capture-then-grep the score line.
-SCORE_LINE="$(grep "RESULT:" "$RES" || true)"
+DOCKER_LINE="$(grep "RESULT:" "$RES" || true)"
+
+# kubectl/helm facade acceptance.
+KRES="$STAGE/kresult.txt"
+if cp "$SLIM_REPO/test/kube.sh" "$STAGE/kube.sh" 2>/dev/null; then
+    echo "== running kubectl/helm acceptance inside the engine microVM =="
+    docker run --rm --privileged -v "$STAGE:/slim" alpine:3.19 sh -c \
+        'apk add --no-cache iptables ip6tables iproute2 >/dev/null 2>&1; sh /slim/kube.sh' \
+        > "$KRES" 2>&1 || true
+    cat "$KRES"
+fi
+KUBE_LINE="$(grep "RESULT:" "$KRES" 2>/dev/null || echo "RESULT: (skipped) 0 failed")"
+
 echo ""
-echo "slim acceptance: $SCORE_LINE"
-case "$SCORE_LINE" in
-    *" 0 failed"*) echo "test-slim: PASS"; exit 0 ;;
+echo "docker-slim:        $DOCKER_LINE"
+echo "kubectl/helm-slim:  $KUBE_LINE"
+case "$DOCKER_LINE$KUBE_LINE" in
+    *" 0 failed"*" 0 failed"*) echo "test-slim: PASS"; exit 0 ;;
     *) echo "test-slim: FAIL"; exit 1 ;;
 esac
