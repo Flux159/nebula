@@ -527,6 +527,14 @@ a client of the daemon API (which Phase 10 formalizes; build them together).
   - **Homebrew**: cask for the app, formula for CLI-only installs.
   - **curl | sh** installer and **GitHub Releases** artifacts (.dmg + CLI
     tarball) — same binaries, one release pipeline.
+  - **Image slimming (download is ~177 MB total today):** the Alpine base
+    is ~11 MB; the weight is Go binaries (dockerd 70 MB + k3s 67 MB +
+    containerd 40 MB + nerdctl 30 MB + docker cli 29 MB + runc 11 MB).
+    Options when it matters: ship k3s as a separate artifact fetched on
+    first `nebula setup kubectl` (−67 MB), fetch nerdctl lazily (−30 MB),
+    trim kernel config (47 MB Image → 16 MB gz today). Rootfs can also be
+    grown post-install (host truncate + guest resize2fs) if 2 GB pinches —
+    user data already lives on the separate 64 GB sparse data disk.
   - **Mac App Store (separate, constrained edition — feasible but later):**
     `com.apple.security.virtualization` IS compatible with the App Sandbox
     (precedent: Parallels Desktop App Store Edition), so the VZ engine can
