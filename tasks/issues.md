@@ -39,7 +39,7 @@ limitations; routine TODOs live in code.)
 
 ## Needs discussion
 
-- **(2026-06-09, Phase 8) GPU shipped at device level; Venus userspaceis
+- **(2026-06-09, Phase 8) GPU shipped at device level; Venus userspace is
   follow-up.** `nebula sandbox run --gpu` attaches virtio-gpu via our GPU=1
   fork build (card0 + renderD128 visible, virtio driver bound; brew
   virglrenderer provides Venus host-side). Remaining for the headline AI
