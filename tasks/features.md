@@ -519,11 +519,13 @@ a client of the daemon API (which Phase 10 formalizes; build them together).
 - [ ] **9.3 Detail windows.** Container inspect/logs/exec terminal, k8s workloads view,
   volumes/images management, settings (max-ram slider, mounts allowlist).
 - [ ] **9.4 Distribution.** Goal: install flawlessly via ANY channel —
-  - **Nebula.app** (Developer ID signed + notarized): bundles `nebula` +
-    `nebulad` as Tauri sidecar binaries (`bundle.externalBin`); on first
-    launch, offer to install the CLI onto PATH (symlink into
-    /usr/local/bin or a shell-profile snippet, user-approved) — the
-    Docker Desktop/OrbStack pattern. DMG from `cargo tauri build`.
+  - **Nebula.app — fully self-contained (DECIDED + implemented):** bundles
+    `nebula` + `nebulad` as Tauri sidecars AND the guest images as gz
+    resources (`scripts/bundle-app.sh`); first launch installs images from
+    the bundle — zero downloads, works offline. ~200 MB DMG vs OrbStack
+    431 MB / Docker Desktop 583 MB (measured 2026-06). Remaining: first-
+    launch PATH offer (symlink /usr/local/bin, user-approved), Developer
+    ID signing + notarization.
   - **Homebrew**: cask for the app, formula for CLI-only installs.
   - **curl | sh** installer and **GitHub Releases** artifacts (.dmg + CLI
     tarball) — same binaries, one release pipeline.

@@ -418,6 +418,11 @@ pub fn install_image(kernel: Option<PathBuf>, rootfs: Option<PathBuf>) -> anyhow
         rootfs_src.display()
     );
 
+    // Accept gzip artifacts directly (app bundles / release downloads).
+    let staging = home.join("cache/image-install");
+    let kernel_src = maybe_gunzip(&kernel_src, &staging.join("Image"))?;
+    let rootfs_src = maybe_gunzip(&rootfs_src, &staging.join("rootfs.img"))?;
+
     std::fs::copy(&kernel_src, home.join("kernel/Image"))?;
     // Pristine store: the live engine disk mutates from here; resets
     // (`nebula vessels reset`) re-clone from this untouched copy.
@@ -427,6 +432,27 @@ pub fn install_image(kernel: Option<PathBuf>, rootfs: Option<PathBuf>) -> anyhow
     println!("installed kernel:  {}", kernel_src.display());
     println!("installed rootfs:  {}", rootfs_src.display());
     Ok(())
+}
+
+/// Decompress `src` to `dst` when it's gzip; otherwise return `src` as-is.
+fn maybe_gunzip(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<PathBuf> {
+    let mut magic = [0u8; 2];
+    use std::io::Read;
+    std::fs::File::open(src)?.read_exact(&mut magic).ok();
+    if magic != [0x1f, 0x8b] {
+        return Ok(src.to_path_buf());
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let out = std::fs::File::create(dst)?;
+    let status = std::process::Command::new("gzip")
+        .arg("-dc")
+        .stdin(std::fs::File::open(src)?)
+        .stdout(out)
+        .status()?;
+    anyhow::ensure!(status.success(), "decompress failed for {}", src.display());
+    Ok(dst.to_path_buf())
 }
 
 /// Default release channel for guest images (override: NEBULA_IMAGES_URL).
