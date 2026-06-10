@@ -46,14 +46,7 @@ pub fn up() -> anyhow::Result<()> {
                         t0.elapsed(),
                         s.vm_state
                     );
-                    println!();
-                    println!("next steps:");
-                    println!("  nebula setup docker                # point `docker` here (undo: nebula revert docker)");
-                    println!(
-                        "  docker run -d -p 8080:80 nginx     # then open http://localhost:8080"
-                    );
-                    println!("  nebula setup kubectl               # local Kubernetes (k3s)");
-                    println!("  nebula --help                      # full quickstart");
+                    println!("next: nebula setup docker — or run `nebula quickstart` for the guide");
                     return Ok(());
                 }
             }
