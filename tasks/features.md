@@ -735,7 +735,16 @@ fully stripped WITH recoverable line tables — kubectl/helm ship pre-stripped
 upstream), but the DMG only drops 191→190 MB because UDZO was already
 compressing symbols to almost nothing. The real win is the recovery story:
 today's default builds (`strip=true` in the workspace profile) keep NO
-symbols anywhere; with the flag, panics stay symbolicatable. Runtime
+symbols anywhere; with the flag, panics stay symbolicatable.
+Go-binary audit (2026-06-10, asked specifically): in-rootfs dockerd/
+containerd/runc/shim arrive from Alpine fully stripped (`file` confirms,
+zero .debug/.symtab sections — 0 bytes available); k3s is a self-extracting
+compressed bundle (don't touch); host kubectl/helm ship `-s -w` stripped
+upstream; the static docker CLI is the one unstripped Go binary we ship
+(40→36 MB, covered by the flag). Go panics self-symbolicate via the
+runtime pclntab, which stripping never removes — so Go traces in bug
+reports stay readable regardless; the objcopy-recovery machinery is only
+needed for our Rust binaries and the C dylibs. Runtime
 verified (stripped sidecar/libkrun/docker/guests all run). Before defaulting:
 verify an actual round-trip — induce a panic in a stripped nebulad +
 vessel-agent, symbolicate with `atos -o dist-debug/nebulad.dSYM/...` and
