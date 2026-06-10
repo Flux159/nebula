@@ -76,5 +76,6 @@ docker build \
     --target export \
     --output type=local,dest=/tmp/nebula-rootfs-build \
     vessel/rootfs/
+mkdir -p vessel/out
 mv /tmp/nebula-rootfs-build/rootfs.img "vessel/out/$OUT_NAME"
 ls -la "vessel/out/$OUT_NAME"
