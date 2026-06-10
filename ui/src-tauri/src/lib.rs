@@ -72,10 +72,39 @@ fn start_engine(app: tauri::AppHandle) -> Result<String, String> {
     run_cli(&["up"])
 }
 
+/// Which of docker/kubectl/helm are missing from PATH, and whether the
+/// bundled copies + profile line are set up.
+#[tauri::command]
+fn cli_tools_status() -> Result<serde_json::Value, String> {
+    let which = |tool: &str| {
+        Command::new("/usr/bin/which")
+            .arg(tool)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    let missing: Vec<&str> = ["docker", "kubectl", "helm"]
+        .into_iter()
+        .filter(|t| !which(t))
+        .collect();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let linked = PathBuf::from(&home).join(".nebula/bin/docker").exists();
+    Ok(serde_json::json!({
+        "missing": missing,
+        "linked": linked,
+    }))
+}
+
+/// Run `nebula setup path --yes` via the sidecar CLI.
+#[tauri::command]
+fn setup_cli_tools() -> Result<String, String> {
+    run_cli(&["setup", "path", "--yes"])
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![start_engine])
+        .invoke_handler(tauri::generate_handler![start_engine, cli_tools_status, setup_cli_tools])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

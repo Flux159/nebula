@@ -108,5 +108,54 @@ async function refresh() {
   }
 }
 
+// --- bundled CLI tools (docker/kubectl/helm) setup flow -----------------
+async function cliToolsCheck() {
+  if (!window.__TAURI__) return; // plain-browser dev: no sidecar to manage
+  let st;
+  try {
+    st = await window.__TAURI__.core.invoke("cli_tools_status");
+  } catch {
+    return;
+  }
+  const chip = $("cli-chip");
+  const modal = $("cli-modal");
+  if (!st.missing.length) {
+    chip.style.display = "none";
+    return;
+  }
+  $("cli-modal-detail").textContent =
+    `Not found on your PATH: ${st.missing.join(", ")}.`;
+  chip.style.display = "flex";
+  chip.onclick = () => (modal.style.display = "flex");
+  $("cli-later").onclick = () => {
+    modal.style.display = "none";
+    localStorage.setItem("cli-modal-dismissed", "1");
+  };
+  $("cli-install").onclick = async () => {
+    const btn = $("cli-install");
+    btn.disabled = true;
+    btn.textContent = "linking…";
+    try {
+      await window.__TAURI__.core.invoke("setup_cli_tools");
+      $("cli-modal-detail").textContent =
+        "Done — restart your terminal (or `source` your shell profile) to pick it up.";
+      btn.textContent = "Added ✓";
+      setTimeout(() => {
+        modal.style.display = "none";
+        cliToolsCheck();
+      }, 2200);
+    } catch (err) {
+      $("cli-modal-detail").textContent = `Setup failed: ${err}`;
+      btn.disabled = false;
+      btn.textContent = "Add to PATH";
+    }
+  };
+  // Auto-open once per dismissal; the chip stays for later.
+  if (!localStorage.getItem("cli-modal-dismissed")) {
+    modal.style.display = "flex";
+  }
+}
+
 refresh();
 setInterval(refresh, 2000);
+cliToolsCheck();

@@ -6,6 +6,7 @@ mod client;
 mod commands;
 mod contexts;
 mod kube;
+mod pathsetup;
 mod sandbox;
 mod spike;
 mod vessels;
@@ -63,8 +64,11 @@ enum Commands {
     /// Point a tool (docker, nerdctl, kubectl) at Nebula. Undo: nebula revert.
     #[command(alias = "use")]
     Setup {
-        /// docker | nerdctl | kubectl
+        /// docker | nerdctl | kubectl | path (link bundled CLIs for missing tools)
         tool: String,
+        /// Skip confirmation prompts.
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
     /// Run one docker command against Nebula without changing any context.
     Docker {
@@ -239,7 +243,13 @@ fn main() -> anyhow::Result<()> {
         Commands::Exec { cmd } => commands::exec(cmd),
         Commands::Shell => commands::shell(),
         Commands::Logs { follow } => commands::logs(follow),
-        Commands::Setup { tool } => contexts::setup_tool(&tool),
+        Commands::Setup { tool, yes } => {
+            if tool == "path" {
+                pathsetup::install(yes)
+            } else {
+                contexts::setup_tool(&tool)
+            }
+        }
         Commands::Docker { args } => wrap::docker(args),
         Commands::Kubectl { args } => wrap::kubectl(args),
         Commands::Helm { args } => wrap::helm(args),

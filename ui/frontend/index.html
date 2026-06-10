@@ -64,6 +64,27 @@
     }
     button:disabled { opacity: 0.6; cursor: default; }
     .src { font-size: 11px; color: var(--dim); }
+    .warn-chip {
+      display: none; align-items: center; gap: 6px; cursor: pointer;
+      font-size: 12px; color: #fbbf24; background: rgba(251,191,36,0.08);
+      border: 1px solid rgba(251,191,36,0.25); border-radius: 6px; padding: 6px 9px;
+    }
+    .warn-chip:hover { background: rgba(251,191,36,0.14); }
+    .modal-backdrop {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+      align-items: center; justify-content: center; z-index: 10;
+    }
+    .modal {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+      max-width: 440px; padding: 20px 22px; box-shadow: 0 18px 50px rgba(0,0,0,0.5);
+    }
+    .modal h3 { margin: 0 0 8px; font-size: 14px; }
+    .modal p { color: var(--dim); margin: 0 0 8px; }
+    .modal code { background: #232a3a; border-radius: 4px; padding: 1px 5px; }
+    .modal .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
+    .modal .secondary {
+      background: transparent; color: var(--dim); border: 1px solid var(--border);
+    }
   </style>
 </head>
 <body>
@@ -89,11 +110,29 @@
       <label>Engine</label>
       <span class="num" id="engine-info">–</span>
     </div>
+    <div style="flex:1"></div>
+    <div class="warn-chip" id="cli-chip" title="Set up command-line tools">
+      ⚠ CLI tools not set up
+    </div>
   </aside>
   <main>
     <h2>Containers</h2>
     <div id="containers"><div class="empty">loading…</div></div>
   </main>
+  <div class="modal-backdrop" id="cli-modal">
+    <div class="modal">
+      <h3>Command-line tools</h3>
+      <p id="cli-modal-detail">Some tools aren't on your PATH.</p>
+      <p>Nebula can link its bundled copies into <code>~/.nebula/bin</code> and add that
+         directory to the <em>end</em> of your PATH — your own installs always take
+         precedence, the bundled ones only fill gaps.</p>
+      <p>You can do this later anytime with <code>nebula setup path</code>.</p>
+      <div class="actions">
+        <button class="secondary" id="cli-later">Not now</button>
+        <button id="cli-install">Add to PATH</button>
+      </div>
+    </div>
+  </div>
   <script src="main.js"></script>
 </body>
 </html>

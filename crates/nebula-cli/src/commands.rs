@@ -294,6 +294,14 @@ pub fn quickstart() -> anyhow::Result<()> {
     println!("   nebula stats --watch               watch the memory balloon breathe");
     println!();
 
+    let cli_st = crate::pathsetup::status();
+    if !cli_st.missing_from_path.is_empty() && cli_st.bundle_dir.is_some() {
+        println!(
+            "{} not on your PATH — `nebula setup path` links the bundled copies",
+            cli_st.missing_from_path.join(", ")
+        );
+        println!();
+    }
     // End with live status so the user knows their immediate next move.
     if running {
         status()?;
@@ -364,6 +372,12 @@ pub fn doctor() -> anyhow::Result<()> {
         "Rosetta installed (amd64 containers)",
         rosetta,
         "run: softwareupdate --install-rosetta --agree-to-license",
+    );
+    let cli_st = crate::pathsetup::status();
+    check(
+        "docker/kubectl/helm available",
+        cli_st.missing_from_path.is_empty(),
+        "run `nebula setup path` to use the copies bundled with Nebula",
     );
     check(
         "daemon running",
