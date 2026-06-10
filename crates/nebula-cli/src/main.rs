@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+mod autostart;
 mod client;
 mod commands;
 mod contexts;
@@ -72,6 +73,13 @@ enum Commands {
         #[arg(short, long)]
         watch: bool,
     },
+    /// Manage starting the engine automatically at login (launchd).
+    Autostart {
+        #[command(subcommand)]
+        action: AutostartAction,
+    },
+    /// Open the Nebula desktop app.
+    Ui,
     /// Diagnose common setup problems.
     Doctor,
     /// Install guest images (kernel + rootfs) into ~/.nebula.
@@ -92,6 +100,16 @@ enum Commands {
         #[arg(long)]
         spec: String,
     },
+}
+
+#[derive(Subcommand)]
+enum AutostartAction {
+    /// Start nebulad at login and keep it alive.
+    Enable,
+    /// Remove the login agent.
+    Disable,
+    /// Show autostart + engine state.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -147,6 +165,12 @@ fn main() -> anyhow::Result<()> {
         Commands::Use { tool } => contexts::use_tool(&tool),
         Commands::Revert { tool } => contexts::revert_tool(&tool),
         Commands::Stats { watch } => commands::stats(watch),
+        Commands::Autostart { action } => match action {
+            AutostartAction::Enable => autostart::enable(),
+            AutostartAction::Disable => autostart::disable(),
+            AutostartAction::Status => autostart::status(),
+        },
+        Commands::Ui => autostart::open_ui(),
         Commands::Doctor => commands::doctor(),
         Commands::InstallImage { kernel, rootfs } => commands::install_image(kernel, rootfs),
         Commands::Sandbox { action } => match action {

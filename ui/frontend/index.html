@@ -58,6 +58,11 @@
     .ports a { color: var(--accent); text-decoration: none; margin-right: 8px; }
     .empty { color: var(--dim); padding: 18px 10px; }
     .err { color: var(--bad); padding: 12px 0; }
+    button {
+      background: var(--accent); color: #0d1017; border: 0; border-radius: 6px;
+      padding: 7px 14px; font: inherit; font-weight: 600; cursor: pointer;
+    }
+    button:disabled { opacity: 0.6; cursor: default; }
     .src { font-size: 11px; color: var(--dim); }
   </style>
 </head>

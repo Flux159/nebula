@@ -25,6 +25,9 @@ nebula sandbox run --gpu -- ls /dev/dri    # virtio-gpu (Venus)
 
 nebula stats              # guest use, balloon, honest host footprint
 nebula revert --all       # put docker/nerdctl/kubectl back exactly
+
+nebula autostart enable   # start the engine at login, restart on failure
+nebula ui                 # open the desktop app (a client of the engine)
 ```
 
 ## Highlights
@@ -45,6 +48,10 @@ nebula revert --all       # put docker/nerdctl/kubectl back exactly
   isolated VM in ~250ms; `--gpu` attaches virtio-gpu (Vulkan→Metal via Venus).
 - **Embeddable.** REST API (`127.0.0.1:7440`, v1alpha1) with TypeScript
   (`sdk/typescript`) and Python (`sdk/python`) clients; Tauri UI in `ui/`.
+- **Daemon-first.** The engine (`nebulad`) runs independently of the app and
+  CLI — close either and your containers keep running. `nebula autostart
+  enable` installs a launchd agent (start at login + crash restart); the app
+  offers a one-click "Start engine" when the daemon is down.
 
 ## Building from source
 

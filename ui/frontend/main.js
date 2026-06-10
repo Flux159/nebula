@@ -81,8 +81,27 @@ async function refresh() {
   } catch (e) {
     $("dot").classList.remove("on");
     $("engine-state").textContent = "engine offline";
+    // Don't re-render (and wipe button state) on every poll while offline.
+    if ($("start-engine")) return;
     $("containers").innerHTML =
-      `<div class="err">Cannot reach the Nebula engine (${e.message}). Run <code>nebula up</code>.</div>`;
+      `<div class="err">Cannot reach the Nebula engine (${e.message}).</div>
+       <button id="start-engine">Start engine</button>
+       <div class="src" style="margin-top:6px">or run <code>nebula up</code> · <code>nebula autostart enable</code> starts it at login</div>`;
+    const btn = $("start-engine");
+    if (btn && window.__TAURI__) {
+      btn.onclick = async () => {
+        btn.disabled = true;
+        btn.textContent = "starting…";
+        try {
+          await window.__TAURI__.core.invoke("start_engine");
+          await refresh();
+        } catch (err) {
+          $("containers").innerHTML = `<div class="err">Start failed: ${err}</div>`;
+        }
+      };
+    } else if (btn) {
+      btn.style.display = "none"; // not running inside Tauri (plain browser)
+    }
   }
 }
 
