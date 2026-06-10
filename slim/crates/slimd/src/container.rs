@@ -75,8 +75,6 @@ pub struct Runtime {
     /// pipe mode stdout/stderr read ends (consumed by the pump thread).
     pub stdout: Option<Mutex<File>>,
     pub stderr: Option<Mutex<File>>,
-    /// Live output fan-out: chunk = (stream, bytes). Used by attach.
-    pub subscribers: Mutex<Vec<std::sync::mpsc::Sender<(u8, Vec<u8>)>>>,
     /// set when the process exits (notifies waiters).
     pub exited: Arc<(Mutex<Option<i32>>, std::sync::Condvar)>,
 }
@@ -89,7 +87,6 @@ impl Default for Runtime {
             stdin: None,
             stdout: None,
             stderr: None,
-            subscribers: Mutex::new(Vec::new()),
             exited: Arc::new((Mutex::new(None), std::sync::Condvar::new())),
         }
     }
@@ -104,6 +101,10 @@ pub const STREAM_STDERR: u8 = 2;
 pub struct Entry {
     pub c: Mutex<Container>,
     pub rt: Mutex<Arc<Runtime>>,
+    /// Live output fan-out, chunk = (stream, bytes). Lives on the Entry (not
+    /// the per-start Runtime) so `docker run` — which attaches BEFORE start —
+    /// subscribes to a list the post-start output pump still feeds.
+    pub subscribers: Mutex<Vec<std::sync::mpsc::Sender<(u8, Vec<u8>)>>>,
     #[allow(dead_code)]
     pub base_dir: PathBuf,
 }

@@ -126,6 +126,13 @@ Rust 2021, same toolchain pins as the root workspace. Release profile:
 | host sidecars | nebula+nebulad ~4.7 MB | unchanged | unchanged |
 | host CLIs | docker 39 / kubectl 55 / helm 59 | docker/kubectl/helm-slim ≤ 6 MB combined | **1.35 MB gz combined** (docker 0.9 / kubectl 0.8 / helm 0.9 MB) ✅ |
 
+**Nebula-Slim.app measured (macOS arm64): 54 MB on disk / 34 MB download**
+(vs full 311 MB / 207 MB). Embed core (kernel+rootfs+sidecars+CLIs, no UI):
+**31.9 MB**; +libkrun 45.7 MB. Booted as a real VZ microVM and driven by the
+**unmodified Docker CLI 27.5** (run/build/logs/exec/exit-codes), plus the slim
+CLIs 32/32. `docker build` via the real CLI needs `DOCKER_BUILDKIT=0` (slim is
+classic-builder only). Details: docs/slim-size-and-status.md.
+
 **Status: S0–S9 code complete. Validated 32/32 end-to-end in the nebula
 microVM on macOS** (slimd in a privileged container = real Linux
 namespaces/overlayfs/cgroup2): docker-slim 18/18 (pull/run/logs/exec/stop/rm/

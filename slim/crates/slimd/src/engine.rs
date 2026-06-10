@@ -120,6 +120,7 @@ impl Engine {
                 base_dir: e.path(),
                 c: Mutex::new(c.clone()),
                 rt: Mutex::new(Arc::new(Runtime::default())),
+                subscribers: Mutex::new(Vec::new()),
             });
             self.containers.lock().unwrap().insert(c.id.clone(), entry);
         }
@@ -282,6 +283,7 @@ impl Engine {
             base_dir: dir,
             c: Mutex::new(c.clone()),
             rt: Mutex::new(Arc::new(Runtime::default())),
+            subscribers: Mutex::new(Vec::new()),
         });
         self.containers.lock().unwrap().insert(id.clone(), entry);
         self.emit_event("container", "create", &id, BTreeMap::new());
@@ -491,12 +493,11 @@ impl Engine {
 
     fn spawn_pump(&self, entry: &Arc<Entry>, rt: &Arc<Runtime>, log_path: &str, tty: bool) {
         let mut writer = LogWriter::open(Path::new(log_path)).ok();
-        let rt2 = rt.clone();
-        let _ = entry;
         if tty {
             // Single stream: read pty master, label as stdout.
             let Some(pty) = rt.pty.as_ref().map(|m| m.lock().unwrap().try_clone()) else { return };
             let Ok(mut pty) = pty else { return };
+            let entry = entry.clone();
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
                 loop {
@@ -507,11 +508,10 @@ impl Engine {
                             if let Some(w) = writer.as_mut() {
                                 let _ = w.write("stdout", &String::from_utf8_lossy(chunk));
                             }
-                            fan_out(&rt2, STREAM_STDOUT, chunk);
+                            fan_out(&entry, STREAM_STDOUT, chunk);
                         }
                     }
                 }
-                signal_eof(&rt2);
             });
         } else {
             // Two streams.
@@ -521,7 +521,7 @@ impl Engine {
                 (STREAM_STDERR, rt.stderr_clone()),
             ] {
                 let Some(mut file) = file else { continue };
-                let rt3 = rt.clone();
+                let entry = entry.clone();
                 let writer = writer.clone();
                 let sname = if stream == STREAM_STDOUT { "stdout" } else { "stderr" };
                 std::thread::spawn(move || {
@@ -534,7 +534,7 @@ impl Engine {
                                 if let Some(w) = writer.lock().unwrap().as_mut() {
                                     let _ = w.write(sname, &String::from_utf8_lossy(chunk));
                                 }
-                                fan_out(&rt3, stream, chunk);
+                                fan_out(&entry, stream, chunk);
                             }
                         }
                     }
@@ -559,7 +559,10 @@ impl Engine {
                 *lock.lock().unwrap() = Some(status.code);
                 cv.notify_all();
             }
-            signal_eof(&rt);
+            // Give the output pump a moment to drain the final bytes to live
+            // attachers before we close their streams.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            signal_eof(&entry);
 
             engine.store.unmount_rootfs(&base);
             let (id, policy, max_retry, auto_remove) = {
@@ -808,7 +811,6 @@ fn make_runtime(handle: slim_runtime::Handle) -> Runtime {
         stdin: handle.stdin.map(Mutex::new),
         stdout: handle.stdout.map(Mutex::new),
         stderr: handle.stderr.map(Mutex::new),
-        subscribers: Mutex::new(Vec::new()),
         exited: Arc::new((Mutex::new(None), std::sync::Condvar::new())),
     }
 }
@@ -822,13 +824,14 @@ impl Runtime {
     }
 }
 
-fn fan_out(rt: &Arc<Runtime>, stream: u8, chunk: &[u8]) {
-    rt.subscribers
+fn fan_out(entry: &Arc<Entry>, stream: u8, chunk: &[u8]) {
+    entry
+        .subscribers
         .lock()
         .unwrap()
         .retain(|tx| tx.send((stream, chunk.to_vec())).is_ok());
 }
 
-fn signal_eof(rt: &Arc<Runtime>) {
-    rt.subscribers.lock().unwrap().clear();
+fn signal_eof(entry: &Arc<Entry>) {
+    entry.subscribers.lock().unwrap().clear();
 }

@@ -1,7 +1,7 @@
 //! Attach/exec stream plumbing: docker stdcopy multiplexing for non-tty,
 //! raw passthrough for tty, and the bidirectional socket<->process copy.
 
-use crate::container::{Runtime, STREAM_STDERR, STREAM_STDOUT};
+use crate::container::{Entry, Runtime, STREAM_STDERR, STREAM_STDOUT};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -16,32 +16,46 @@ pub fn frame(stream: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Pump live container output to the attach socket until EOF, then return.
-/// `multiplexed` = wrap in stdcopy frames (non-tty); else raw.
+/// Pump live container output to the attach socket until the process exits,
+/// then return (closing the socket so the client sees EOF). `is_alive` lets us
+/// stop even when the container exited *before or during* our subscription —
+/// in that race the waiter has already cleared subscribers, so a plain
+/// `rx.recv()` would block forever.
 pub fn pump_output_to_socket(
-    rt: &Arc<Runtime>,
+    entry: &Arc<Entry>,
     mut sock: UnixStream,
     multiplexed: bool,
     want_stdout: bool,
     want_stderr: bool,
+    is_alive: impl Fn() -> bool,
 ) {
     let rx = {
         let (tx, rx) = std::sync::mpsc::channel();
-        rt.subscribers.lock().unwrap().push(tx);
+        entry.subscribers.lock().unwrap().push(tx);
         rx
     };
-    // Also push any backlog? Live attach only — logs endpoint covers history.
-    while let Ok((stream, chunk)) = rx.recv() {
-        let want = (stream == STREAM_STDOUT && want_stdout)
-            || (stream == STREAM_STDERR && want_stderr);
-        if !want {
-            continue;
+    use std::sync::mpsc::RecvTimeoutError;
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok((stream, chunk)) => {
+                let want = (stream == STREAM_STDOUT && want_stdout)
+                    || (stream == STREAM_STDERR && want_stderr);
+                if !want {
+                    continue;
+                }
+                let bytes = if multiplexed { frame(stream, &chunk) } else { chunk };
+                if sock.write_all(&bytes).is_err() || sock.flush().is_err() {
+                    break;
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => break, // senders dropped (exit)
+            Err(RecvTimeoutError::Timeout) => {
+                // No data this tick: if the container is gone, we're done.
+                if !is_alive() {
+                    break;
+                }
+            }
         }
-        let bytes = if multiplexed { frame(stream, &chunk) } else { chunk };
-        if sock.write_all(&bytes).is_err() {
-            break;
-        }
-        let _ = sock.flush();
     }
 }
 

@@ -138,8 +138,13 @@ impl Ctx {
     pub fn respond_bytes(&mut self, status: u16, ctype: &str, body: &[u8]) -> io::Result<()> {
         self.drain_body();
         self.responded = true;
+        // One request per connection (Connection: close): a docker Engine API
+        // serves one local client; keep-alive reuse with the Go HTTP client
+        // was desyncing responses, and closing per-request is simpler and
+        // robust at this scale.
+        self.keep_alive = false;
         let head = format!(
-            "HTTP/1.1 {} {}\r\nServer: nebula-slim\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n",
+            "HTTP/1.1 {} {}\r\nServer: nebula-slim\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             status,
             status_text(status),
             ctype,

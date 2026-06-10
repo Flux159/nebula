@@ -253,18 +253,20 @@ impl<'a> Helm<'a> {
         chart: &Chart,
         values: &Value,
         out: &mut dyn FnMut(&str),
-    ) -> HelmResult<()> {
+    ) -> HelmResult<Vec<String>> {
         let opts = RenderOptions { release: release.to_string(), namespace: self.namespace.clone(), is_upgrade: false };
         let manifests = render(chart, values, &opts)?;
         let facade = Facade::new(self.client, &self.namespace);
-        facade.apply_yaml(&manifests, out).map_err(|e| HelmError(e.to_string()))?;
+        let skipped = facade.apply_yaml(&manifests, out).map_err(|e| HelmError(e.to_string()))?;
         save_release(release, &self.namespace, &chart.name, &chart.version, &manifests)?;
         out(&format!(
             "NAME: {release}\nLAST DEPLOYED: {}\nNAMESPACE: {}\nSTATUS: deployed\nREVISION: 1\n",
             slim_kube_now(),
             self.namespace
         ));
-        Ok(())
+        // Returns the kinds the facade couldn't map (CRDs, RBAC, etc.) so the
+        // CLI can warn or fail under --strict.
+        Ok(skipped)
     }
 
     pub fn uninstall(&self, release: &str, out: &mut dyn FnMut(&str)) -> HelmResult<()> {

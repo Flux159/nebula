@@ -99,8 +99,16 @@ fn slurp(path: &str) -> Result<String, String> {
 
 fn verb_apply(facade: &Facade, args: &[String], out: &mut dyn FnMut(&str)) -> Result<i32, String> {
     let path = read_filename(args)?.ok_or("apply requires -f")?;
+    let strict = args.iter().any(|a| a == "--strict");
     let yaml = slurp(&path)?;
-    facade.apply_yaml(&yaml, out).map_err(|e| e.to_string())?;
+    let skipped = facade.apply_yaml(&yaml, out).map_err(|e| e.to_string())?;
+    if !skipped.is_empty() && strict {
+        return Err(format!(
+            "--strict: {} object(s) of unsupported kinds were skipped: {}",
+            skipped.len(),
+            skipped.join(", ")
+        ));
+    }
     Ok(0)
 }
 
@@ -253,7 +261,8 @@ fn usage() {
         "kubectl-slim — Kubernetes facade over the nebula slim engine\n\n\
         Usage: kubectl-slim [-n NS] VERB ...\n\n\
         Verbs:\n\
-        \x20 apply -f FILE         Create/update Deployments, Pods, Jobs, Services, ConfigMaps, Secrets\n\
+        \x20 apply -f FILE [--strict]  Create/update Deployments, Pods, Jobs, Services, ConfigMaps, Secrets\n\
+        \x20                          (--strict: non-zero exit if any unsupported kind is skipped)\n\
         \x20 delete -f FILE        Delete the objects in FILE\n\
         \x20 delete KIND NAME      Delete by kind/name\n\
         \x20 get KIND [NAME]       List objects (pods, deployments, services, jobs)\n\

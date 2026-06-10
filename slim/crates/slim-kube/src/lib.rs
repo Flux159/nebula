@@ -64,7 +64,10 @@ impl<'a> Facade<'a> {
 
     // ---------- apply ----------
 
-    pub fn apply_yaml(&self, yaml: &str, out: &mut dyn FnMut(&str)) -> KubeResult<()> {
+    /// Apply a multi-doc manifest. Returns the kinds it skipped (unsupported),
+    /// so the caller can decide whether to treat that as an error (--strict).
+    pub fn apply_yaml(&self, yaml: &str, out: &mut dyn FnMut(&str)) -> KubeResult<Vec<String>> {
+        let mut skipped = Vec::new();
         let docs = parse_docs(yaml)?;
         // Pass 1: index config sources + services.
         let mut configmaps: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
@@ -94,7 +97,10 @@ impl<'a> Facade<'a> {
                     workloads.push(d.clone())
                 }
                 "" => {}
-                other => out(&format!("warning: kind {other} is not supported by slim — skipped\n")),
+                other => {
+                    out(&format!("warning: kind {other} is not supported by slim — skipped\n"));
+                    skipped.push(format!("{}/{}", other, name_of(d)));
+                }
             }
         }
         // Pass 2: create workloads with env + service ports resolved.
@@ -105,7 +111,7 @@ impl<'a> Facade<'a> {
         for s in &services {
             out(&format!("service/{} created\n", s.name));
         }
-        Ok(())
+        Ok(skipped)
     }
 
     fn apply_workload(

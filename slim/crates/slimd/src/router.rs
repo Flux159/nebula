@@ -59,10 +59,7 @@ fn route(engine: &EngineRef, ctx: &mut Ctx, method: &str, segs: &[&str]) -> R {
             engine.kill(id, &sig)?;
             ctx.respond_empty(204)
         }
-        ("POST", ["containers", id, "wait"]) => {
-            let code = engine.wait(id)?;
-            ctx.respond_json(200, &slim_api::container::WaitResponse { status_code: code as i64, error: None })
-        }
+        ("POST", ["containers", id, "wait"]) => wait_container(engine, ctx, id),
         ("POST", ["containers", id, "rename"]) => {
             let name = ctx.head.query_str("name").unwrap_or("").to_string();
             engine.rename(id, &name)?;
@@ -179,7 +176,7 @@ fn ping(ctx: &mut Ctx) -> R {
     // docker CLI reads Api-Version/Docker-Experimental headers off _ping.
     let body = b"OK";
     let head = format!(
-        "HTTP/1.1 200 OK\r\nApi-Version: {}\r\nDocker-Experimental: false\r\nOSType: linux\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nApi-Version: {}\r\nDocker-Experimental: false\r\nOSType: linux\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         slim_api::API_VERSION,
         body.len()
     );
@@ -238,6 +235,24 @@ fn create_container(engine: &EngineRef, ctx: &mut Ctx) -> R {
     let req: slim_api::container::ContainerCreateRequest = ctx.body_json()?;
     let id = engine.create(&req, name.as_deref())?;
     ctx.respond_json(201, &slim_api::container::ContainerCreateResponse { id, warnings: vec![] })
+}
+
+/// `/wait` must send the 200 response HEADERS immediately, then the
+/// `{"StatusCode":N}` body when the container exits. The docker (moby) client's
+/// `ContainerWait` blocks until it receives those headers before it proceeds to
+/// `POST /start` — sending headers only at exit deadlocks `docker run`.
+fn wait_container(engine: &EngineRef, ctx: &mut Ctx, id: &str) -> R {
+    // Resolve up front so a missing container is a clean 404 (before headers).
+    let _ = engine.get_entry(id)?;
+    let mut w = ctx.stream(200, "application/json")?;
+    let code = engine.wait(id).unwrap_or(-1);
+    let body = serde_json::to_vec(&slim_api::container::WaitResponse {
+        status_code: code as i64,
+        error: None,
+    })
+    .unwrap_or_default();
+    w.write_all(&body)?;
+    w.finish()
 }
 
 fn prune_containers(engine: &EngineRef, ctx: &mut Ctx) -> R {
@@ -331,7 +346,10 @@ fn attach(engine: &EngineRef, ctx: &mut Ctx, id: &str) -> R {
     } else {
         None
     };
-    streams::pump_output_to_socket(&rt, sock, !tty, want_stdout, want_stderr);
+    let alive_entry = entry.clone();
+    streams::pump_output_to_socket(&entry, sock, !tty, want_stdout, want_stderr, move || {
+        alive_entry.c.lock().map(|c| c.running()).unwrap_or(false)
+    });
     if let Some(t) = in_thread {
         let _ = t.join();
     }

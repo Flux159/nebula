@@ -71,12 +71,14 @@ struct InstallArgs {
     values_files: Vec<String>,
     sets: Vec<String>,
     dry_run: bool,
+    strict: bool,
 }
 
 fn parse_install(args: &[String]) -> Result<InstallArgs, String> {
     let mut values_files = Vec::new();
     let mut sets = Vec::new();
     let mut dry_run = false;
+    let mut strict = false;
     let mut positional = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -101,6 +103,10 @@ fn parse_install(args: &[String]) -> Result<InstallArgs, String> {
                 dry_run = true;
                 i += 1;
             }
+            "--strict" => {
+                strict = true;
+                i += 1;
+            }
             _ => {
                 positional.push(args[i].clone());
                 i += 1;
@@ -112,7 +118,7 @@ fn parse_install(args: &[String]) -> Result<InstallArgs, String> {
         1 => (positional[0].clone(), positional[0].clone()), // generate-name-ish
         _ => return Err("requires RELEASE and CHART".into()),
     };
-    Ok(InstallArgs { release, chart, values_files, sets, dry_run })
+    Ok(InstallArgs { release, chart, values_files, sets, dry_run, strict })
 }
 
 fn cmd_install(ns: &str, args: &[String], upgrade: bool) -> Result<i32, String> {
@@ -131,7 +137,14 @@ fn cmd_install(ns: &str, args: &[String], upgrade: bool) -> Result<i32, String> 
     let client = Client::discover();
     let helm = Helm::new(&client, namespace);
     let mut out = |s: &str| print!("{s}");
-    helm.install(&ia.release, &chart, &values, &mut out).map_err(|e| e.to_string())?;
+    let skipped = helm.install(&ia.release, &chart, &values, &mut out).map_err(|e| e.to_string())?;
+    if !skipped.is_empty() && ia.strict {
+        return Err(format!(
+            "--strict: {} object(s) of unsupported kinds were skipped: {}",
+            skipped.len(),
+            skipped.join(", ")
+        ));
+    }
     Ok(0)
 }
 
@@ -177,7 +190,8 @@ fn usage() {
         "helm-slim — Helm facade over the nebula slim engine\n\n\
         Usage: helm-slim [-n NS] VERB ...\n\n\
         Verbs:\n\
-        \x20 install NAME CHART [-f values.yaml] [--set k=v] [--dry-run]\n\
+        \x20 install NAME CHART [-f values.yaml] [--set k=v] [--dry-run] [--strict]\n\
+        \x20                                     (--strict: fail if any unsupported kind is skipped)\n\
         \x20 upgrade NAME CHART [...]            Re-render and re-apply\n\
         \x20 template [NAME] CHART [...]         Render manifests to stdout\n\
         \x20 uninstall NAME                      Delete a release's objects\n\
