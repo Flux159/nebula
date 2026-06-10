@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Nebula</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1017;
+      --panel: #161b26;
+      --border: #232a3a;
+      --text: #e6e9f0;
+      --dim: #8a93a8;
+      --accent: #7aa2ff;
+      --good: #4ade80;
+      --bad: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 13px/1.5 -apple-system, "SF Pro Text", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      height: 100vh;
+    }
+    aside {
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    aside h1 { font-size: 15px; margin: 0 0 4px; letter-spacing: 0.4px; }
+    .pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; color: var(--dim);
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); }
+    .dot.on { background: var(--good); }
+    .gauge { margin-top: 4px; }
+    .gauge label { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; }
+    .bar {
+      height: 6px; border-radius: 3px; background: #242c3e; margin: 5px 0 2px; overflow: hidden;
+    }
+    .bar > i { display: block; height: 100%; background: var(--accent); transition: width 0.6s; }
+    .bar > i.mem { background: linear-gradient(90deg, #7aa2ff, #a78bfa); }
+    .num { font-variant-numeric: tabular-nums; }
+    main { padding: 18px 22px; overflow-y: auto; }
+    h2 { font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.8px; margin: 18px 0 8px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+    th { color: var(--dim); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; }
+    td.state-running { color: var(--good); }
+    td.state-exited { color: var(--dim); }
+    .ports a { color: var(--accent); text-decoration: none; margin-right: 8px; }
+    .empty { color: var(--dim); padding: 18px 10px; }
+    .err { color: var(--bad); padding: 12px 0; }
+    .src { font-size: 11px; color: var(--dim); }
+  </style>
+</head>
+<body>
+  <aside>
+    <div>
+      <h1>Nebula</h1>
+      <span class="pill"><span class="dot" id="dot"></span><span id="engine-state">connecting…</span></span>
+    </div>
+    <div class="gauge">
+      <label>Guest memory</label>
+      <div class="bar"><i class="mem" id="mem-bar" style="width:0%"></i></div>
+      <span class="num" id="mem-text">–</span>
+    </div>
+    <div class="gauge">
+      <label>Host footprint</label>
+      <span class="num" id="footprint">–</span>
+    </div>
+    <div class="gauge">
+      <label>Balloon</label>
+      <span class="num" id="balloon">–</span>
+    </div>
+    <div class="gauge">
+      <label>Engine</label>
+      <span class="num" id="engine-info">–</span>
+    </div>
+  </aside>
+  <main>
+    <h2>Containers</h2>
+    <div id="containers"><div class="empty">loading…</div></div>
+  </main>
+  <script src="main.js"></script>
+</body>
+</html>

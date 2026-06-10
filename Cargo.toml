@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["third_party"]
+exclude = ["third_party", "ui"]
 members = [
     "crates/nebula-core",
     "crates/nebula-cli",
