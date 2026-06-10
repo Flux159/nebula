@@ -555,7 +555,14 @@ run a customized container, stream its logs — without shelling out to any CLI.
 
 ---
 
-## Phase 11 — Stretch tracks (unordered)
+## Phase 11 — Stretch tracks (unordered) — status 2026-06-09
+
+Core phases 0–10 implemented and tested (see scripts/test-phase*.sh). Stretch
+status: **11.2 is shipped** (`nebula sandbox run`, 250ms isolated microVMs —
+landed early as Phase 7). 11.1 (games) has its substrate ready (GPU=1 fork
+build, virtio-gpu attaches; needs sommelier + mesa userspace image). 11.3
+(Linux host) is unblocked by the `VmmBackend` trait + the fork's KVM path.
+11.4/11.5/11.6 not started. Remaining per-track detail below unchanged.
 
 - [ ] **11.1 Games & desktop apps.** muvm-style: sommelier + cross-domain virtio-gpu
   Wayland passthrough so Linux GUI apps (and Steam + FEX for x86) open as native-feeling

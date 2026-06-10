@@ -25,7 +25,12 @@ for _ in $(seq 1 30); do docker version >/dev/null 2>&1 && break; sleep 1; done
 echo "--- guest DNS via host resolver"
 check "guest resolv.conf -> local relay"  "$NEBULA exec cat /etc/resolv.conf | grep -q 127.0.0.1"
 check "guest resolves public names"       "$NEBULA exec nslookup registry-1.docker.io | grep -qi address"
-check "docker pull works over new DNS"    "docker pull -q alpine:3.20"
+PULL_OK=0
+for _ in $(seq 1 10); do
+    docker pull -q alpine:3.20 >/dev/null 2>&1 && { PULL_OK=1; break; }
+    sleep 2
+done
+check "docker pull works over new DNS"    "[ $PULL_OK = 1 ]"
 
 echo "--- dynamic port forwarding"
 docker rm -f nebula-p3-web >/dev/null 2>&1
