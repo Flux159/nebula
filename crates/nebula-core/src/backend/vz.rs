@@ -12,7 +12,7 @@ use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::AnyThread;
-use objc2_foundation::{NSArray, NSError, NSString, NSURL};
+use objc2_foundation::{NSArray, NSData, NSError, NSString, NSURL};
 use objc2_virtualization::*;
 
 use crate::error::{Error, Result};
@@ -70,10 +70,17 @@ impl VmmBackend for VzBackend {
             name: spec.name.clone(),
             queue,
             vm,
+            config: ConfigCell(config),
             started: false,
         }))
     }
 }
+
+/// Holds the configuration for post-create checks (save/restore support).
+/// Same safety story as VmCell: only touched from `on_queue` closures.
+struct ConfigCell(Retained<VZVirtualMachineConfiguration>);
+unsafe impl Send for ConfigCell {}
+unsafe impl Sync for ConfigCell {}
 
 /// Holds the VZVirtualMachine. Safety invariant: the inner object is only ever
 /// used from closures executed on the VM's serial dispatch queue.
@@ -85,6 +92,7 @@ pub struct VzVm {
     name: String,
     queue: DispatchRetained<DispatchQueue>,
     vm: VmCell,
+    config: ConfigCell,
     started: bool,
 }
 
@@ -217,6 +225,48 @@ impl VmHandle for VzVm {
         }
     }
 
+    fn pause(&mut self) -> Result<()> {
+        self.completion_op("pause", |vm, block| unsafe {
+            vm.pauseWithCompletionHandler(&block);
+        })
+    }
+
+    fn resume(&mut self) -> Result<()> {
+        self.completion_op("resume", |vm, block| unsafe {
+            vm.resumeWithCompletionHandler(&block);
+        })
+    }
+
+    fn save_state(&mut self, path: &Path) -> Result<()> {
+        // Fail with Apple's reason (e.g. an unsupported device) instead of a
+        // generic save error.
+        let config = &self.config;
+        self.on_queue(|_| unsafe { config.0.validateSaveRestoreSupportWithError() })
+            .map_err(|e| {
+                Error::backend(
+                    BACKEND,
+                    format!("this VM's configuration cannot be saved: {e}"),
+                )
+            })?;
+        let url_path = path.to_string_lossy().into_owned();
+        self.completion_op("save_state", move |vm, block| unsafe {
+            vm.saveMachineStateToURL_completionHandler(&file_url(Path::new(&url_path)), &block);
+        })
+    }
+
+    fn restore_state(&mut self, path: &Path) -> Result<()> {
+        let url_path = path.to_string_lossy().into_owned();
+        self.completion_op("restore_state", move |vm, block| unsafe {
+            vm.restoreMachineStateFromURL_completionHandler(
+                &file_url(Path::new(&url_path)),
+                &block,
+            );
+        })?;
+        // A successful restore leaves the VM paused.
+        self.started = true;
+        Ok(())
+    }
+
     fn balloon_set_guest_mib(&mut self, target_mib: u64) -> Result<()> {
         let ok = self.on_queue(move |vm| {
             let devices = unsafe { vm.memoryBalloonDevices() };
@@ -242,9 +292,183 @@ impl VmHandle for VzVm {
     }
 }
 
+// ---------------------------------------------------------------------------
+// vz-worker: a daemon-free VZ vessel host (the VZ twin of krun::run_worker).
+//
+// Unlike libkrun, VZ has no built-in unix-socket<->vsock port mapping, so the
+// worker provides it: a UnixListener per VsockPortMap, proxied through
+// vsock_connect. It also serves a tiny JSON-lines control protocol on a
+// dedicated socket so the CLI can pause/save/resume a LIVE vm — the basis of
+// memory-state snapshots.
+// ---------------------------------------------------------------------------
+
+use serde::{Deserialize, Serialize};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::{Arc, Mutex};
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum WorkerControl {
+    Pause,
+    Resume,
+    /// Save machine state of a paused VM to `path` (host-side file).
+    Save {
+        path: std::path::PathBuf,
+    },
+    State,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkerReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+/// Host a VZ vessel until the guest powers off. `restore` boots from a saved
+/// machine state instead of a cold kernel boot.
+pub fn run_worker(spec_json: &str, restore: Option<&Path>, control: Option<&Path>) -> Result<()> {
+    let spec: crate::spec::VmSpec = serde_json::from_str(spec_json)
+        .map_err(|e| Error::backend(BACKEND, format!("bad spec: {e}")))?;
+    let mut vm = VzBackend::new().create(&spec)?;
+    if let Some(state) = restore {
+        vm.restore_state(state)?;
+        vm.resume()?;
+    } else {
+        vm.start()?;
+    }
+    let vm: Arc<Mutex<Box<dyn super::VmHandle>>> = Arc::new(Mutex::new(vm));
+
+    // vsock port maps -> per-port unix listeners (agent.sock, shell.sock, …).
+    for map in &spec.vsock_ports {
+        let _ = std::fs::remove_file(&map.host_path);
+        let listener = UnixListener::bind(&map.host_path).map_err(|e| {
+            Error::backend(BACKEND, format!("bind {}: {e}", map.host_path.display()))
+        })?;
+        let vm = Arc::clone(&vm);
+        let port = map.port;
+        std::thread::spawn(move || {
+            for conn in listener.incoming().flatten() {
+                let guest = vm.lock().expect("vm lock").vsock_connect(port);
+                if let Ok(guest) = guest {
+                    std::thread::spawn(move || pump(conn, guest));
+                }
+            }
+        });
+    }
+
+    if let Some(ctl) = control {
+        let _ = std::fs::remove_file(ctl);
+        let listener = UnixListener::bind(ctl)
+            .map_err(|e| Error::backend(BACKEND, format!("bind {}: {e}", ctl.display())))?;
+        let vm = Arc::clone(&vm);
+        std::thread::spawn(move || {
+            for conn in listener.incoming().flatten() {
+                let vm = Arc::clone(&vm);
+                std::thread::spawn(move || serve_control(conn, &vm));
+            }
+        });
+    }
+
+    loop {
+        match vm.lock().expect("vm lock").state() {
+            VmState::Stopped => return Ok(()),
+            VmState::Failed => return Err(Error::backend(BACKEND, "VM entered Failed state")),
+            _ => {}
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn serve_control(conn: UnixStream, vm: &Arc<Mutex<Box<dyn super::VmHandle>>>) {
+    use std::io::{BufRead, BufReader, Write};
+    let Ok(mut writer) = conn.try_clone() else {
+        return;
+    };
+    // Multiple ops per connection: pause+save+resume arrive on ONE stream so
+    // no other client can interleave between them.
+    for line in BufReader::new(conn).lines() {
+        let Ok(line) = line else { break };
+        let reply = match serde_json::from_str::<WorkerControl>(&line) {
+            Ok(WorkerControl::Pause) => to_reply(vm.lock().expect("vm lock").pause()),
+            Ok(WorkerControl::Resume) => to_reply(vm.lock().expect("vm lock").resume()),
+            Ok(WorkerControl::Save { path }) => {
+                to_reply(vm.lock().expect("vm lock").save_state(&path))
+            }
+            Ok(WorkerControl::State) => WorkerReply {
+                ok: true,
+                error: None,
+                state: Some(format!("{:?}", vm.lock().expect("vm lock").state())),
+            },
+            Err(e) => WorkerReply {
+                ok: false,
+                error: Some(format!("bad control request: {e}")),
+                state: None,
+            },
+        };
+        let Ok(mut out) = serde_json::to_string(&reply) else {
+            break;
+        };
+        out.push('\n');
+        if writer.write_all(out.as_bytes()).is_err() {
+            break;
+        }
+    }
+}
+
+fn to_reply(r: Result<()>) -> WorkerReply {
+    match r {
+        Ok(()) => WorkerReply {
+            ok: true,
+            error: None,
+            state: None,
+        },
+        Err(e) => WorkerReply {
+            ok: false,
+            error: Some(e.to_string()),
+            state: None,
+        },
+    }
+}
+
+/// Bidirectional byte pump between two streams; returns when both sides EOF.
+fn pump(a: UnixStream, b: UnixStream) {
+    use std::net::Shutdown;
+    let (Ok(mut ar), Ok(mut bw)) = (a.try_clone(), b.try_clone()) else {
+        return;
+    };
+    let t = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut ar, &mut bw);
+        let _ = bw.shutdown(Shutdown::Write);
+    });
+    let (mut br, mut aw) = (b, a);
+    let _ = std::io::copy(&mut br, &mut aw);
+    let _ = aw.shutdown(Shutdown::Write);
+    let _ = t.join();
+}
+
 fn file_url(path: &Path) -> Retained<NSURL> {
     let s = NSString::from_str(&path.to_string_lossy());
     NSURL::fileURLWithPath(&s)
+}
+
+/// Mint a fresh machine identifier, hex-encoded for VmSpec persistence.
+pub fn new_machine_id() -> String {
+    let id = unsafe { VZGenericMachineIdentifier::new() };
+    let data = unsafe { id.dataRepresentation() };
+    data.to_vec().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 fn build_config(spec: &VmSpec) -> Result<Retained<VZVirtualMachineConfiguration>> {
@@ -252,6 +476,23 @@ fn build_config(spec: &VmSpec) -> Result<Retained<VZVirtualMachineConfiguration>
         let config = VZVirtualMachineConfiguration::new();
         config.setCPUCount(spec.cpus as usize);
         config.setMemorySize(spec.mem_mib * 1024 * 1024);
+
+        // Persisted machine identifier: saved machine state embeds it, so
+        // restore only works when the restoring config carries the SAME one.
+        if let Some(hexid) = &spec.machine_id {
+            let bytes = hex_decode(hexid)
+                .ok_or_else(|| Error::backend(BACKEND, format!("bad machine_id `{hexid}`")))?;
+            let mid = VZGenericMachineIdentifier::initWithDataRepresentation(
+                VZGenericMachineIdentifier::alloc(),
+                &NSData::with_bytes(&bytes),
+            )
+            .ok_or_else(|| {
+                Error::backend(BACKEND, format!("machine_id `{hexid}` rejected by VZ"))
+            })?;
+            let platform = VZGenericPlatformConfiguration::new();
+            platform.setMachineIdentifier(&mid);
+            config.setPlatform(&platform.into_super());
+        }
 
         // Boot loader: direct kernel boot.
         let BootSpec::Kernel {
@@ -358,6 +599,12 @@ fn build_config(spec: &VmSpec) -> Result<Retained<VZVirtualMachineConfiguration>
             net.setAttachment(Some(&Retained::into_super(
                 VZNATNetworkDeviceAttachment::new(),
             )));
+            if let Some(mac) = &spec.mac {
+                let addr =
+                    VZMACAddress::initWithString(VZMACAddress::alloc(), &NSString::from_str(mac))
+                        .ok_or_else(|| Error::backend(BACKEND, format!("invalid MAC `{mac}`")))?;
+                net.setMACAddress(&addr);
+            }
             config.setNetworkDevices(&NSArray::from_retained_slice(&[Retained::into_super(net)]));
         }
 

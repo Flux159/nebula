@@ -133,6 +133,18 @@ enum Commands {
         #[arg(long)]
         spec: String,
     },
+    /// Internal: Virtualization.framework worker process (hosts a VZ vessel).
+    #[command(name = "vz-worker", hide = true)]
+    VzWorker {
+        #[arg(long)]
+        spec: String,
+        /// Boot from a saved machine state instead of a cold kernel boot.
+        #[arg(long)]
+        restore: Option<PathBuf>,
+        /// JSON-lines control socket (pause/save/resume) for live snapshots.
+        #[arg(long)]
+        control: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -168,6 +180,10 @@ enum VesselsAction {
         /// Rootfs size in MiB when building from an image.
         #[arg(long, default_value_t = 4096)]
         rootfs_size: u64,
+        /// VMM backend: `krun` (default — fastest boot, GPU) or `vz`
+        /// (Virtualization.framework — enables live memory-state snapshots).
+        #[arg(long, default_value = "krun")]
+        backend: String,
     },
     /// List vessels (including the engine vessel).
     Ls,
@@ -182,7 +198,15 @@ enum VesselsAction {
         force: bool,
     },
     /// Take a crash-consistent disk snapshot (stop->clone->restart, <1s).
-    Snapshot { name: String, label: String },
+    Snapshot {
+        name: String,
+        label: String,
+        /// Also save live machine state (RAM + devices) WITHOUT stopping the
+        /// vessel: pause -> save -> clone disks -> resume. Restoring resumes
+        /// exactly where execution left off. Requires a `--backend vz` vessel.
+        #[arg(long)]
+        memory: bool,
+    },
     /// List a vessel's snapshots.
     Snapshots { name: String },
     /// Delete a snapshot.
@@ -309,6 +333,7 @@ fn main() -> anyhow::Result<()> {
                 disk,
                 from_image,
                 rootfs_size,
+                backend,
             } => vessels::new(vessels::NewOpts {
                 name,
                 cpus,
@@ -317,12 +342,17 @@ fn main() -> anyhow::Result<()> {
                 data_gib: disk,
                 from_image,
                 rootfs_mb: rootfs_size,
+                backend,
             }),
             VesselsAction::Ls => vessels::ls(),
             VesselsAction::Start { name } => vessels::start(&name),
             VesselsAction::Stop { name } => vessels::stop(&name),
             VesselsAction::Rm { name, force } => vessels::rm(&name, force),
-            VesselsAction::Snapshot { name, label } => vessels::snapshot(&name, &label),
+            VesselsAction::Snapshot {
+                name,
+                label,
+                memory,
+            } => vessels::snapshot(&name, &label, memory),
             VesselsAction::Snapshots { name } => vessels::snapshots(&name),
             VesselsAction::SnapshotRm { name, label } => vessels::snapshot_rm(&name, &label),
             VesselsAction::Restore { name, label } => vessels::restore(&name, &label),
@@ -359,5 +389,18 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         },
+        Commands::VzWorker {
+            spec,
+            restore,
+            control,
+        } => {
+            if let Err(e) =
+                nebula_core::backend::vz::run_worker(&spec, restore.as_deref(), control.as_deref())
+            {
+                eprintln!("vz-worker: {e}");
+                std::process::exit(1);
+            }
+            Ok(())
+        }
     }
 }

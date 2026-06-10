@@ -35,10 +35,24 @@ pub struct VmSpec {
     /// Attach a virtio-gpu with Venus (Vulkan) support (libkrun only).
     #[serde(default)]
     pub gpu: bool,
-    /// Host unix socket <-> guest vsock port maps (libkrun only): connecting
-    /// to `host_path` reaches a guest listener on `port`.
+    /// Host unix socket <-> guest vsock port maps (libkrun: native; VZ:
+    /// proxied by the vz-worker): connecting to `host_path` reaches a guest
+    /// listener on `port`.
     #[serde(default)]
     pub vsock_ports: Vec<VsockPortMap>,
+    /// Which VMM runs this spec (`krun` | `vz`). Recorded by named vessels so
+    /// start/snapshot pick the right worker; the engine ignores it.
+    #[serde(default)]
+    pub backend: Option<String>,
+    /// Stable NAT MAC address (VZ only). Without one VZ randomizes per boot,
+    /// which breaks DHCP lease stability and memory-state restore.
+    #[serde(default)]
+    pub mac: Option<String>,
+    /// Stable machine identifier (VZ only, hex of the dataRepresentation).
+    /// Saved machine state embeds it; restoring under a freshly randomized
+    /// identifier fails with "invalid argument".
+    #[serde(default)]
+    pub machine_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +181,9 @@ mod tests {
             rosetta: false,
             gpu: false,
             vsock_ports: vec![],
+            backend: None,
+            mac: None,
+            machine_id: None,
         }
     }
 

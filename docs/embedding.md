@@ -135,6 +135,28 @@ When your environment is already a Dockerfile, skip overlays entirely:
 `nebula vessels new x --from-image your/image` boots any arm64 docker image
 as a managed microVM (init/agent injected at conversion time).
 
+### Snapshots and tree-search (for agent orchestrators)
+
+Vessels snapshot two ways; pick per vessel at creation time:
+
+```bash
+nebula vessels new agent --from-image your/devcontainer            # libkrun: ~100ms boots
+nebula vessels new agent --from-image your/devcontainer --backend vz  # VZ: live memory snapshots
+
+nebula vessels snapshot agent step3              # disks only, ~10ms (stop->clone->restart)
+nebula vessels snapshot agent step3 --memory     # + RAM/processes, ~360ms, vessel NEVER stops
+nebula vessels branch agent try --snapshot step3 --count 5   # 5 independent clones
+nebula vessels restore agent step3               # memory snapshots resume mid-execution
+```
+
+Disk snapshots are crash-consistent and fit "state lives in files" agents.
+Memory snapshots capture the live machine — running processes, open
+connections, tmpfs — so branches wake mid-execution (~600ms each); use them
+when you can't assume the agent flushed everything to disk. Two caveats:
+memory-branches share the source's network identity (vsock-based
+exec/shell are per-VM and unaffected), and `--backend vz` excludes GPU
+(libkrun-only).
+
 ## 4. Multiple Nebulas — the isolation story
 
 `NEBULA_HOME` isolates an instance completely: its own engine VM, disks,

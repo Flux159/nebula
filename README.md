@@ -52,6 +52,14 @@ nebula ui                 # open the desktop app (a client of the engine)
   ports appear on `localhost` automatically.
 - **Sandbox microVMs.** `nebula sandbox run` boots, runs, and tears down an
   isolated VM in ~250ms; `--gpu` attaches virtio-gpu (Vulkan→Metal via Venus).
+- **Snapshots & live branching.** `nebula vessels snapshot` clones a vessel's
+  disks in ~10ms (APFS copy-on-write); `--memory` on a `--backend vz` vessel
+  saves the LIVE machine state (RAM, running processes, open sockets) in
+  ~360ms without stopping it. `vessels branch --snapshot x --count N` fans out
+  N independent clones — with a memory snapshot each wakes mid-execution
+  (~600ms per branch), the primitive for tree-search over agent runs.
+  `vessels new --from-image debian:bookworm-slim` boots any arm64 docker image
+  as a snapshot-capable microVM.
 - **Embeddable.** REST API (`127.0.0.1:7440`, v1alpha1) with TypeScript
   (`sdk/typescript`) and Python (`sdk/python`) clients; Tauri UI in `ui/`.
 - **Daemon-first.** The engine (`nebulad`) runs independently of the app and
@@ -69,6 +77,10 @@ Measured on an M-series MacBook Pro (16 cores), release build, 2026-06:
 | └ VZ virtual machine create→running | 80–96 ms |
 | └ kernel boot + init + agent ready (vsock) | 580–595 ms total |
 | `nebula sandbox run` boot→run→teardown (libkrun) | **~250 ms** |
+| Vessel disk snapshot (APFS clone) | 5–12 ms |
+| Live memory snapshot (vz, vessel never stops) | **~360 ms** |
+| Restore to a live memory snapshot (resume mid-execution) | ~850 ms |
+| 3-way live branch fan-out from a memory snapshot | 1.8 s |
 | Idle host footprint, 32 GiB max engine | **~1–2 GiB** (balloon holds ~30 GiB) |
 | Balloon resizes at steady state | 0/hour (one jump per workload change) |
 | virtiofs (`$HOME` share) sequential write | ~1.3 GB/s |

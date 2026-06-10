@@ -48,6 +48,33 @@ pub trait VmHandle: Send {
         ))
     }
 
+    /// Freeze all vCPUs (prerequisite for `save_state`).
+    fn pause(&mut self) -> Result<()> {
+        Err(Error::backend("vm", "pause not supported by this backend"))
+    }
+
+    /// Unfreeze a paused VM.
+    fn resume(&mut self) -> Result<()> {
+        Err(Error::backend("vm", "resume not supported by this backend"))
+    }
+
+    /// Save full machine state (RAM + devices) of a PAUSED vm to `path`.
+    fn save_state(&mut self, _path: &std::path::Path) -> Result<()> {
+        Err(Error::backend(
+            "vm",
+            "memory-state snapshots not supported by this backend",
+        ))
+    }
+
+    /// Restore machine state into a freshly created (never started) VM.
+    /// On success the VM is paused; call `resume` to continue execution.
+    fn restore_state(&mut self, _path: &std::path::Path) -> Result<()> {
+        Err(Error::backend(
+            "vm",
+            "memory-state restore not supported by this backend",
+        ))
+    }
+
     /// Block until the VM reaches `target` or `timeout` elapses.
     fn wait_for(&mut self, target: VmState, timeout: Duration) -> Result<()> {
         let start = Instant::now();

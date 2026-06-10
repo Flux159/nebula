@@ -39,6 +39,8 @@ pub struct NewOpts {
     pub from_image: Option<String>,
     /// Rootfs size when building from an image (MiB).
     pub rootfs_mb: u64,
+    /// VMM: `krun` (fastest boot, GPU) or `vz` (live memory snapshots).
+    pub backend: String,
 }
 
 fn vessels_root() -> anyhow::Result<PathBuf> {
@@ -82,6 +84,15 @@ fn live_pid(dir: &std::path::Path) -> Option<i32> {
 }
 
 pub fn new(opts: NewOpts) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        opts.backend == "krun" || opts.backend == "vz",
+        "--backend must be `krun` or `vz`, got `{}`",
+        opts.backend
+    );
+    anyhow::ensure!(
+        !(opts.gpu && opts.backend == "vz"),
+        "GPU passthrough (Venus) is libkrun-only — drop --backend vz or --gpu"
+    );
     let dir = dir_of(&opts.name)?;
     anyhow::ensure!(
         !dir.exists(),
@@ -120,6 +131,7 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
         data.set_len(opts.data_gib * 1024 * 1024 * 1024)?;
     }
 
+    let vz = opts.backend == "vz";
     let spec = VmSpec {
         name: format!("vessel-{}", opts.name),
         cpus: opts.cpus,
@@ -136,8 +148,10 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
             DiskSpec { path: dir.join("data.img"), read_only: false },
         ],
         shares: vec![],
-        net: NetSpec::None, // libkrun TSI handles outbound transparently
-        vsock: false,
+        // krun: TSI handles outbound transparently with no NIC.
+        // vz: a NAT NIC (DHCP via vessel-init; DNS through the engine's relay).
+        net: if vz { NetSpec::Nat } else { NetSpec::None },
+        vsock: vz, // VZ needs the device for the worker's socket proxies
         console: ConsoleSpec::File(dir.join("console.log")),
         balloon: false,
         rng: true,
@@ -147,6 +161,15 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
             VsockPortMap { port: VSOCK_PORT_CONTROL, host_path: dir.join("agent.sock") },
             VsockPortMap { port: VSOCK_PORT_SHELL, host_path: dir.join("shell.sock") },
         ],
+        backend: Some(opts.backend.clone()),
+        // Stable MAC + machine id: keep the DHCP lease across restarts and
+        // keep the config identical to any saved machine state.
+        mac: if vz { Some(random_mac()?) } else { None },
+        machine_id: if vz {
+            Some(nebula_core::backend::vz::new_machine_id())
+        } else {
+            None
+        },
     };
     std::fs::write(dir.join("spec.json"), serde_json::to_vec_pretty(&spec)?)?;
     println!(
@@ -160,6 +183,12 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
 }
 
 pub fn start(name: &str) -> anyhow::Result<()> {
+    start_with(name, None)
+}
+
+/// Boot a vessel; with `restore` (vz only) the worker resumes from a saved
+/// machine state instead of cold-booting the kernel.
+fn start_with(name: &str, restore: Option<&std::path::Path>) -> anyhow::Result<()> {
     if is_engine(name) {
         return crate::commands::up();
     }
@@ -169,18 +198,41 @@ pub fn start(name: &str) -> anyhow::Result<()> {
         println!("vessel `{name}` is already running");
         return Ok(());
     }
+    let backend = spec.backend.clone().unwrap_or_else(|| "krun".into());
+    anyhow::ensure!(
+        restore.is_none() || backend == "vz",
+        "memory-state restore requires a vz-backed vessel"
+    );
 
     let spec_json = serde_json::to_string(&spec)?;
     let exe = std::env::current_exe()?;
-    let console = std::fs::File::create(dir.join("console.log"))?;
-    let child = std::process::Command::new(&exe)
-        .arg("krun-worker")
-        .arg("--spec")
-        .arg(spec_json)
-        .stdin(std::process::Stdio::null())
-        .stdout(console)
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+    let child = if backend == "vz" {
+        // VZ writes the guest console itself (spec); stderr catches worker errors.
+        let log = std::fs::File::create(dir.join("worker.log"))?;
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("vz-worker")
+            .arg("--spec")
+            .arg(spec_json)
+            .arg("--control")
+            .arg(dir.join("vmm.sock"))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(log);
+        if let Some(state) = restore {
+            cmd.arg("--restore").arg(state);
+        }
+        cmd.spawn()?
+    } else {
+        let console = std::fs::File::create(dir.join("console.log"))?;
+        std::process::Command::new(&exe)
+            .arg("krun-worker")
+            .arg("--spec")
+            .arg(spec_json)
+            .stdin(std::process::Stdio::null())
+            .stdout(console)
+            .stderr(std::process::Stdio::null())
+            .spawn()?
+    };
     std::fs::write(dir.join("pid"), child.id().to_string())?;
     std::mem::forget(child); // vessel outlives this CLI invocation
 
@@ -190,13 +242,25 @@ pub fn start(name: &str) -> anyhow::Result<()> {
     loop {
         if let Ok(AgentResponse::Health(h)) = agent_request(&dir, &AgentRequest::Health) {
             println!(
-                "vessel `{name}` up in {:?} (kernel {}, agent v{})",
+                "vessel `{name}` {} in {:?} (kernel {}, agent v{})",
+                if restore.is_some() { "resumed" } else { "up" },
                 t0.elapsed(),
                 h.kernel,
                 h.agent_version
             );
             println!("  shell: nebula vessels shell {name}");
             return Ok(());
+        }
+        if live_pid(&dir).is_none() && t0.elapsed() > Duration::from_millis(500) {
+            bail!(
+                "vessel `{name}` worker exited — see {}",
+                dir.join(if backend == "vz" {
+                    "worker.log"
+                } else {
+                    "console.log"
+                })
+                .display()
+            );
         }
         if Instant::now() > deadline {
             bail!(
@@ -206,6 +270,53 @@ pub fn start(name: &str) -> anyhow::Result<()> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// One connection to a vz-worker's control socket. Sequential ops share the
+/// stream, so pause -> save -> resume cannot be interleaved by another client.
+struct VmmCtl {
+    reader: BufReader<UnixStream>,
+    writer: UnixStream,
+}
+
+impl VmmCtl {
+    fn connect(dir: &std::path::Path) -> anyhow::Result<Self> {
+        let stream = UnixStream::connect(dir.join("vmm.sock"))
+            .context("vessel has no live vz-worker control socket")?;
+        stream.set_read_timeout(Some(Duration::from_secs(120)))?;
+        let writer = stream.try_clone()?;
+        Ok(Self {
+            reader: BufReader::new(stream),
+            writer,
+        })
+    }
+
+    fn op(&mut self, req: &nebula_core::backend::vz::WorkerControl) -> anyhow::Result<()> {
+        let mut line = serde_json::to_string(req)?;
+        line.push('\n');
+        self.writer.write_all(line.as_bytes())?;
+        let mut resp = String::new();
+        self.reader.read_line(&mut resp)?;
+        let reply: nebula_core::backend::vz::WorkerReply =
+            serde_json::from_str(resp.trim()).context("bad reply from vz-worker")?;
+        anyhow::ensure!(
+            reply.ok,
+            "{}",
+            reply.error.unwrap_or_else(|| "vmm operation failed".into())
+        );
+        Ok(())
+    }
+}
+
+fn random_mac() -> anyhow::Result<String> {
+    use std::io::Read;
+    let mut b = [0u8; 5];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut b)?;
+    // 0x02: locally administered, unicast.
+    Ok(format!(
+        "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        b[0], b[1], b[2], b[3], b[4]
+    ))
 }
 
 pub fn stop(name: &str) -> anyhow::Result<()> {
@@ -445,12 +556,62 @@ fn validate_label(label: &str) -> anyhow::Result<()> {
 /// Crash-consistent disk snapshot: stop (if running), APFS-clone both disks,
 /// restart. Stopping takes ~0.2s and restart ~0.1s, so snapshotting a live
 /// vessel costs well under a second.
-pub fn snapshot(name: &str, label: &str) -> anyhow::Result<()> {
+///
+/// With `memory` (vz vessels): pause -> save machine state -> clone disks ->
+/// resume. The guest never stops; restore resumes mid-execution with running
+/// processes, open sockets, and RAM (tmpfs etc.) intact.
+pub fn snapshot(name: &str, label: &str, memory: bool) -> anyhow::Result<()> {
     validate_label(label)?;
     let dir = dir_of(name)?;
     anyhow::ensure!(dir.exists(), "no vessel named `{name}`");
     let sdir = snap_dir(&dir, label);
     anyhow::ensure!(!sdir.exists(), "snapshot `{label}` already exists");
+
+    if memory {
+        let spec = read_spec(&dir)?;
+        anyhow::ensure!(
+            spec.backend.as_deref() == Some("vz"),
+            "memory snapshots need a vz vessel (nebula vessels new {name} --backend vz); \
+             this one runs on {}",
+            spec.backend.as_deref().unwrap_or("krun")
+        );
+        anyhow::ensure!(
+            live_pid(&dir).is_some(),
+            "vessel `{name}` is not running — a memory snapshot captures a LIVE vm \
+             (for a stopped vessel take a plain disk snapshot)"
+        );
+        std::fs::create_dir_all(&sdir)?;
+        let t0 = Instant::now();
+        let mut ctl = VmmCtl::connect(&dir)?;
+        use nebula_core::backend::vz::WorkerControl;
+        ctl.op(&WorkerControl::Pause)?;
+        let saved = ctl
+            .op(&WorkerControl::Save {
+                path: sdir.join("memory.vzstate"),
+            })
+            // Disks cloned while still paused = consistent with the state file.
+            .and_then(|()| clone_file(&dir.join("rootfs.img"), &sdir.join("rootfs.img")))
+            .and_then(|()| {
+                if dir.join("data.img").is_file() {
+                    clone_file(&dir.join("data.img"), &sdir.join("data.img"))?;
+                }
+                Ok(())
+            });
+        let resumed = ctl.op(&WorkerControl::Resume);
+        if let Err(e) = saved {
+            let _ = std::fs::remove_dir_all(&sdir);
+            return Err(e.context("memory snapshot failed (vessel resumed unharmed)"));
+        }
+        resumed?;
+        let state_mb = std::fs::metadata(sdir.join("memory.vzstate"))
+            .map(|m| m.len() / (1024 * 1024))
+            .unwrap_or(0);
+        println!(
+            "memory snapshot `{name}@{label}` taken in {:.2?} ({state_mb} MiB state, vessel never stopped)",
+            t0.elapsed()
+        );
+        return Ok(());
+    }
 
     let was_running = live_pid(&dir).is_some();
     if was_running {
@@ -486,7 +647,11 @@ pub fn snapshots(name: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     for l in labels {
-        println!("{name}@{l}");
+        if root.join(&l).join("memory.vzstate").is_file() {
+            println!("{name}@{l}  (disks + memory state)");
+        } else {
+            println!("{name}@{l}");
+        }
     }
     Ok(())
 }
@@ -501,12 +666,15 @@ pub fn snapshot_rm(name: &str, label: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Roll a vessel back to a snapshot (its current disks are replaced).
+/// Roll a vessel back to a snapshot (its current disks are replaced). When
+/// the snapshot carries machine state, the vessel RESUMES mid-execution.
 pub fn restore(name: &str, label: &str) -> anyhow::Result<()> {
     validate_label(label)?;
     let dir = dir_of(name)?;
     let sdir = snap_dir(&dir, label);
     anyhow::ensure!(sdir.exists(), "no snapshot `{name}@{label}`");
+    let memory_state = sdir.join("memory.vzstate");
+    let has_memory = memory_state.is_file();
     let was_running = live_pid(&dir).is_some();
     if was_running {
         stop(name)?;
@@ -515,6 +683,22 @@ pub fn restore(name: &str, label: &str) -> anyhow::Result<()> {
         if sdir.join(img).is_file() {
             let _ = std::fs::remove_file(dir.join(img));
             clone_file(&sdir.join(img), &dir.join(img))?;
+        }
+    }
+    if has_memory {
+        match start_with(name, Some(&memory_state)) {
+            Ok(()) => {
+                println!("`{name}` restored to @{label} (live resume — processes/RAM intact)");
+                return Ok(());
+            }
+            Err(e) => {
+                // Disks were cloned while paused, so a cold boot of them is
+                // crash-consistent — degrade instead of leaving it dead.
+                eprintln!(
+                    "memory-state resume failed ({e}); cold-booting the restored disks instead"
+                );
+                return start(name);
+            }
         }
     }
     println!("`{name}` restored to @{label}");
@@ -534,6 +718,7 @@ pub fn branch(name: &str, new_name: &str, label: Option<&str>, count: u32) -> an
 
     // Branch source: a snapshot, or a transient clone of the current state.
     let (src_root, src_data, _tmp_guard);
+    let mut src_state: Option<PathBuf> = None;
     match label {
         Some(l) => {
             validate_label(l)?;
@@ -541,6 +726,12 @@ pub fn branch(name: &str, new_name: &str, label: Option<&str>, count: u32) -> an
             anyhow::ensure!(sdir.exists(), "no snapshot `{name}@{l}`");
             src_root = sdir.join("rootfs.img");
             src_data = sdir.join("data.img");
+            // Memory snapshots fan out as LIVE resumes: every branch wakes
+            // mid-execution at the exact saved instant.
+            let state = sdir.join("memory.vzstate");
+            if state.is_file() {
+                src_state = Some(state);
+            }
             _tmp_guard = None::<tempdir::Guard>;
         }
         None => {
@@ -582,14 +773,36 @@ pub fn branch(name: &str, new_name: &str, label: Option<&str>, count: u32) -> an
         let mut nspec = spec.clone();
         nspec.name = format!("vessel-{n}");
         retarget_spec(&mut nspec, &ndir);
+        if src_state.is_none() && nspec.backend.as_deref() == Some("vz") {
+            // Cold-booted branches get their own identity. Memory resumes
+            // must keep the saved config (MAC + machine id) — those branches
+            // share the source's network identity (vsock control unaffected).
+            nspec.mac = Some(random_mac()?);
+            nspec.machine_id = Some(nebula_core::backend::vz::new_machine_id());
+        }
         std::fs::write(ndir.join("spec.json"), serde_json::to_vec_pretty(&nspec)?)?;
-        start(n)?;
+        match &src_state {
+            Some(state) => {
+                if let Err(e) = start_with(n, Some(state)) {
+                    eprintln!(
+                        "branch `{n}`: live resume failed ({e}); cold-booting its disks instead"
+                    );
+                    start(n)?;
+                }
+            }
+            None => start(n)?,
+        }
     }
     println!(
-        "branched {} vessel(s) from `{name}{}` in {:.2?}",
+        "branched {} vessel(s) from `{name}{}` in {:.2?}{}",
         names.len(),
         label.map(|l| format!("@{l}")).unwrap_or_default(),
-        t0.elapsed()
+        t0.elapsed(),
+        if src_state.is_some() {
+            " (live resume — each woke mid-execution)"
+        } else {
+            ""
+        }
     );
     Ok(())
 }
@@ -718,6 +931,7 @@ pub fn info(name: &str) -> anyhow::Result<()> {
     }
     println!("cpus:     {}", spec.cpus);
     println!("mem:      {} MiB", spec.mem_mib);
+    println!("backend:  {}", spec.backend.as_deref().unwrap_or("krun"));
     println!(
         "gpu:      {}",
         if spec.gpu {

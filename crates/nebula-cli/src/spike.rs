@@ -53,6 +53,9 @@ pub fn run(backend_name: &str, cpus: u32, mem: u64) -> anyhow::Result<()> {
         rosetta: false,
         gpu: false,
         vsock_ports: vec![],
+        backend: None,
+        mac: None,
+        machine_id: None,
     };
 
     let backend = backend_by_name(backend_name)?;

@@ -62,6 +62,22 @@ fn dylib_path() -> Result<PathBuf> {
         }
         return Err(Error::FileNotFound(p));
     }
+    // Our fork first: stock libkrun-efi cannot direct-kernel-boot the raw
+    // Image (FirmwareInvalidAddress) and lacks the GPU/vsock-port options.
+    // Look near the running binary: app bundle Frameworks, then the dev tree.
+    if let Ok(exe) = std::env::current_exe() {
+        for anc in exe.ancestors() {
+            for rel in [
+                "Frameworks/libkrun.dylib", // Nebula.app/Contents/Frameworks
+                "third_party/libkrun/target/release/libkrun.1.18.0.dylib",
+            ] {
+                let candidate = anc.join(rel);
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
     DYLIB_CANDIDATES
         .iter()
         .map(PathBuf::from)

@@ -39,13 +39,29 @@ limitations; routine TODOs live in code.)
 
 ## Needs discussion
 
-- **(2026-06-09, snapshots) Memory-state snapshots (live fork) — future.**
-  v1 vessel snapshots are disk-only at command boundaries (stop 0.2s →
-  APFS clone ~5-12ms → boot 0.1s), which fits the agent tree-search use
-  case (state lives in files). True suspend-to-disk exists in VZ
-  (saveMachineStateToURL, macOS 14+) for the engine vessel; libkrun would
-  need fork-level work for Firecracker-style snapshot/restore of sidecars.
-  Revisit if sub-100ms branch latency or in-memory state capture matters.
+- ~~Memory-state snapshots (live fork) — future~~ **SHIPPED for vz vessels
+  (2026-06-09):** `vessels new --backend vz` + `vessels snapshot <v> <l>
+  --memory` does pause → saveMachineStateToURL → APFS-clone disks → resume
+  (~360ms, VM never stops; state file ≈ touched pages only, 33 MiB for an
+  idle 2 GiB vessel). restore/branch resume mid-execution (tmpfs contents
+  and killed processes verified to come back). Findings & remaining seams:
+  * **VZGenericMachineIdentifier must be persisted in the spec** — restore
+    under a fresh random identifier fails with "invalid argument". Same for
+    the NAT MAC. Both now live in spec.json (vz vessels only).
+  * **Memory-branches share network identity** (same MAC + machine id +
+    in-guest DHCP lease, by necessity — the saved state embeds them).
+    vsock control (exec/shell/agent) is fully per-VM and unaffected;
+    outbound NAT worked in testing with 4 same-identity VMs live, but
+    concurrent heavy network use across branches is uncharted. Cold-boot
+    branches get fresh MAC + machine id.
+  * **Guest wall clock after restore is stale** until something re-syncs it
+    (untested edge; agents comparing timestamps across a restore boundary
+    may see jumps). Candidate fix: agent re-syncs time on resume detection.
+  * **krun vessels:** still disk-only — Firecracker-style snapshot/restore
+    on HVF is fork-level work. GPU vessels therefore can't memory-snapshot.
+  * **Engine vessel:** not wired up; its config (balloon + virtiofs $HOME
+    share + Rosetta share) may fail validateSaveRestoreSupport — needs a
+    dedicated investigation if "suspend the whole engine" becomes a feature.
 
 - ~~Multi-instance seams~~ **RESOLVED (2026-06-09):** dns_zone/dns_port/
   k8s_port are per-instance config (guest learns the DNS port via kernel
@@ -113,3 +129,13 @@ limitations; routine TODOs live in code.)
   `libkrun-efi` (EFI flavor, arm64 bottle) + `virglrenderer` (Venus) + `krunkit`.
   Using `libkrun-efi` for the Phase 0 FFI spike; the libkrunfw-flavor kernel question
   moves to Phase 7 (vendored fork can build either flavor).
+
+- **(2026-06-09) Stock `libkrun-efi` fallback bricked krun vessels without
+  `NEBULA_LIBKRUN_PATH`.** dylib resolution preferred the brew candidates, and
+  the stock EFI build can't direct-kernel-boot our raw Image
+  (`FirmwareInvalidAddress(GuestAddress(0))`) — phase scripts masked it by
+  exporting the env var. Fixed: resolution now walks up from the running
+  binary and prefers our fork (`Contents/Frameworks/libkrun.dylib` in a
+  bundle, `third_party/libkrun/target/release/` in the dev tree) before brew
+  paths. Distribution note stands: the app/embed kit should ship the fork
+  dylib in Frameworks for sandbox/GPU/krun-vessel features.

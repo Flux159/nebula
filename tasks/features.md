@@ -695,3 +695,27 @@ implementation starts, since it shapes the UI's information architecture.
 - amd64 containers at Rosetta-class speed (parity with Docker Desktop/OrbStack on the
   same image), with mixed arm64+amd64 compose stacks in one network.
 - llama.cpp GPU throughput within a published, honest factor of native Metal.
+
+## Post-plan additions (shipped 2026-06)
+
+- **Named vessels** (`nebula vessels new/ls/start/stop/rm/exec/shell/info/reset`):
+  persistent microVMs beside the engine; engine vessel protected (read ops route,
+  destructive ops refuse). Default backend libkrun (~100ms boot); `--backend vz`
+  runs a vessel on Virtualization.framework (~550ms boot, NAT NIC, stable
+  MAC + machine id persisted in spec.json) via a daemon-free `vz-worker` that
+  proxies agent/shell unix sockets onto guest vsock and serves a pause/save/
+  resume control socket (`vmm.sock`).
+- **Snapshots & branching**: disk snapshots = APFS clones (5–12ms, crash-
+  consistent via stop→clone→restart); `--memory` (vz) = live pause →
+  saveMachineStateToURL → clone disks → resume (~360ms, VM never stops,
+  state ≈ touched pages). `restore` resumes mid-execution (~850ms incl.
+  stop); `branch --snapshot L --count N` fans out N live clones (~600ms
+  each) — the MCTS/tree-search primitive. `vessels new --from-image <ref>`
+  turns any arm64 docker image into a managed, snapshot-capable microVM
+  (init/agent injected at conversion).
+- **Embedding**: NEBULA_HOME isolation; per-instance dns_zone/dns_port/
+  k8s_port/api_port; per-instance launchd labels; `scripts/embed-kit.sh`;
+  rootfs customization hooks (OVERLAY= dir copied over /, SETUP= script run
+  in the image build; nebula init/agent installed last). docs/embedding.md.
+- Acceptance: `scripts/test-vessels.sh` (20 checks, both backends, memory
+  snapshot round-trip incl. RAM-only witnesses).
