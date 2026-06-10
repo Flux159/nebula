@@ -529,6 +529,19 @@ a client of the daemon API (which Phase 10 formalizes; build them together).
   - **Homebrew**: cask for the app, formula for CLI-only installs.
   - **curl | sh** installer and **GitHub Releases** artifacts (.dmg + CLI
     tarball) — same binaries, one release pipeline.
+  - **Image flavors (DECIDED + implemented, `FLAVOR=` in build-rootfs.sh):**
+    measured gz artifacts — `full` 161 MB (docker+k3s+in-guest CLIs, the
+    engine default), `docker` 57 MB (containerd+dockerd only; host CLI over
+    the socket proxy), `minimal` 6 MB (agent-only Linux microVM). With the
+    16 MB kernel: an embedder shipping microVMs pays ~22 MB; with docker
+    ~73 MB. Both flavors boot-verified. CI should publish all three.
+  - **Host CLI bundling (Rancher Desktop pattern, licensing OK):** docker
+    CLI, kubectl, helm, nerdctl are all Apache-2.0 — redistributable in the
+    .app (RD ships exactly this set; their 555-byte nerdctl is a shim to the
+    guest, their kubectl is an alias to kuberlr, a version-matching kubectl
+    fetcher). Plan: Nebula.app/Contents/Resources/bin with docker/kubectl/
+    helm for users who lack them; `nebula setup` PATH offer covers them.
+    Adds ~60 MB gz — keep optional or lazy-fetch, decide with Phase 12.
   - **Image slimming (download is ~177 MB total today):** the Alpine base
     is ~11 MB; the weight is Go binaries (dockerd 70 MB + k3s 67 MB +
     containerd 40 MB + nerdctl 30 MB + docker cli 29 MB + runc 11 MB).

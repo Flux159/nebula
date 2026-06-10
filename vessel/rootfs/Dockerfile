@@ -1,18 +1,29 @@
 # Builds the Vessel root filesystem image (ext4) from an Alpine base plus the
 # Nebula guest binaries. No loop devices: mkfs.ext4 -d populates from a dir.
+#
+# FLAVOR selects what ships inside (embedders pick their size/feature point):
+#   full    — docker + k3s + in-guest CLIs (the default engine image)
+#   docker  — containerd + dockerd only (no k3s, no in-guest docker/nerdctl
+#             CLIs — the host CLI talks over the socket proxy)
+#   minimal — agent only (clean Linux microVM; nebula vessels/sandbox use)
 FROM alpine:3.22 AS rootfs
+ARG FLAVOR=full
 
-RUN apk add --no-cache \
-    e2fsprogs ca-certificates \
-    docker-engine docker-cli containerd containerd-ctr runc nerdctl \
-    iptables ip6tables \
+RUN apk add --no-cache e2fsprogs ca-certificates \
     && mkdir -p /var/lib/nebula /run /tmp /etc/docker /etc/containerd /media/rosetta
 
-# k3s (started on demand by the agent; see `nebula use kubectl`).
+RUN if [ "$FLAVOR" != "minimal" ]; then \
+        apk add --no-cache docker-engine containerd containerd-ctr runc iptables ip6tables; \
+    fi
+
+# In-guest convenience CLIs + k3s: full flavor only.
 ARG K3S_VERSION=v1.35.5%2Bk3s1
-RUN wget -qO /usr/local/bin/k3s \
-    "https://github.com/k3s-io/k3s/releases/download/${K3S_VERSION}/k3s-arm64" \
-    && chmod 755 /usr/local/bin/k3s
+RUN if [ "$FLAVOR" = "full" ]; then \
+        apk add --no-cache docker-cli nerdctl \
+        && wget -qO /usr/local/bin/k3s \
+            "https://github.com/k3s-io/k3s/releases/download/${K3S_VERSION}/k3s-arm64" \
+        && chmod 755 /usr/local/bin/k3s; \
+    fi
 
 # Nebula guest binaries (cross-built on the host, passed via build context).
 COPY bin/vessel-init /sbin/nebula-init

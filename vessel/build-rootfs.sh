@@ -27,8 +27,15 @@ mkdir -p vessel/rootfs/bin
 cp target/aarch64-unknown-linux-musl/release/vessel-init vessel/rootfs/bin/
 cp target/aarch64-unknown-linux-musl/release/vessel-agent vessel/rootfs/bin/
 
+FLAVOR="${FLAVOR:-full}"
+if [ "$FLAVOR" = "full" ]; then OUT_NAME=rootfs.img; else OUT_NAME="rootfs-$FLAVOR.img"; fi
+SIZE_MB="${ROOTFS_SIZE_MB:-2048}"
+[ "$FLAVOR" = "minimal" ] && SIZE_MB="${ROOTFS_SIZE_MB:-512}"
 docker build \
+    --build-arg FLAVOR="$FLAVOR" \
+    --build-arg ROOTFS_SIZE_MB="$SIZE_MB" \
     --target export \
-    --output type=local,dest=vessel/out \
+    --output type=local,dest=/tmp/nebula-rootfs-build \
     vessel/rootfs/
-ls -la vessel/out/rootfs.img
+mv /tmp/nebula-rootfs-build/rootfs.img "vessel/out/$OUT_NAME"
+ls -la "vessel/out/$OUT_NAME"
