@@ -9,6 +9,12 @@ pub struct Paths {
 
 impl Paths {
     pub fn new() -> anyhow::Result<Self> {
+        // Keep in sync with the CLI: NEBULA_HOME isolates embedded instances.
+        if let Some(custom) = std::env::var_os("NEBULA_HOME") {
+            return Ok(Self {
+                root: PathBuf::from(custom),
+            });
+        }
         let home = std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("HOME not set"))?;
         Ok(Self {
             root: PathBuf::from(home).join(".nebula"),

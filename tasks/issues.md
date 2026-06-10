@@ -39,6 +39,17 @@ limitations; routine TODOs live in code.)
 
 ## Needs discussion
 
+- **(2026-06-09, embedding) Multi-instance seams.** NEBULA_HOME + api_port
+  give full per-instance isolation (verified: embedded engine alongside the
+  standalone one, both running docker). Remaining shared globals when N>1:
+  guest-DNS resolver UDP 42053 (first daemon wins; public DNS still works
+  cross-instance, *.nebula.local is first-engine-only), k3s API forward
+  127.0.0.1:6443 (one k8s-enabled engine at a time), launchd autostart label
+  (standalone-only by convention). Fix shape: move both ports into
+  config.toml (guest learns the DNS port via kernel cmdline), derive the
+  launchd label from a NEBULA_HOME hash. docs/embedding.md documents the
+  current behavior.
+
 - **(2026-06-09, Phase 8) GPU shipped at device level; Venus userspace is
   follow-up.** `nebula sandbox run --gpu` attaches virtio-gpu via our GPU=1
   fork build (card0 + renderD128 visible, virtio driver bound; brew

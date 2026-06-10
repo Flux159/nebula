@@ -35,7 +35,13 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
     let balloon = crate::balloon::start(vessel.clone());
 
     // REST API for SDKs/UI (Phase 10).
-    crate::api::start(vessel.clone(), balloon.clone(), paths.docker_sock());
+    let cfg = crate::config::Config::load(&paths.config_toml()).unwrap_or_default();
+    crate::api::start(
+        vessel.clone(),
+        balloon.clone(),
+        paths.docker_sock(),
+        cfg.api_port.unwrap_or(crate::api::DEFAULT_API_PORT),
+    );
 
     // Watchdog: if the Vessel dies unexpectedly, exit the daemon so the next
     // `nebula up` (or launchd KeepAlive) gets a clean restart instead of a

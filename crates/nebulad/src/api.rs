@@ -21,18 +21,27 @@ use nebula_core::proto::*;
 use crate::balloon::BalloonState;
 use crate::vessel::Vessel;
 
-pub const API_PORT: u16 = 7440;
+pub const DEFAULT_API_PORT: u16 = 7440;
 
-pub fn start(vessel: Arc<Vessel>, balloon: Arc<BalloonState>, docker_sock: std::path::PathBuf) {
+pub fn start(
+    vessel: Arc<Vessel>,
+    balloon: Arc<BalloonState>,
+    docker_sock: std::path::PathBuf,
+    port: u16,
+) {
+    if port == 0 {
+        tracing::info!("REST API disabled (api_port = 0)");
+        return;
+    }
     std::thread::spawn(move || {
-        let listener = match TcpListener::bind(("127.0.0.1", API_PORT)) {
+        let listener = match TcpListener::bind(("127.0.0.1", port)) {
             Ok(l) => l,
             Err(e) => {
-                tracing::error!("api bind 127.0.0.1:{API_PORT} failed: {e}");
+                tracing::error!("api bind 127.0.0.1:{port} failed: {e}");
                 return;
             }
         };
-        tracing::info!("REST API on http://127.0.0.1:{API_PORT}/v1alpha1");
+        tracing::info!("REST API on http://127.0.0.1:{port}/v1alpha1");
         for conn in listener.incoming() {
             let Ok(conn) = conn else { continue };
             let vessel = vessel.clone();

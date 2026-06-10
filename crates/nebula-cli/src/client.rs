@@ -8,6 +8,11 @@ use anyhow::Context;
 use nebula_core::proto::{DaemonRequest, DaemonResponse};
 
 pub fn nebula_home() -> anyhow::Result<PathBuf> {
+    // NEBULA_HOME lets embedders run a fully isolated instance (own engine,
+    // disks, sockets) that can't collide with a user's standalone Nebula.
+    if let Some(custom) = std::env::var_os("NEBULA_HOME") {
+        return Ok(PathBuf::from(custom));
+    }
     Ok(PathBuf::from(std::env::var_os("HOME").context("HOME not set")?).join(".nebula"))
 }
 

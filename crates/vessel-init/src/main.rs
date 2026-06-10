@@ -222,28 +222,38 @@ mod init {
         // The VZ NAT gateway doesn't serve DNS on current macOS, so the
         // DHCP-provided nameserver is dead weight. Public resolvers until the
         // Phase 3 host-backed resolver lands (see tasks/issues.md).
-        std::thread::spawn(|| {
-            // VZ (real NIC + gateway): the agent's DNS relay on 127.0.0.1
-            // resolves via the host. libkrun (TSI, no NIC): outbound UDP is
-            // hijacked and proxied by the VMM, so a public resolver works.
-            for i in 0..20 {
+        // Decide the resolver BEFORE services start: dockerd snapshots
+        // /etc/resolv.conf at startup, so an async flip loses the race and
+        // pulls fail against the dead DHCP nameserver.
+        // VZ (real NIC + gateway): the agent's relay on 127.0.0.1 resolves
+        // via the host. libkrun (TSI, no NIC): outbound UDP is hijacked and
+        // proxied by the VMM, so a public resolver works.
+        let has_gw = |routes: &str| {
+            routes
+                .lines()
+                .skip(1)
+                .any(|l| l.split_whitespace().nth(1) == Some("00000000"))
+        };
+        let mut gw = false;
+        for _ in 0..30 {
+            gw = std::fs::read_to_string("/proc/net/route")
+                .map(|r| has_gw(&r))
+                .unwrap_or(false);
+            if gw {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let want: &'static str = if gw {
+            "nameserver 127.0.0.1\n"
+        } else {
+            "nameserver 1.1.1.1\n"
+        };
+        let _ = std::fs::write("/etc/resolv.conf", want);
+        // Keep it pinned afterwards (udhcpc renewals rewrite it).
+        std::thread::spawn(move || {
+            for _ in 0..30 {
                 std::thread::sleep(Duration::from_millis(500));
-                let has_gw = std::fs::read_to_string("/proc/net/route")
-                    .map(|r| {
-                        r.lines()
-                            .skip(1)
-                            .any(|l| l.split_whitespace().nth(1) == Some("00000000"))
-                    })
-                    .unwrap_or(false);
-                // Give DHCP a moment before concluding there is no gateway.
-                if !has_gw && i < 6 {
-                    continue;
-                }
-                let want = if has_gw {
-                    "nameserver 127.0.0.1\n"
-                } else {
-                    "nameserver 1.1.1.1\n"
-                };
                 let cur = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
                 if cur != want {
                     let _ = std::fs::write("/etc/resolv.conf", want);
