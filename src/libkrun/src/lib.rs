@@ -89,16 +89,10 @@ static KRUN_NITRO_DEBUG: Mutex<bool> = Mutex::new(false);
 // Path to the init binary to be executed inside the VM.
 const INIT_PATH: &str = "/init.krun";
 
-#[cfg(all(
-    feature = "init-blob",
-    not(any(feature = "tee", feature = "aws-nitro"))
-))]
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 const DEFAULT_INIT_PAYLOAD: &[u8] = init_blob::INIT_BINARY;
 
-#[cfg(all(
-    feature = "init-blob",
-    not(any(feature = "tee", feature = "aws-nitro"))
-))]
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 fn init_virtual_entry() -> VirtualDirEntry {
     VirtualDirEntry {
         name: CString::new("init.krun").unwrap(),
@@ -188,10 +182,7 @@ struct ContextConfig {
     console_output: Option<PathBuf>,
     vmm_uid: Option<libc::uid_t>,
     vmm_gid: Option<libc::gid_t>,
-    #[cfg(all(
-        feature = "init-blob",
-        not(any(feature = "tee", feature = "aws-nitro"))
-    ))]
+    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
     disable_implicit_init: bool,
 }
 
@@ -628,9 +619,7 @@ pub unsafe extern "C" fn krun_set_root(ctx_id: u32, c_root_path: *const c_char) 
                     shm_size: Some(1 << 29),
                     read_only: false,
                     virtual_entries: {
-                        #[allow(unused_mut)]
                         let mut v = Vec::new();
-                        #[cfg(feature = "init-blob")]
                         if !cfg.disable_implicit_init {
                             v.push(init_virtual_entry());
                         }
@@ -710,9 +699,7 @@ pub unsafe extern "C" fn krun_add_virtiofs3(
         match CTX_MAP.lock().unwrap().entry(ctx_id) {
             Entry::Occupied(mut ctx_cfg) => {
                 let cfg = ctx_cfg.get_mut();
-                #[allow(unused_mut)]
                 let mut virtual_entries = Vec::new();
-                #[cfg(feature = "init-blob")]
                 if tag == "/dev/root" && !cfg.disable_implicit_init {
                     virtual_entries.push(init_virtual_entry());
                 }
@@ -2058,7 +2045,6 @@ const KRUN_FEATURE_AMD_SEV: u64 = 7;
 const KRUN_FEATURE_INTEL_TDX: u64 = 8;
 const KRUN_FEATURE_AWS_NITRO: u64 = 9;
 const KRUN_FEATURE_VIRGL_RESOURCE_MAP2: u64 = 10;
-const KRUN_FEATURE_INIT_BLOB: u64 = 11;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn krun_has_feature(feature: u64) -> c_int {
@@ -2072,7 +2058,6 @@ pub extern "C" fn krun_has_feature(feature: u64) -> c_int {
         KRUN_FEATURE_INTEL_TDX => cfg!(feature = "tdx"),
         KRUN_FEATURE_AWS_NITRO => cfg!(feature = "aws-nitro"),
         KRUN_FEATURE_VIRGL_RESOURCE_MAP2 => cfg!(feature = "virgl_resource_map2"),
-        KRUN_FEATURE_INIT_BLOB => cfg!(feature = "init-blob"),
         _ => return -libc::EINVAL,
     };
 
@@ -2489,7 +2474,6 @@ pub unsafe extern "C" fn krun_set_root_disk_remount(
                 // serve init.krun and provide mount points for /dev, /proc, /sys.
                 // Use a NullFs (no host directory) with the inode overlay.
                 let mut virtual_entries = Vec::new();
-                #[cfg(feature = "init-blob")]
                 if !ctx_cfg.disable_implicit_init {
                     virtual_entries.push(init_virtual_entry());
                 }
@@ -2527,10 +2511,7 @@ pub unsafe extern "C" fn krun_set_root_disk_remount(
 }
 
 #[unsafe(no_mangle)]
-#[cfg(all(
-    feature = "init-blob",
-    not(any(feature = "tee", feature = "aws-nitro"))
-))]
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub extern "C" fn krun_disable_implicit_init(ctx_id: u32) -> i32 {
     match CTX_MAP.lock().unwrap().entry(ctx_id) {
         Entry::Occupied(mut ctx_cfg) => {
@@ -2539,15 +2520,6 @@ pub extern "C" fn krun_disable_implicit_init(ctx_id: u32) -> i32 {
         Entry::Vacant(_) => return -libc::ENOENT,
     }
 
-    KRUN_SUCCESS
-}
-
-#[unsafe(no_mangle)]
-#[cfg(all(
-    not(feature = "init-blob"),
-    not(any(feature = "tee", feature = "aws-nitro"))
-))]
-pub extern "C" fn krun_disable_implicit_init(_ctx_id: u32) -> i32 {
     KRUN_SUCCESS
 }
 
@@ -2688,10 +2660,7 @@ pub unsafe extern "C" fn krun_fs_add_overlay_dir(
 
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
-#[cfg(all(
-    feature = "init-blob",
-    not(any(feature = "tee", feature = "aws-nitro"))
-))]
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub unsafe extern "C" fn krun_get_default_init(
     data_out: *mut *const u8,
     len_out: *mut size_t,
@@ -2704,19 +2673,6 @@ pub unsafe extern "C" fn krun_get_default_init(
         *len_out = DEFAULT_INIT_PAYLOAD.len();
     }
     KRUN_SUCCESS
-}
-
-#[allow(clippy::missing_safety_doc)]
-#[unsafe(no_mangle)]
-#[cfg(all(
-    not(feature = "init-blob"),
-    not(any(feature = "tee", feature = "aws-nitro"))
-))]
-pub unsafe extern "C" fn krun_get_default_init(
-    _data_out: *mut *const u8,
-    _len_out: *mut size_t,
-) -> i32 {
-    -libc::ENOTSUP
 }
 
 #[unsafe(no_mangle)]
@@ -3172,7 +3128,7 @@ fn krun_start_enter_nitro(ctx_id: u32) -> i32 {
     }
 }
 
-#[cfg(all(test, feature = "init-blob", not(feature = "tee")))]
+#[cfg(all(test, not(feature = "tee")))]
 mod test_disable_implicit_init {
     use super::*;
 

@@ -528,6 +528,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "init-blob"
+version = "0.1.0-1.18.1"
+
+[[package]]
 name = "iocuddle"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -624,7 +628,7 @@ dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
- "linux-loader",
+ "linux-loader 0.13.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "tdx",
  "vm-memory",
  "vmm-sys-util 0.14.0",
@@ -711,10 +715,6 @@ dependencies = [
  "libloading",
  "log",
 ]
-
-[[package]]
-name = "krun-init-blob"
-version = "0.1.0-1.18.0"
 
 [[package]]
 name = "krun-input"
@@ -806,7 +806,7 @@ dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
- "linux-loader",
+ "linux-loader 0.13.2 (git+https://github.com/rust-vmm/linux-loader?rev=9e91456afd7abed130939b755499977a739bb5f8)",
  "log",
  "nix 0.30.1",
  "serde",
@@ -864,11 +864,11 @@ version = "1.18.0"
 dependencies = [
  "crossbeam-channel",
  "env_logger",
+ "init-blob",
  "krun-aws-nitro",
  "krun-devices",
  "krun-display",
  "krun-hvf",
- "krun-init-blob",
  "krun-input",
  "krun-polly",
  "krun-utils",
@@ -910,6 +910,14 @@ name = "linux-loader"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de72cb02c55ecffcf75fe78295926f872eb6eb0a58d629c58a8c324dc26380f6"
+dependencies = [
+ "vm-memory",
+]
+
+[[package]]
+name = "linux-loader"
+version = "0.13.2"
+source = "git+https://github.com/rust-vmm/linux-loader?rev=9e91456afd7abed130939b755499977a739bb5f8#9e91456afd7abed130939b755499977a739bb5f8"
 dependencies = [
  "vm-memory",
 ]
