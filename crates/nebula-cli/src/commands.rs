@@ -393,6 +393,12 @@ pub fn doctor() -> anyhow::Result<()> {
 /// Copy kernel + rootfs from the dev build tree (vessel/out) or explicit paths
 /// into ~/.nebula. v1 will download signed images instead.
 pub fn install_image(kernel: Option<PathBuf>, rootfs: Option<PathBuf>) -> anyhow::Result<()> {
+    // The live engine holds disks/rootfs.img open read-write; overwriting it
+    // under a running VM corrupts the guest (observed: dockerd panics).
+    anyhow::ensure!(
+        !client::daemon_running(),
+        "the engine is running — stop it first: nebula down"
+    );
     let home = client::nebula_home()?;
     std::fs::create_dir_all(home.join("kernel"))?;
     std::fs::create_dir_all(home.join("disks"))?;

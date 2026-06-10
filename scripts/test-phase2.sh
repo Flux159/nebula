@@ -22,7 +22,7 @@ $NEBULA up >/dev/null || { echo "FATAL: nebula up failed"; exit 1; }
 
 # Wait for dockerd inside the guest (first boot pulls nothing; just service start).
 for _ in $(seq 1 30); do
-    $NEBULA exec docker version >/dev/null 2>&1 && break
+    $NEBULA exec sh -c "test -S /var/run/docker.sock" >/dev/null 2>&1 && break
     sleep 1
 done
 

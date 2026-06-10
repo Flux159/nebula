@@ -182,7 +182,9 @@ fn use_nerdctl() -> anyhow::Result<()> {
         format!("# written by `nebula setup nerdctl` — revert with `nebula revert nerdctl`\naddress = \"unix://{}\"\nnamespace = \"default\"\n", addr.display()),
     )?;
     println!("nerdctl config → nebula containerd ({})", path.display());
-    println!("note: nerdctl runs inside the Vessel for now: `nebula exec nerdctl …`");
+    println!(
+        "note: use the host nerdctl against this socket (the guest image no longer ships one)"
+    );
     Ok(())
 }
 

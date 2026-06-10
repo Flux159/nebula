@@ -2,9 +2,10 @@
 # Nebula guest binaries. No loop devices: mkfs.ext4 -d populates from a dir.
 #
 # FLAVOR selects what ships inside (embedders pick their size/feature point):
-#   full    — docker + k3s + in-guest CLIs (the default engine image)
-#   docker  — containerd + dockerd only (no k3s, no in-guest docker/nerdctl
-#             CLIs — the host CLI talks over the socket proxy)
+#   full    — docker engine + k3s (the default engine image). No in-guest
+#             CLIs: docker/kubectl/helm live on the HOST (bundled in the
+#             .app) and talk over the socket proxy / API forward.
+#   docker  — containerd + dockerd only (no k3s)
 #   minimal — agent only (clean Linux microVM; nebula vessels/sandbox use)
 FROM alpine:3.22 AS rootfs
 ARG FLAVOR=full
@@ -16,11 +17,10 @@ RUN if [ "$FLAVOR" != "minimal" ]; then \
         apk add --no-cache docker-engine containerd containerd-ctr runc iptables ip6tables; \
     fi
 
-# In-guest convenience CLIs + k3s: full flavor only.
+# k3s: full flavor only (it bundles its own kubectl for in-guest use).
 ARG K3S_VERSION=v1.35.5%2Bk3s1
 RUN if [ "$FLAVOR" = "full" ]; then \
-        apk add --no-cache docker-cli nerdctl \
-        && wget -qO /usr/local/bin/k3s \
+        wget -qO /usr/local/bin/k3s \
             "https://github.com/k3s-io/k3s/releases/download/${K3S_VERSION}/k3s-arm64" \
         && chmod 755 /usr/local/bin/k3s; \
     fi

@@ -18,6 +18,9 @@ if [ ! -f dist/kernel-Image.gz ] || [ ! -f dist/rootfs.img.gz ]; then
     scripts/package-images.sh
 fi
 
+echo "==> host CLIs (docker/kubectl/helm)"
+scripts/fetch-host-clis.sh
+
 echo "==> staging sidecars + resources"
 mkdir -p ui/src-tauri/binaries ui/src-tauri/resources
 cp target/release/nebula  "ui/src-tauri/binaries/nebula-$TRIPLE"
