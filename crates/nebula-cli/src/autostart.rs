@@ -118,7 +118,7 @@ pub fn status() -> anyhow::Result<()> {
 pub fn open_ui() -> anyhow::Result<()> {
     // Installed .app (open -a handles Spotlight lookup by bundle name).
     let try_open = std::process::Command::new("open")
-        .args(["-a", "nebula-ui"])
+        .args(["-a", "Nebula"])
         .output()?;
     if try_open.status.success() {
         println!("opened Nebula app");
@@ -128,7 +128,7 @@ pub fn open_ui() -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
     for dir in exe.ancestors() {
         if dir.join("Cargo.toml").is_file() && dir.join("ui/src-tauri").is_dir() {
-            let bundle = dir.join("ui/src-tauri/target/release/bundle/macos/nebula-ui.app");
+            let bundle = dir.join("ui/src-tauri/target/release/bundle/macos/Nebula.app");
             if bundle.is_dir() {
                 let status = std::process::Command::new("open").arg(&bundle).status()?;
                 if status.success() {

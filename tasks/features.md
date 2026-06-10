@@ -518,8 +518,24 @@ a client of the daemon API (which Phase 10 formalizes; build them together).
   start/stop, container/pod list with logs, `use/revert` toggles per tool.
 - [ ] **9.3 Detail windows.** Container inspect/logs/exec terminal, k8s workloads view,
   volumes/images management, settings (max-ram slider, mounts allowlist).
-- [ ] **9.4 Distribution.** Signed + notarized .app bundling the CLI + daemon; brew cask;
-  in-app upgrade flow consistent with `nebula upgrade`.
+- [ ] **9.4 Distribution.** Goal: install flawlessly via ANY channel —
+  - **Nebula.app** (Developer ID signed + notarized): bundles `nebula` +
+    `nebulad` as Tauri sidecar binaries (`bundle.externalBin`); on first
+    launch, offer to install the CLI onto PATH (symlink into
+    /usr/local/bin or a shell-profile snippet, user-approved) — the
+    Docker Desktop/OrbStack pattern. DMG from `cargo tauri build`.
+  - **Homebrew**: cask for the app, formula for CLI-only installs.
+  - **curl | sh** installer and **GitHub Releases** artifacts (.dmg + CLI
+    tarball) — same binaries, one release pipeline.
+  - **Mac App Store (separate, constrained edition — feasible but later):**
+    `com.apple.security.virtualization` IS compatible with the App Sandbox
+    (precedent: Parallels Desktop App Store Edition), so the VZ engine can
+    ship there. What does NOT fit MAS rules: installing a launchd agent,
+    placing a CLI on PATH, and writing outside the sandbox container —
+    an MAS edition would run nebulad inside the app's sandbox container
+    with everything relocated under it, no CLI. Verify the
+    `com.apple.security.hypervisor` (libkrun sidecars) + sandbox combo
+    separately. Direct distribution stays the primary channel.
 
 **Exit criteria:** install the app, never open a terminal, run containers and see the
 memory footprint breathe.
