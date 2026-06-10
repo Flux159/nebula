@@ -84,3 +84,27 @@ Three cold cycles, identical to the wall clock:
   (mounts, data disk, network, services) + vessel-agent healthy over vsock:
   **580–595ms total**
 - sandbox microVMs (libkrun): ~250ms boot→run→teardown (phase 7/8 suites)
+
+## Linux/KVM spike (2026-06-10, suyogs-ubuntu-desktop, amd64)
+
+First microVM booted on Linux via our fork: `KVM-BOOT-OK x86_64 6.12.91`
+(libkrunfw's bundled kernel, alpine minirootfs, krun_set_root chroot-style,
+~/vmtest/boot_test.c). Box: Ubuntu 24.04, 32c/188GB, /dev/kvm rw (kvm group).
+
+Build recipe (no sudo needed beyond the one apt install):
+- deps: `sudo apt install flex bison bc libelf-dev patchelf python3-pyelftools`
+- libkrunfw: clone + `make -j32 && make PREFIX=$HOME/.local install`
+- libclang for bindgen WITHOUT sudo: symlink
+  /usr/lib/x86_64-linux-gnu/libclang-18.so.1 -> ~/.local/lib/libclang.so,
+  plus builtin headers via `apt-get download libclang-common-18-dev` +
+  `dpkg -x` and BINDGEN_EXTRA_CLANG_ARGS="-isystem <.../clang/18/include>"
+- fork: `make BLK=1` with PKG_CONFIG_PATH/LIBRARY_PATH at ~/.local/lib64
+  (rust >= 1.92 needed — krun-cpuid uses let-chains; rustup snapshot gave
+  1.87, `rustup update` fixed)
+- runtime: needs a `libkrun.so.1` soname symlink in target/release
+- gotcha: examples/chroot_vm.c references krun_add_net_unixstream which a
+  BLK=1-only build doesn't export; minimal boot_test.c avoids it
+
+Port seams confirmed by `cargo check` on the box: nebulad's
+sysctlbyname/XPC-footprint/launchd code needs cfg(target_os) gating;
+krun backend itself is portable (dlopen path candidates need .so variants).
