@@ -45,7 +45,7 @@ engine logic.
 **First run (no Docker, no downloads, offline):**
 
 ```bash
-export NEBULA_HOME="$HOME/Library/Application Support/YourApp/nebula"  # isolation — see §3
+export NEBULA_HOME="$HOME/Library/Application Support/YourApp/nebula"  # isolation — see §4
 mkdir -p "$NEBULA_HOME"
 cat > "$NEBULA_HOME/config.toml" <<EOF
 api_port = 7461          # your private REST port (0 disables)
@@ -99,7 +99,43 @@ specs, vsock). Embedding it directly instead of sidecars is possible but you
 take on the daemon's job (balloon loop, proxies, DNS). The sidecar pattern is
 the supported path; in-process is for when you outgrow it.
 
-## 3. Multiple Nebulas — the isolation story
+## 3. Customizing the rootfs (your binaries baked into our image)
+
+Embedders can layer their own content on top of any flavor at build time —
+no Dockerfile editing, no fork:
+
+```bash
+# files: a directory tree copied over / of the image (path-for-path)
+mkdir -p my-overlay/usr/local/bin
+cp luminal my-overlay/usr/local/bin/          # your 3.5 MB agent, baked in
+
+# optional script: runs INSIDE the image build (apk add, chmod, users, …)
+cat > my-setup.sh <<'SH'
+apk add --no-cache git openssh-client
+chmod 755 /usr/local/bin/luminal
+SH
+
+OVERLAY=my-overlay SETUP=my-setup.sh FLAVOR=full vessel/build-rootfs.sh
+# or through the kit:
+scripts/embed-kit.sh --flavor full --overlay my-overlay --setup my-setup.sh
+```
+
+Ordering and guarantees:
+
+- the overlay is copied **after** the base flavor install, so your files win
+  on conflicts; the setup script runs **after** the overlay (it can chmod /
+  configure what you copied);
+- `/sbin/nebula-init` and `/usr/bin/vessel-agent` are installed after both —
+  an overlay cannot accidentally break the boot/manage contract;
+- works for every flavor (`minimal` + your agent ≈ a purpose-built ~10-20 MB
+  appliance image) and feeds every consumer of the image: the engine vessel,
+  named vessels, snapshots, branches.
+
+When your environment is already a Dockerfile, skip overlays entirely:
+`nebula vessels new x --from-image your/image` boots any arm64 docker image
+as a managed microVM (init/agent injected at conversion time).
+
+## 4. Multiple Nebulas — the isolation story
 
 `NEBULA_HOME` isolates an instance completely: its own engine VM, disks,
 images, unix sockets, control socket, and (via `api_port`) its own REST port.
@@ -128,7 +164,7 @@ Everything that was port- or name-shaped is per-instance config:
   (`dev.nebula.nebulad.<hash>`) and the agent carries `NEBULA_HOME` in its
   environment — each embedded product can independently start at login.
 
-## 4. Worked example: the agent-orchestrator shape
+## 5. Worked example: the agent-orchestrator shape
 
 A thin local webapp (its own UI, SQLite state) scheduling agents on the
 embedded Kubernetes — agents as Jobs when they look like workflows,
