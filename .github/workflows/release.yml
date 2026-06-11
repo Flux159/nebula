@@ -92,7 +92,11 @@ jobs:
           mkdir -p "dist/$stage/lib"
           cp target/release/nebula target/release/nebulad "dist/$stage/"
           # the krun backend looks for lib/libkrun.so.1 next to the binaries
-          cp third_party/libkrun/target/release/libkrun.so.*.* "dist/$stage/lib/libkrun.so.1"
+          # (plain cargo emits libkrun.so; scripts/build-libkrun.sh adds
+          # versioned names — accept either)
+          src=$(ls third_party/libkrun/target/release/libkrun.so.*.* 2>/dev/null \
+                || ls third_party/libkrun/target/release/libkrun.so)
+          cp "$src" "dist/$stage/lib/libkrun.so.1"
           tar -C dist -czf "dist/$stage.tar.gz" "$stage"
           (cd dist && shasum -a 256 "$stage.tar.gz" > "$stage.tar.gz.sha256")
           ls -lh dist/
