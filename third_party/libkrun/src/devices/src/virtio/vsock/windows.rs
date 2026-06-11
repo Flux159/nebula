@@ -583,19 +583,15 @@ impl Proxy for TcpProxy {
     }
 
     fn shutdown(&mut self, pkt: &VsockPacket) {
-        let recv_off = pkt.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_RCV != 0;
         let send_off = pkt.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_SEND != 0;
 
-        let how = if recv_off && send_off {
-            Shutdown::Both
-        } else if recv_off {
-            Shutdown::Read
-        } else {
-            Shutdown::Write
-        };
-
-        if let Some(stream) = self.stream.as_ref()
-            && let Err(e) = stream.shutdown(how)
+        // SHUTDOWN_RCV is intentionally ignored: SD_RECEIVE with queued
+        // inbound data makes winsock RST the connection, destroying
+        // guest output the host client hasn't read yet (exec replies
+        // were lost race-dependently). Only propagate the FIN.
+        if send_off
+            && let Some(stream) = self.stream.as_ref()
+            && let Err(e) = stream.shutdown(Shutdown::Write)
         {
             warn!("error sending shutdown to socket: {e}");
         }
