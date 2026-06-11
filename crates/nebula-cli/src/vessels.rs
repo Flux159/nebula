@@ -10,8 +10,6 @@
 //! console.log,agent.sock,shell.sock}
 
 use nebula_core::ipc;
-// Only the vz-worker control client (macOS) names the stream type directly.
-#[cfg(target_os = "macos")]
 use nebula_core::ipc::IpcStream as UnixStream;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -296,6 +294,7 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
         // krun workers serve pause/save/resume here (vz uses its own
         // vmm.sock wired by the vz-worker itself).
         control_path: Some(dir.join("vmm.sock")),
+        restore_path: None,
         vsock_ports: vec![
             VsockPortMap {
                 port: VSOCK_PORT_CONTROL,
@@ -339,23 +338,30 @@ pub fn start(name: &str) -> anyhow::Result<()> {
     start_with(name, None)
 }
 
-/// Boot a vessel; with `restore` (vz only) the worker resumes from a saved
-/// machine state instead of cold-booting the kernel.
+/// Boot a vessel; with `restore` the worker resumes from a saved machine
+/// state (vz: a memory.vzstate file; krun on Linux x86_64: a memory.krun
+/// snapshot directory) instead of cold-booting the kernel.
 fn start_with(name: &str, restore: Option<&std::path::Path>) -> anyhow::Result<()> {
     if is_engine(name) {
         return crate::commands::up();
     }
     let dir = dir_of(name)?;
-    let spec = read_spec(&dir)?;
+    let mut spec = read_spec(&dir)?;
     if live_pid(&dir).is_some() {
         println!("vessel `{name}` is already running");
         return Ok(());
     }
     let backend = spec.backend.clone().unwrap_or_else(|| "krun".into());
+    let krun_restore_ok = cfg!(all(target_os = "linux", target_arch = "x86_64"));
     anyhow::ensure!(
-        restore.is_none() || backend == "vz",
-        "memory-state restore requires a vz-backed vessel"
+        restore.is_none() || backend == "vz" || krun_restore_ok,
+        "memory-state restore for krun vessels is Linux x86_64 only (use vz on macOS)"
     );
+    if backend != "vz" {
+        // Transient: the worker reads it from its spec argument; the vessel's
+        // spec.json on disk is untouched, so later starts cold-boot normally.
+        spec.restore_path = restore.map(|p| p.to_path_buf());
+    }
 
     let spec_json = serde_json::to_string(&spec)?;
     let exe = std::env::current_exe()?;
@@ -427,19 +433,18 @@ fn start_with(name: &str, restore: Option<&std::path::Path>) -> anyhow::Result<(
     }
 }
 
-/// One connection to a vz-worker's control socket. Sequential ops share the
-/// stream, so pause -> save -> resume cannot be interleaved by another client.
-#[cfg(target_os = "macos")]
+/// One connection to a VM worker's control socket (vz-worker or krun-worker;
+/// same JSON protocol). Sequential ops share the stream, so pause -> save ->
+/// resume cannot be interleaved by another client.
 struct VmmCtl {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
 }
 
-#[cfg(target_os = "macos")]
 impl VmmCtl {
     fn connect(dir: &std::path::Path) -> anyhow::Result<Self> {
         let stream = ipc::connect(&dir.join("vmm.sock"))
-            .context("vessel has no live vz-worker control socket")?;
+            .context("vessel has no live worker control socket")?;
         stream.set_read_timeout(Some(Duration::from_secs(120)))?;
         let writer = stream.try_clone()?;
         Ok(Self {
@@ -448,14 +453,14 @@ impl VmmCtl {
         })
     }
 
-    fn op(&mut self, req: &nebula_core::backend::vz::WorkerControl) -> anyhow::Result<()> {
+    fn op(&mut self, req: &nebula_core::backend::WorkerControl) -> anyhow::Result<()> {
         let mut line = serde_json::to_string(req)?;
         line.push('\n');
         self.writer.write_all(line.as_bytes())?;
         let mut resp = String::new();
         self.reader.read_line(&mut resp)?;
-        let reply: nebula_core::backend::vz::WorkerReply =
-            serde_json::from_str(resp.trim()).context("bad reply from vz-worker")?;
+        let reply: nebula_core::backend::WorkerReply =
+            serde_json::from_str(resp.trim()).context("bad reply from worker")?;
         anyhow::ensure!(
             reply.ok,
             "{}",
@@ -827,14 +832,17 @@ pub fn snapshot(name: &str, label: &str, mode: SnapMode) -> anyhow::Result<()> {
 
     let spec = read_spec(&dir)?;
     let is_vz = spec.backend.as_deref() == Some("vz");
+    // Live memory capture: vz on macOS, krun on Linux x86_64 (Windows/WHP
+    // parity is in progress).
+    let memory_capable = (is_vz && cfg!(target_os = "macos"))
+        || (!is_vz && cfg!(all(target_os = "linux", target_arch = "x86_64")));
     let running = live_pid(&dir).is_some();
     let memory = match mode {
         SnapMode::DiskOnly => false,
         SnapMode::Memory => {
             anyhow::ensure!(
-                is_vz,
-                "memory snapshots need a vz vessel (nebula vessels new {name} --backend vz); \
-                 this one runs on {}",
+                memory_capable,
+                "memory snapshots aren't supported for {}-backed vessels on this platform yet",
                 spec.backend.as_deref().unwrap_or("krun")
             );
             anyhow::ensure!(
@@ -845,32 +853,35 @@ pub fn snapshot(name: &str, label: &str, mode: SnapMode) -> anyhow::Result<()> {
             true
         }
         SnapMode::Auto => {
-            if !is_vz {
+            if !memory_capable {
                 println!(
-                    "note: disk-only snapshot — live memory capture needs a vz vessel \
-                     (nebula vessels new <name> --backend vz)"
+                    "note: disk-only snapshot — live memory capture isn't supported for this \
+                     vessel's backend on this platform yet"
                 );
             } else if !running {
                 println!(
                     "note: vessel is stopped — disk-only snapshot (start it to capture memory)"
                 );
             }
-            is_vz && running
+            memory_capable && running
         }
     };
 
-    #[cfg(not(target_os = "macos"))]
-    anyhow::ensure!(!memory, "memory snapshots require the vz backend (macOS)");
-    #[cfg(target_os = "macos")]
     if memory {
         std::fs::create_dir_all(&sdir)?;
         let t0 = Instant::now();
         let mut ctl = VmmCtl::connect(&dir)?;
-        use nebula_core::backend::vz::WorkerControl;
+        use nebula_core::backend::WorkerControl;
+        // vz saves a single state file; krun saves a snapshot directory.
+        let state_path = if is_vz {
+            sdir.join("memory.vzstate")
+        } else {
+            sdir.join("memory.krun")
+        };
         ctl.op(&WorkerControl::Pause)?;
         let saved = ctl
             .op(&WorkerControl::Save {
-                path: sdir.join("memory.vzstate"),
+                path: state_path.clone(),
             })
             // Disks cloned while still paused = consistent with the state file.
             .and_then(|()| {
@@ -887,9 +898,12 @@ pub fn snapshot(name: &str, label: &str, mode: SnapMode) -> anyhow::Result<()> {
             return Err(e.context("memory snapshot failed (vessel resumed unharmed)"));
         }
         resumed?;
-        let state_mb = std::fs::metadata(sdir.join("memory.vzstate"))
-            .map(|m| m.len() / (1024 * 1024))
-            .unwrap_or(0);
+        let state_mb = if is_vz {
+            physical_size_mb(&state_path)
+        } else {
+            // The guest RAM image dominates; it's written sparsely.
+            physical_size_mb(&state_path.join("memory.bin"))
+        };
         println!(
             "memory snapshot `{name}@{label}` taken in {:.2?} ({state_mb} MiB state, vessel never stopped)",
             t0.elapsed()
@@ -914,6 +928,24 @@ pub fn snapshot(name: &str, label: &str, mode: SnapMode) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// On-disk size of a snapshot state file in MiB (sparse-aware on unix —
+/// krun memory images are mostly holes).
+fn physical_size_mb(path: &std::path::Path) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path)
+            .map(|m| m.blocks() * 512 / (1024 * 1024))
+            .unwrap_or(0)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::metadata(path)
+            .map(|m| m.len() / (1024 * 1024))
+            .unwrap_or(0)
+    }
+}
+
 pub fn snapshots(name: &str) -> anyhow::Result<()> {
     let dir = dir_of(name)?;
     let root = dir.join("snapshots");
@@ -931,7 +963,9 @@ pub fn snapshots(name: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     for l in labels {
-        if root.join(&l).join("memory.vzstate").is_file() {
+        if root.join(&l).join("memory.vzstate").is_file()
+            || root.join(&l).join("memory.krun").is_dir()
+        {
             println!("{name}@{l}  (disks + memory state)");
         } else {
             println!("{name}@{l}");
@@ -950,6 +984,20 @@ pub fn snapshot_rm(name: &str, label: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The memory-state artifact inside a snapshot dir, if the snapshot carries
+/// one: a vz state file or a krun snapshot directory.
+fn snapshot_memory_state(sdir: &std::path::Path) -> Option<PathBuf> {
+    let vz = sdir.join("memory.vzstate");
+    if vz.is_file() {
+        return Some(vz);
+    }
+    let krun = sdir.join("memory.krun");
+    if krun.is_dir() {
+        return Some(krun);
+    }
+    None
+}
+
 /// Roll a vessel back to a snapshot (its current disks are replaced). When
 /// the snapshot carries machine state, the vessel RESUMES mid-execution.
 pub fn restore(name: &str, label: &str) -> anyhow::Result<()> {
@@ -957,8 +1005,7 @@ pub fn restore(name: &str, label: &str) -> anyhow::Result<()> {
     let dir = dir_of(name)?;
     let sdir = snap_dir(&dir, label);
     anyhow::ensure!(sdir.exists(), "no snapshot `{name}@{label}`");
-    let memory_state = sdir.join("memory.vzstate");
-    let has_memory = memory_state.is_file();
+    let memory_state = snapshot_memory_state(&sdir);
     let was_running = live_pid(&dir).is_some();
     if was_running {
         stop(name)?;
@@ -969,7 +1016,7 @@ pub fn restore(name: &str, label: &str) -> anyhow::Result<()> {
             clone_file(&sdir.join(&img), &dir.join(&img))?;
         }
     }
-    if has_memory {
+    if let Some(memory_state) = memory_state {
         match start_with(name, Some(&memory_state)) {
             Ok(()) => {
                 println!("`{name}` restored to @{label} (live resume — processes/RAM intact)");
@@ -1010,10 +1057,7 @@ pub fn branch(name: &str, new_name: &str, label: Option<&str>, count: u32) -> an
             anyhow::ensure!(sdir.exists(), "no snapshot `{name}@{l}`");
             // Memory snapshots fan out as LIVE resumes: every branch wakes
             // mid-execution at the exact saved instant.
-            let state = sdir.join("memory.vzstate");
-            if state.is_file() {
-                src_state = Some(state);
-            }
+            src_state = snapshot_memory_state(&sdir);
             src_dir = sdir;
             _tmp_guard = None::<tempdir::Guard>;
         }

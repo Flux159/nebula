@@ -268,18 +268,17 @@ impl MmioTransport {
         for (q, qs) in queues.iter_mut().zip(st.queue_states.iter()) {
             q.restore_state(qs);
             if qs.ready != 0 {
-                // Device-side ring positions: the avail/used indices the
-                // driver and a quiesced device agree on live in guest RAM.
+                // Resume BOTH ring cursors at the used index the driver sees
+                // in guest RAM: every descriptor the driver posted that the
+                // device hadn't returned (long-held RX buffer pools,
+                // in-flight requests) gets re-fetched, because the device's
+                // internal buffer state died with the old process.
                 use vm_memory::{Bytes, GuestAddress};
-                let avail_idx: u16 = self
-                    .mem
-                    .read_obj(GuestAddress(qs.avail_ring + 2))
-                    .unwrap_or(qs.next_avail);
                 let used_idx: u16 = self
                     .mem
                     .read_obj(GuestAddress(qs.used_ring + 2))
                     .unwrap_or(qs.next_used);
-                q.restore_ring_positions(avail_idx, used_idx);
+                q.restore_ring_positions(used_idx, used_idx);
             }
         }
         self.queues = Some(queues);
@@ -287,6 +286,16 @@ impl MmioTransport {
         self.device_status = st.device_status;
         if st.device_status & device_status::DRIVER_OK != 0 {
             self.activate();
+            // Kick every ready queue once: the re-offered descriptors must
+            // be processed even though the driver won't notify again (its
+            // notification-suppression state predates the restore).
+            for (i, qs) in st.queue_states.iter().enumerate() {
+                if qs.ready != 0
+                    && let Some(evt) = self.queue_evts.get(i)
+                {
+                    let _ = evt.write(1);
+                }
+            }
         }
     }
 

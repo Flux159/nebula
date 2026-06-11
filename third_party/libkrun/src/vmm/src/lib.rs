@@ -533,6 +533,11 @@ impl Vmm {
         out.flush()?;
         let mut file = out.into_inner().map_err(|e| e.into_error())?;
         const PAGE: usize = 4096;
+        // Region data starts on a page boundary: restore mmaps each region
+        // straight from the file, and mmap file offsets must be page-aligned
+        // (region lengths already are).
+        let data_start = (8 + regions.len() as u64 * 16).next_multiple_of(PAGE as u64);
+        file.seek(std::io::SeekFrom::Start(data_start))?;
         for r in &regions {
             // SAFETY: the region is a live mapping of len bytes; vcpus are
             // paused so the snapshot is consistent.
@@ -559,8 +564,7 @@ impl Vmm {
             }
         }
         // Holes at EOF need an explicit length.
-        let total: u64 =
-            8 + regions.len() as u64 * 16 + regions.iter().map(|r| r.len()).sum::<u64>();
+        let total: u64 = data_start + regions.iter().map(|r| r.len()).sum::<u64>();
         file.set_len(total)?;
         file.flush()
     }

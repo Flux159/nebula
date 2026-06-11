@@ -4,15 +4,14 @@
 //! (a Status carrying the exit code), 4=resize. Client→server frames are
 //! masked (RFC 6455); server→client frames are not.
 
+use slim_client::http::Client;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
-use std::path::Path;
 
 /// Run `cmd` in `pod` via the apiserver and stream stdout/stderr to this
 /// process. Returns the command's exit code. With `stdin`, pumps this process's
 /// stdin into the exec; with `tty`, requests a pty and forwards window size.
 pub fn exec(
-    socket: &Path,
+    client: &Client,
     ns: &str,
     pod: &str,
     container: &str,
@@ -20,7 +19,7 @@ pub fn exec(
     tty: bool,
     stdin: bool,
 ) -> io::Result<i32> {
-    let conn = UnixStream::connect(socket)?;
+    let conn = client.connect_stream()?;
 
     let mut q = String::new();
     for c in cmd {

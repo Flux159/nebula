@@ -39,6 +39,11 @@ pub struct VmSpec {
     /// Windows this is a port file per the ipc convention.
     #[serde(default)]
     pub control_path: Option<std::path::PathBuf>,
+    /// krun snapshot directory to restore from instead of cold-booting
+    /// (Linux x86_64). Set transiently for the worker spawn — never written
+    /// to a vessel's spec.json. VZ restore passes --restore instead.
+    #[serde(default)]
+    pub restore_path: Option<std::path::PathBuf>,
     /// Host unix socket <-> guest vsock port maps (libkrun: native; VZ:
     /// proxied by the vz-worker): connecting to `host_path` reaches a guest
     /// listener on `port`.
@@ -185,6 +190,7 @@ mod tests {
             rosetta: false,
             gpu: false,
             control_path: None,
+            restore_path: None,
             vsock_ports: vec![],
             backend: None,
             mac: None,

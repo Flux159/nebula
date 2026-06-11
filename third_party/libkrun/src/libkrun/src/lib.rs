@@ -3195,6 +3195,28 @@ pub unsafe extern "C" fn krun_vm_save(_ctx_id: u32, c_dir: *const c_char) -> i32
     }
 }
 
+/// Configure the context to restore from the snapshot directory at `c_dir`
+/// instead of booting. The rest of the configuration (kernel, disks, vsock,
+/// network) must match what the VM was originally started with — devices are
+/// re-created from it before their saved state is applied. Call before
+/// krun_start_enter.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[allow(clippy::missing_safety_doc)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn krun_set_restore(ctx_id: u32, c_dir: *const c_char) -> i32 {
+    let dir = match unsafe { CStr::from_ptr(c_dir) }.to_str() {
+        Ok(p) => std::path::PathBuf::from(p),
+        Err(_) => return -libc::EINVAL,
+    };
+    match CTX_MAP.lock().unwrap().entry(ctx_id) {
+        Entry::Occupied(mut ctx_cfg) => {
+            ctx_cfg.get_mut().vmr.restore_dir = Some(dir);
+        }
+        Entry::Vacant(_) => return -libc::ENOENT,
+    }
+    KRUN_SUCCESS
+}
+
 /// Resume previously paused guest vCPUs.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 #[unsafe(no_mangle)]
@@ -3384,12 +3406,39 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
 
     let (sender, _receiver) = unbounded();
 
-    let _vmm = match vmm::builder::build_microvm(
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        not(any(feature = "tee", feature = "aws-nitro"))
+    ))]
+    let build_result = match ctx_cfg.vmr.restore_dir.clone() {
+        Some(dir) => vmm::builder::build_microvm_from_snapshot(
+            &ctx_cfg.vmr,
+            &mut event_manager,
+            &dir,
+            ctx_cfg.shutdown_efd,
+            sender,
+        ),
+        None => vmm::builder::build_microvm(
+            &ctx_cfg.vmr,
+            &mut event_manager,
+            ctx_cfg.shutdown_efd,
+            sender,
+        ),
+    };
+    #[cfg(not(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        not(any(feature = "tee", feature = "aws-nitro"))
+    )))]
+    let build_result = vmm::builder::build_microvm(
         &ctx_cfg.vmr,
         &mut event_manager,
         ctx_cfg.shutdown_efd,
         sender,
-    ) {
+    );
+
+    let _vmm = match build_result {
         Ok(vmm) => vmm,
         Err(e) => {
             error!("Building the microVM failed: {e:?}");

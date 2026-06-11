@@ -1,18 +1,88 @@
-//! Minimal Docker Engine API client over a unix socket. Blocking, one
-//! connection per request, plus a hijack path for attach/exec.
+//! Minimal Docker Engine API client. Blocking, one connection per request, plus
+//! a hijack path for attach/exec.
+//!
+//! Transport is unix-socket on macOS/Linux (where nebula exposes docker.sock /
+//! slim-kube.sock) and **loopback TCP on Windows** (no AF_UNIX in std; nebula's
+//! WHP host proxy maps the guest vsock ports to loopback TCP). `DOCKER_HOST` /
+//! `SLIM_SOCKET` / `SLIM_KUBE_SOCKET` accept `tcp://host:port` on every platform
+//! and `unix:///path` (or a bare path) on unix.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::path::PathBuf;
 
+/// Where the engine API lives.
+#[derive(Clone, Debug)]
+pub enum Endpoint {
+    #[cfg(unix)]
+    Unix(PathBuf),
+    Tcp(String), // host:port
+}
+
+impl std::fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            #[cfg(unix)]
+            Endpoint::Unix(p) => write!(f, "{}", p.display()),
+            Endpoint::Tcp(a) => write!(f, "tcp://{a}"),
+        }
+    }
+}
+
+/// A connected engine stream — unix socket or TCP, cloneable for duplex IO.
+pub enum Stream {
+    #[cfg(unix)]
+    Unix(UnixStream),
+    Tcp(TcpStream),
+}
+
+impl Stream {
+    pub fn try_clone(&self) -> io::Result<Stream> {
+        Ok(match self {
+            #[cfg(unix)]
+            Stream::Unix(s) => Stream::Unix(s.try_clone()?),
+            Stream::Tcp(s) => Stream::Tcp(s.try_clone()?),
+        })
+    }
+}
+
+impl Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            #[cfg(unix)]
+            Stream::Unix(s) => s.read(buf),
+            Stream::Tcp(s) => s.read(buf),
+        }
+    }
+}
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            #[cfg(unix)]
+            Stream::Unix(s) => s.write(buf),
+            Stream::Tcp(s) => s.write(buf),
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            #[cfg(unix)]
+            Stream::Unix(s) => s.flush(),
+            Stream::Tcp(s) => s.flush(),
+        }
+    }
+}
+
 pub struct Client {
-    pub socket: PathBuf,
+    pub endpoint: Endpoint,
 }
 
 pub struct Response {
     pub status: u16,
     pub headers: Vec<(String, String)>,
-    pub stream: BufReader<UnixStream>,
+    pub stream: BufReader<Stream>,
     body_len: BodyLen,
 }
 
@@ -34,63 +104,53 @@ impl std::fmt::Display for ApiError {
 }
 impl std::error::Error for ApiError {}
 
+/// Parse a transport string: `tcp://host:port` (all platforms), `unix:///path`
+/// or a bare absolute path (unix only).
+fn parse_endpoint(s: &str) -> Option<Endpoint> {
+    if let Some(a) = s.strip_prefix("tcp://") {
+        return Some(Endpoint::Tcp(a.to_string()));
+    }
+    #[cfg(unix)]
+    {
+        if let Some(p) = s.strip_prefix("unix://") {
+            return Some(Endpoint::Unix(PathBuf::from(p)));
+        }
+        if s.starts_with('/') {
+            return Some(Endpoint::Unix(PathBuf::from(s)));
+        }
+    }
+    None
+}
+
 impl Client {
+    /// Build a client for an explicit endpoint (e.g., a discovered tcp:// host).
+    pub fn from_endpoint(ep: Endpoint) -> Client {
+        Client { endpoint: ep }
+    }
+
     pub fn discover() -> Client {
-        // DOCKER_HOST=unix:///path wins; else common slim/nebula locations.
-        if let Ok(h) = std::env::var("DOCKER_HOST") {
-            if let Some(p) = h.strip_prefix("unix://") {
-                return Client { socket: PathBuf::from(p) };
-            }
-        }
-        let candidates = [
-            std::env::var("SLIM_SOCKET").ok(),
-            std::env::var("NEBULA_HOME").ok().map(|h| format!("{h}/run/docker.sock")),
-            Some(format!(
-                "{}/.nebula/run/docker.sock",
-                std::env::var("HOME").unwrap_or_default()
-            )),
-            Some("/var/run/docker.sock".into()),
-        ];
-        for c in candidates.into_iter().flatten() {
-            if std::path::Path::new(&c).exists() {
-                return Client { socket: PathBuf::from(c) };
-            }
-        }
-        Client { socket: PathBuf::from("/var/run/docker.sock") }
+        Client { endpoint: discover_endpoint(&["DOCKER_HOST", "SLIM_SOCKET"], "docker.sock", "/var/run/docker.sock") }
     }
 
-    /// Discover the slim apiserver-lite unix socket (kubectl-slim/helm-slim).
-    /// slimd serves it next to docker.sock; nebula's socket proxy mirrors it on
-    /// the host. SLIM_KUBE_SOCKET overrides.
+    /// The slim apiserver-lite endpoint (kubectl-slim/helm-slim). slimd serves it
+    /// next to docker.sock; nebula's proxy mirrors it on the host.
     pub fn discover_kube() -> Client {
-        if let Ok(p) = std::env::var("SLIM_KUBE_SOCKET") {
-            return Client { socket: PathBuf::from(p) };
-        }
-        let candidates = [
-            std::env::var("NEBULA_HOME").ok().map(|h| format!("{h}/run/slim-kube.sock")),
-            Some(format!(
-                "{}/.nebula/run/slim-kube.sock",
-                std::env::var("HOME").unwrap_or_default()
-            )),
-            Some("/var/run/slim-kube.sock".into()),
-        ];
-        for c in candidates.into_iter().flatten() {
-            if std::path::Path::new(&c).exists() {
-                return Client { socket: PathBuf::from(c) };
-            }
-        }
-        Client { socket: PathBuf::from("/var/run/slim-kube.sock") }
+        Client { endpoint: discover_endpoint(&["SLIM_KUBE_SOCKET", "SLIM_KUBE_HOST"], "slim-kube.sock", "/var/run/slim-kube.sock") }
     }
 
-    fn connect(&self) -> io::Result<UnixStream> {
-        UnixStream::connect(&self.socket).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "Cannot connect to the slim engine at {}: {e}\nIs the engine running?",
-                    self.socket.display()
-                ),
-            )
+    fn connect(&self) -> io::Result<Stream> {
+        let s = match &self.endpoint {
+            #[cfg(unix)]
+            Endpoint::Unix(p) => Stream::Unix(UnixStream::connect(p)?),
+            Endpoint::Tcp(a) => Stream::Tcp(TcpStream::connect(a)?),
+        };
+        Ok(s)
+    }
+
+    /// Public connect for duplex clients (e.g., the kube exec WebSocket).
+    pub fn connect_stream(&self) -> io::Result<Stream> {
+        self.connect().map_err(|e| {
+            io::Error::new(e.kind(), format!("Cannot connect to the slim engine at {}: {e}\nIs the engine running?", self.endpoint))
         })
     }
 
@@ -102,7 +162,7 @@ impl Client {
         headers: &[(&str, &str)],
         body: Option<&[u8]>,
     ) -> io::Result<Response> {
-        let mut stream = self.connect()?;
+        let mut stream = self.connect_stream()?;
         let mut req = format!("{method} {path} HTTP/1.1\r\nHost: slim\r\n");
         for (k, v) in headers {
             req.push_str(&format!("{k}: {v}\r\n"));
@@ -210,8 +270,8 @@ impl Client {
         method: &str,
         path: &str,
         body: Option<&serde_json::Value>,
-    ) -> io::Result<UnixStream> {
-        let mut stream = self.connect()?;
+    ) -> io::Result<Stream> {
+        let mut stream = self.connect_stream()?;
         let raw = body.map(|b| serde_json::to_vec(b).unwrap_or_default());
         let mut req = format!(
             "{method} {path} HTTP/1.1\r\nHost: slim\r\nContent-Type: application/json\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n"
@@ -237,9 +297,41 @@ impl Client {
                 break;
             }
         }
-        // Anything buffered after headers belongs to the stream; with our
-        // server hijack there is typically none. Return the original stream.
         Ok(stream)
+    }
+}
+
+/// Discover an endpoint: first env var that parses wins; else (unix) the first
+/// existing socket among nebula locations, else (windows) loopback TCP.
+fn discover_endpoint(envs: &[&str], leaf: &str, default_unix: &str) -> Endpoint {
+    for var in envs {
+        if let Ok(v) = std::env::var(var) {
+            if let Some(ep) = parse_endpoint(&v) {
+                return ep;
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        let candidates = [
+            std::env::var("NEBULA_HOME").ok().map(|h| format!("{h}/run/{leaf}")),
+            Some(format!("{}/.nebula/run/{leaf}", std::env::var("HOME").unwrap_or_default())),
+            Some(default_unix.to_string()),
+        ];
+        for c in candidates.into_iter().flatten() {
+            if std::path::Path::new(&c).exists() {
+                return Endpoint::Unix(PathBuf::from(c));
+            }
+        }
+        Endpoint::Unix(PathBuf::from(default_unix))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (leaf, default_unix);
+        // Windows: nebula publishes the engine on a loopback TCP port (set via
+        // DOCKER_HOST / SLIM_KUBE_HOST). Fall back to the conventional ports.
+        let port = if envs.iter().any(|v| v.contains("KUBE")) { "6443" } else { "2375" };
+        Endpoint::Tcp(format!("127.0.0.1:{port}"))
     }
 }
 

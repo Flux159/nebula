@@ -384,7 +384,7 @@ impl<'a> Facade<'a> {
     pub fn exec(&self, pod: &str, container: &str, cmd: &[String], interactive: bool, tty: bool) -> KubeResult<i32> {
         let ns = self.namespace.clone();
         let pod = self.resolve_pod(pod)?;
-        ws::exec(&self.client.socket, &ns, &pod, container, cmd, tty, interactive).map_err(|e| ke(e.to_string()))
+        ws::exec(self.client, &ns, &pod, container, cmd, tty, interactive).map_err(|e| ke(e.to_string()))
     }
 }
 

@@ -702,9 +702,9 @@ fn build_table(info: &ResourceInfo, items: &[Value], rv: u64) -> Value {
             let age = age_of(o);
             let cells: Vec<Value> = match info.resource.as_str() {
                 "pods" => {
-                    let phase = o.pointer("/status/phase").and_then(|v| v.as_str()).unwrap_or("Pending");
+                    let status = pod_status_cell(o);
                     let (ready, restarts) = pod_ready_restarts(o);
-                    vec![json!(name), json!(ready), json!(phase), json!(restarts), json!(age)]
+                    vec![json!(name), json!(ready), json!(status), json!(restarts), json!(age)]
                 }
                 "deployments" | "replicasets" | "statefulsets" => {
                     let desired = o.pointer("/spec/replicas").and_then(|v| v.as_i64()).unwrap_or(1);
@@ -725,6 +725,25 @@ fn build_table(info: &ResourceInfo, items: &[Value], rv: u64) -> Value {
         "columnDefinitions": coldefs,
         "rows": rows,
     })
+}
+
+/// Pod STATUS cell: `Init:done/total` while init containers run, else the phase.
+fn pod_status_cell(pod: &Value) -> String {
+    let phase = pod.pointer("/status/phase").and_then(|v| v.as_str()).unwrap_or("Pending");
+    if phase == "Pending" {
+        if let Some(inits) = pod.pointer("/status/initContainerStatuses").and_then(|v| v.as_array()) {
+            if !inits.is_empty() {
+                let done = inits
+                    .iter()
+                    .filter(|c| c.pointer("/state/terminated/exitCode").and_then(|v| v.as_i64()) == Some(0))
+                    .count();
+                if done < inits.len() {
+                    return format!("Init:{done}/{}", inits.len());
+                }
+            }
+        }
+    }
+    phase.to_string()
 }
 
 /// (ready "n/m", total restarts) from a pod's containerStatuses.

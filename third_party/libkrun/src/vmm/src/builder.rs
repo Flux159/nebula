@@ -232,6 +232,8 @@ pub enum StartMicrovmError {
     RegisterVhostUserDevice(device_manager::mmio::Error),
     /// Cannot initialize a MMIO Vsock Device or add a device to the MMIO Bus.
     RegisterVsockDevice(device_manager::mmio::Error),
+    /// Cannot restore the VM from a snapshot directory.
+    RestoreSnapshot(String),
     /// Cannot attest the VM in the Secure Virtualization context.
     SecureVirtAttest(VstateError),
     /// Cannot initialize the Secure Virtualization backend.
@@ -490,6 +492,9 @@ impl Display for StartMicrovmError {
                     f,
                     "Cannot initialize a MMIO Vsock Device or add a device to the MMIO Bus. {err_msg}"
                 )
+            }
+            RestoreSnapshot(ref err) => {
+                write!(f, "Cannot restore the VM from a snapshot: {err}")
             }
             SecureVirtAttest(ref err) => {
                 let mut err_msg = format!("{err}");
@@ -3101,7 +3106,8 @@ pub fn load_snapshot(dir: &std::path::Path) -> std::result::Result<LoadedSnapsho
         let len = read_u64(&mut rd)?;
         layout.push((addr, len));
     }
-    let data_start = 8 + n_regions as u64 * 16;
+    // Region data is page-aligned in the file (mmap offset requirement).
+    let data_start = (8 + n_regions as u64 * 16).next_multiple_of(4096);
 
     let mut regions = Vec::with_capacity(n_regions);
     let mut off = data_start;
@@ -3214,4 +3220,311 @@ fn load_device_states(
         });
     }
     Ok(out)
+}
+
+/// Builds and starts a microVM from a krun snapshot directory instead of
+/// booting a kernel.
+///
+/// The caller must supply the same `VmResources` the VM was originally
+/// started with: devices are created in the same order (and thus at the same
+/// bus addresses and IRQs) as at save time, then each virtio transport's
+/// state is restored on top and DRIVER_OK devices are re-activated against
+/// the restored guest RAM. No boot-time guest memory writes happen on this
+/// path — the RAM image from the snapshot is authoritative.
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    not(any(feature = "tee", feature = "aws-nitro"))
+))]
+pub fn build_microvm_from_snapshot(
+    vm_resources: &super::resources::VmResources,
+    event_manager: &mut EventManager,
+    restore_dir: &std::path::Path,
+    _shutdown_efd: Option<EventFd>,
+    _sender: Sender<WorkerMessage>,
+) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
+    use vm_memory::GuestMemoryRegion;
+
+    let err = StartMicrovmError::RestoreSnapshot;
+
+    if vm_resources.split_irqchip {
+        return Err(err(
+            "snapshot restore requires the in-kernel irqchip".to_string()
+        ));
+    }
+    if vm_resources.fs.iter().any(|f| f.shm_size.is_some()) {
+        return Err(err(
+            "snapshot restore does not support fs DAX/shm regions".to_string(),
+        ));
+    }
+    if vm_resources.gpu_virgl_flags.is_some() {
+        return Err(err(
+            "snapshot restore does not support GPU devices".to_string()
+        ));
+    }
+    #[cfg(feature = "vhost-user")]
+    if !vm_resources.vhost_user_devices.is_empty() {
+        return Err(err(
+            "snapshot restore does not support vhost-user devices".to_string(),
+        ));
+    }
+
+    let snapshot = load_snapshot(restore_dir).map_err(err)?;
+
+    let mem_size = vm_resources
+        .vm_config()
+        .mem_size_mib
+        .ok_or(StartMicrovmError::MissingMemSizeConfig)?
+        << 20;
+
+    // Recompute the layout the boot path would have used; the snapshot's
+    // region table must agree or the restored RAM image would land at the
+    // wrong guest addresses.
+    let payload = choose_payload(vm_resources)?;
+    let (arch_memory_info, arch_mem_regions) = match &payload {
+        Payload::ExternalKernel(external_kernel) => {
+            arch::arch_memory_regions(mem_size, None, 0, external_kernel.initramfs_size, None)
+        }
+        _ => {
+            return Err(err(
+                "snapshot restore requires an external kernel configuration".to_string(),
+            ));
+        }
+    };
+    let want: Vec<(u64, u64)> = arch_mem_regions
+        .iter()
+        .map(|(a, l)| (a.raw_value(), *l as u64))
+        .collect();
+    let got: Vec<(u64, u64)> = snapshot
+        .guest_memory
+        .iter()
+        .map(|r| (r.start_addr().raw_value(), r.len()))
+        .collect();
+    if want != got {
+        return Err(err(format!(
+            "snapshot memory layout {got:x?} does not match configuration {want:x?}"
+        )));
+    }
+
+    let guest_memory = snapshot.guest_memory.clone();
+    let vcpu_config = vm_resources.vcpu_config();
+    if snapshot.vcpu_states.len() != vcpu_config.vcpu_count as usize {
+        return Err(err(format!(
+            "snapshot has {} vcpus but the configuration wants {}",
+            snapshot.vcpu_states.len(),
+            vcpu_config.vcpu_count
+        )));
+    }
+
+    // The boot command line is irrelevant after a restore, but Vmm keeps one.
+    let mut kernel_cmdline = Cmdline::new(arch::CMDLINE_MAX_SIZE);
+    kernel_cmdline.insert_str(DEFAULT_KERNEL_CMDLINE).unwrap();
+
+    let vm = setup_vm(&guest_memory, vm_resources.nested_enabled)?;
+
+    let mut _shm_manager = ShmManager::new(&arch_memory_info);
+
+    let mut serial_devices = Vec::new();
+    let mut serial_ttys = Vec::new();
+    for s in &vm_resources.serial_consoles {
+        let input: Option<Box<dyn devices::legacy::ReadableFd + Send>> = if s.input_fd >= 0 {
+            let file = unsafe { File::from_raw_fd(s.input_fd) };
+            if file.is_terminal() {
+                serial_ttys.push(unsafe { BorrowedFd::borrow_raw(file.as_raw_fd()) });
+            }
+            Some(Box::new(file))
+        } else {
+            None
+        };
+        let output: Option<Box<dyn io::Write + Send>> = if s.output_fd >= 0 {
+            Some(Box::new(unsafe { File::from_raw_fd(s.output_fd) }))
+        } else {
+            None
+        };
+        serial_devices.push(setup_serial_device(event_manager, input, output)?);
+    }
+
+    let exit_evt = EventFd::new(utils::eventfd::EFD_NONBLOCK)
+        .map_err(Error::EventFd)
+        .map_err(StartMicrovmError::Internal)?;
+
+    let mut pio_device_manager = PortIODeviceManager::new(
+        Arc::new(Mutex::new(Cmos::new(
+            arch_memory_info.ram_below_gap,
+            arch_memory_info.ram_above_gap,
+        ))),
+        serial_devices,
+        exit_evt
+            .try_clone()
+            .map_err(Error::EventFd)
+            .map_err(StartMicrovmError::Internal)?,
+    )
+    .map_err(Error::CreateLegacyDevice)
+    .map_err(StartMicrovmError::Internal)?;
+
+    let mut mmio_device_manager = MMIODeviceManager::new(
+        &mut (arch::MMIO_MEM_START.clone()),
+        (arch::IRQ_BASE, arch::IRQ_MAX),
+    );
+
+    // KvmIoapic::new creates the in-kernel irqchip and PIT; both must exist
+    // before vcpus are created and before VmState is pushed back in.
+    let ioapic: Box<dyn IrqChipT> =
+        Box::new(KvmIoapic::new(vm.fd()).map_err(StartMicrovmError::CreateKvmIrqChip)?);
+    let intc: IrqChip = Arc::new(Mutex::new(IrqChipDevice::new(ioapic)));
+
+    attach_legacy_devices(
+        &vm,
+        false,
+        &mut pio_device_manager,
+        &mut mmio_device_manager,
+        Some(intc.clone()),
+    )?;
+
+    vm.restore_state(&snapshot.vm_state)
+        .map_err(Error::Vm)
+        .map_err(StartMicrovmError::Internal)?;
+
+    let mut vcpus = Vec::with_capacity(vcpu_config.vcpu_count as usize);
+    for (i, state) in snapshot.vcpu_states.into_iter().enumerate() {
+        let vcpu = Vcpu::new_x86_64(
+            i as u8,
+            vm.fd(),
+            vm.supported_cpuid().clone(),
+            vm.supported_msrs().clone(),
+            pio_device_manager.io_bus.clone(),
+            exit_evt
+                .try_clone()
+                .map_err(Error::EventFd)
+                .map_err(StartMicrovmError::Internal)?,
+        )
+        .map_err(Error::Vcpu)
+        .map_err(StartMicrovmError::Internal)?;
+        // No configure_x86_64() here: boot configuration scribbles page
+        // tables over guest RAM. The saved KVM state carries everything.
+        vcpu.restore_state(state)
+            .map_err(Error::Vcpu)
+            .map_err(StartMicrovmError::Internal)?;
+        vcpus.push(vcpu);
+    }
+
+    let exit_code = Arc::new(AtomicI32::new(i32::MAX));
+    let mut vmm = Vmm {
+        guest_memory,
+        arch_memory_info,
+        kernel_cmdline,
+        vcpus_handles: Vec::new(),
+        exit_evt,
+        exit_observers: Vec::new(),
+        exit_code: exit_code.clone(),
+        vm,
+        mmio_device_manager,
+        pio_device_manager,
+    };
+
+    for serial_tty in serial_ttys {
+        setup_terminal_raw_mode(&mut vmm, Some(serial_tty), false);
+    }
+
+    // Device creation below mirrors build_microvm's order exactly — bus
+    // addresses and IRQ numbers are assigned by creation order and must
+    // match what the snapshotted guest saw.
+    attach_balloon_device(&mut vmm, event_manager, intc.clone())?;
+    attach_rng_device(&mut vmm, event_manager, intc.clone())?;
+
+    let mut console_id = 0;
+    if !vm_resources.disable_implicit_console {
+        attach_console_devices(
+            &mut vmm,
+            event_manager,
+            intc.clone(),
+            vm_resources,
+            None,
+            console_id,
+        )?;
+        console_id += 1;
+    }
+    for console_cfg in vm_resources.virtio_consoles.iter() {
+        attach_console_devices(
+            &mut vmm,
+            event_manager,
+            intc.clone(),
+            vm_resources,
+            Some(console_cfg),
+            console_id,
+        )?;
+        console_id += 1;
+    }
+
+    let export_table: Option<ExportTable> = if cfg!(feature = "gpu") {
+        Some(Default::default())
+    } else {
+        None
+    };
+
+    #[cfg(feature = "input")]
+    if !vm_resources.input_backends.is_empty() {
+        attach_input_devices(&mut vmm, &vm_resources.input_backends, intc.clone())?;
+    }
+
+    attach_fs_devices(
+        &mut vmm,
+        &vm_resources.fs,
+        &mut _shm_manager,
+        export_table,
+        intc.clone(),
+        exit_code,
+    )?;
+    #[cfg(feature = "blk")]
+    attach_block_devices(&mut vmm, &vm_resources.block, intc.clone())?;
+
+    if let Some(vsock) = vm_resources.vsock.get() {
+        attach_unixsock_vsock_device(&mut vmm, vsock, event_manager, intc.clone())?;
+    }
+
+    #[cfg(feature = "net")]
+    attach_net_devices(&mut vmm, &vm_resources.net, intc.clone())?;
+
+    // Push the saved virtio state into the freshly-created transports.
+    // Bus order is address order, the same order save_devices used.
+    let device_states = snapshot.device_states;
+    let mut idx = 0usize;
+    for (_addr, dev) in vmm.mmio_device_manager.bus.iter_devices() {
+        let mut locked = dev.lock().unwrap();
+        if let Some(t) = locked.as_mut_any().downcast_mut::<MmioTransport>() {
+            let st = device_states.get(idx).ok_or_else(|| {
+                StartMicrovmError::RestoreSnapshot(format!(
+                    "snapshot has {} virtio devices but the configuration created more",
+                    device_states.len()
+                ))
+            })?;
+            let created_type = t.snapshot_state().device_type;
+            if st.device_type != created_type {
+                return Err(err(format!(
+                    "virtio device order mismatch at index {idx}: snapshot type {} \
+                     vs created type {created_type}",
+                    st.device_type
+                )));
+            }
+            t.restore_from_state(st);
+            idx += 1;
+        }
+    }
+    if idx != device_states.len() {
+        return Err(err(format!(
+            "snapshot has {} virtio devices but the configuration created {idx}",
+            device_states.len()
+        )));
+    }
+
+    vmm.start_vcpus(vcpus)
+        .map_err(StartMicrovmError::Internal)?;
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    let vmm = Arc::new(Mutex::new(vmm));
+    event_manager
+        .add_subscriber(vmm.clone())
+        .map_err(StartMicrovmError::RegisterEvent)?;
+
+    Ok(vmm)
 }

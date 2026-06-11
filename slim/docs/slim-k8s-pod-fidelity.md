@@ -83,7 +83,7 @@ existing netns. The gap is engine wiring: `engine.rs` currently rejects
 **Validate:** a pod with app+sidecar containers — both run, share localhost,
 `kubectl logs -c sidecar` works, READY is `2/2`. New test/kube-sidecar.sh.
 
-## Phase 4 — init containers  ⬜
+## Phase 4 — init containers  ✅ DONE
 
 **Goal:** run `spec.initContainers[]` sequentially to completion before the
 main containers start (the setup/migration pattern).
@@ -120,4 +120,12 @@ pod `Pending`. Extend test/kube-sidecar.sh.
   shared volume). Liberties: emptyDir only (no configMap/secret/hostPath
   volumes); if the holder restarts, sidecars keep the stale netns until they
   exit and the level reconcile recreates them.
-- Phase 4 — init containers: ⬜
+- Phase 4 — init containers: ✅ DONE. `spec.initContainers` run sequentially
+  (`<ns>_<pod>.init.<name>`, restart-on-failure) to exit-0 before main containers
+  start; pod stays `Pending` with `Init:done/total` (server-side Table) and main
+  containers report `PodInitializing`; `initContainerStatuses[]` + the
+  `Initialized` condition reflect progress. kube-init.sh 6/6. Liberty: init
+  containers get their own bridge netns (the sandbox holder isn't up yet), not
+  the pod's — fine for the populate-a-volume/setup use; they do share emptyDir.
+
+**All four phases complete. Full suite: 94/94.**

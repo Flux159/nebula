@@ -169,10 +169,13 @@ impl EngineProxy {
         }
         let side = format!("{holder}.{container}");
         if self.engine.get_entry(&side).is_ok() {
-            side
-        } else {
-            holder
+            return side;
         }
+        let init = format!("{holder}.init.{container}");
+        if self.engine.get_entry(&init).is_ok() {
+            return init;
+        }
+        holder
     }
 }
 
@@ -295,18 +298,23 @@ struct Desired {
     template: Value,      // full pod spec
     labels: Value,        // pod labels
     restart: &'static str,
-    containers: Vec<Value>, // spec.containers, ordered
+    init_containers: Vec<Value>, // spec.initContainers, ordered (run before main)
+    containers: Vec<Value>,      // spec.containers, ordered
 }
 
 impl Desired {
-    /// Engine container name for container index `i`: the holder keeps the bare
-    /// `<ns>_<pod>` name; sidecars get `<ns>_<pod>.<container-name>`.
+    /// Engine container name for main container index `i`: the holder keeps the
+    /// bare `<ns>_<pod>` name; sidecars get `<ns>_<pod>.<container-name>`.
     fn cname(&self, i: usize) -> String {
         if i == 0 {
             self.holder_cname.clone()
         } else {
             format!("{}.{}", self.holder_cname, cspec_name(&self.containers[i]))
         }
+    }
+    /// Engine container name for init container index `i`.
+    fn init_cname(&self, i: usize) -> String {
+        format!("{}.init.{}", self.holder_cname, cspec_name(&self.init_containers[i]))
     }
 }
 
@@ -351,6 +359,9 @@ fn reconcile_once(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx) -> s
     // holder goes away, drop its Pod object too.
     let mut desired_cnames: std::collections::BTreeSet<String> = Default::default();
     for d in desired.values() {
+        for i in 0..d.init_containers.len() {
+            desired_cnames.insert(d.init_cname(i));
+        }
         for i in 0..d.containers.len() {
             desired_cnames.insert(d.cname(i));
         }
@@ -395,6 +406,7 @@ fn collect_workload(obj: &Value, out: &mut BTreeMap<String, Desired>, restart: &
     if containers.is_empty() {
         return;
     }
+    let init_containers = template.get("initContainers").and_then(|c| c.as_array()).cloned().unwrap_or_default();
     for i in 0..replicas {
         let pod_name = format!("{name}-{i}");
         let holder_cname = format!("{ns}_{pod_name}");
@@ -408,6 +420,7 @@ fn collect_workload(obj: &Value, out: &mut BTreeMap<String, Desired>, restart: &
                 template: template.clone(),
                 labels: labels.clone(),
                 restart,
+                init_containers: init_containers.clone(),
                 containers: containers.clone(),
             },
         );
@@ -425,6 +438,7 @@ fn collect_bare_pod(obj: &Value, out: &mut BTreeMap<String, Desired>) {
     if containers.is_empty() {
         return;
     }
+    let init_containers = template.get("initContainers").and_then(|c| c.as_array()).cloned().unwrap_or_default();
     let holder_cname = format!("{ns}_{name}");
     let restart = obj.pointer("/spec/restartPolicy").and_then(|v| v.as_str())
         .map(|p| if p == "Never" || p == "OnFailure" { "no" } else { "always" })
@@ -439,49 +453,117 @@ fn collect_bare_pod(obj: &Value, out: &mut BTreeMap<String, Desired>) {
             template,
             labels: obj.pointer("/metadata/labels").cloned().unwrap_or(json!({})),
             restart,
+            init_containers,
             containers,
         },
     );
 }
 
-/// Ensure all of a pod's containers exist (holder/container-0 first so sidecars
-/// can join its netns), then sync one aggregated Pod object.
+/// Ensure a pod's containers. Init containers run first, in order, each to
+/// exit-0 before the next; main containers (holder first, then sidecars) start
+/// only once all init containers have succeeded. Then sync one Pod object.
 fn ensure_pod(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: &Desired) {
-    for (i, cspec) in d.containers.iter().enumerate() {
-        let cname = d.cname(i);
-        if engine.get_entry(&cname).is_ok() {
-            continue;
-        }
-        let Some(req) = build_create_req(store, ctx, d, i, cspec) else { continue };
-        let image = req.config.image.clone();
-        if engine.store.resolve(&image).is_none() {
-            let _ = engine.ensure_image(&image);
-        }
-        match engine.create(&req, Some(&cname)) {
-            Ok(_) => {
-                if let Err(e) = engine.start(&cname) {
-                    eprintln!("slimd: bridge start {cname} failed: {e}");
+    // Init containers run with their own bridge netns (the pod sandbox holder
+    // isn't up yet) + the pod's emptyDir volumes — the canonical "populate a
+    // shared volume before the app starts" use. Restart-on-failure so a flaky
+    // init retries (Never pods don't retry).
+    let init_restart = if d.restart == "no" { "no" } else { "on-failure" };
+    let mut init_done = 0usize;
+    let mut initializing = false;
+    for (i, ispec) in d.init_containers.iter().enumerate() {
+        let cname = d.init_cname(i);
+        match engine.get_entry(&cname) {
+            Ok(entry) => {
+                let st = entry.c.lock().unwrap().state.clone();
+                if (st.status == "exited" || st.status == "dead") && st.exit_code == 0 {
+                    init_done += 1;
+                    continue; // this init finished; move to the next
                 }
+                initializing = true; // running, created, or retrying-on-failure
+                break;
             }
-            // A sidecar can fail to create if the holder isn't running yet; the
-            // next reconcile tick retries (level-based).
-            Err(e) => eprintln!("slimd: bridge create {cname} failed: {e}"),
+            Err(_) => {
+                if let Some(req) = build_create_req(store, ctx, d, ispec, "bridge", init_restart, false) {
+                    let image = req.config.image.clone();
+                    if engine.store.resolve(&image).is_none() {
+                        let _ = engine.ensure_image(&image);
+                    }
+                    match engine.create(&req, Some(&cname)) {
+                        Ok(_) => {
+                            if let Err(e) = engine.start(&cname) {
+                                eprintln!("slimd: bridge init start {cname} failed: {e}");
+                            }
+                        }
+                        Err(e) => eprintln!("slimd: bridge init create {cname} failed: {e}"),
+                    }
+                }
+                initializing = true;
+                break;
+            }
         }
     }
-    sync_pod_status(engine, store, ctx, d);
+
+    if !initializing {
+        // All init containers done → bring up the main containers.
+        for (i, cspec) in d.containers.iter().enumerate() {
+            let cname = d.cname(i);
+            if engine.get_entry(&cname).is_ok() {
+                continue;
+            }
+            let (net, dns) = if i == 0 {
+                ("bridge".to_string(), true)
+            } else {
+                (format!("container:{}", d.holder_cname), false)
+            };
+            let Some(req) = build_create_req(store, ctx, d, cspec, &net, d.restart, dns) else { continue };
+            let image = req.config.image.clone();
+            if engine.store.resolve(&image).is_none() {
+                let _ = engine.ensure_image(&image);
+            }
+            match engine.create(&req, Some(&cname)) {
+                Ok(_) => {
+                    if let Err(e) = engine.start(&cname) {
+                        eprintln!("slimd: bridge start {cname} failed: {e}");
+                    }
+                }
+                Err(e) => eprintln!("slimd: bridge create {cname} failed: {e}"),
+            }
+        }
+    }
+    sync_pod_status(engine, store, ctx, d, init_done);
 }
 
-/// Build aggregated Pod status — one containerStatus per spec container — and
-/// store it. Pod phase is derived from the set of container states.
-fn sync_pod_status(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: &Desired) {
+/// Build aggregated Pod status (init + main containerStatuses) and store it.
+/// While init containers are still running the main containers report
+/// `PodInitializing` and the pod stays `Pending`.
+fn sync_pod_status(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: &Desired, init_done: usize) {
+    let total_init = d.init_containers.len();
+    let initializing = init_done < total_init;
+
+    let mut init_statuses = Vec::with_capacity(total_init);
+    for (i, ispec) in d.init_containers.iter().enumerate() {
+        let name = cspec_name(ispec);
+        let image = ispec.get("image").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        match engine.get_entry(&d.init_cname(i)) {
+            Ok(e) => {
+                let c = e.c.lock().unwrap();
+                init_statuses.push(container_status(&name, &image, &c.id, &c.state, None));
+            }
+            Err(_) => init_statuses.push(waiting_status(&name, &image, "PodInitializing")),
+        }
+    }
+
     let mut cstatuses = Vec::with_capacity(d.containers.len());
     let (mut running, mut term_ok, mut term_bad, mut total) = (0usize, 0usize, 0usize, 0usize);
     for (i, cspec) in d.containers.iter().enumerate() {
         total += 1;
-        let cname = d.cname(i);
         let name = cspec_name(cspec);
         let image = cspec.get("image").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        match engine.get_entry(&cname) {
+        if initializing {
+            cstatuses.push(waiting_status(&name, &image, "PodInitializing"));
+            continue;
+        }
+        match engine.get_entry(&d.cname(i)) {
             Ok(entry) => {
                 let c = entry.c.lock().unwrap();
                 match c.state.status.as_str() {
@@ -490,13 +572,16 @@ fn sync_pod_status(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: 
                     "exited" | "dead" => term_bad += 1,
                     _ => {}
                 }
-                let ready_override = ctx.readiness.lock().unwrap().get(&cname).copied();
+                let ready_override = ctx.readiness.lock().unwrap().get(&d.cname(i)).copied();
                 cstatuses.push(container_status(&name, &image, &c.id, &c.state, ready_override));
             }
             Err(_) => cstatuses.push(waiting_status(&name, &image, "ContainerCreating")),
         }
     }
-    let phase = if total > 0 && running == total {
+
+    let phase = if initializing {
+        "Pending"
+    } else if total > 0 && running == total {
         "Running"
     } else if term_bad > 0 && d.restart == "no" {
         "Failed"
@@ -509,7 +594,7 @@ fn sync_pod_status(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: 
         .get_entry(&d.holder_cname)
         .map(|e| e.c.lock().unwrap().ip.clone())
         .unwrap_or_default();
-    sync_pod(store, d, phase, &ip, "", &cstatuses);
+    sync_pod(store, d, phase, &ip, "", &cstatuses, &init_statuses);
 }
 
 /// Build a k8s containerStatus from a live engine container State. `ready_override`
@@ -547,18 +632,20 @@ fn waiting_status(name: &str, image: &str, reason: &str) -> Value {
     })
 }
 
-/// Translate one pod container (`cspec`, index `idx`) into a docker-style create
-/// request, resolving env from ConfigMaps/Secrets and emptyDir mounts. Container
-/// 0 is the pod sandbox (bridge net + DNS); the rest join its netns.
+/// Translate one pod container (`cspec`) into a docker-style create request,
+/// resolving env from ConfigMaps/Secrets and emptyDir mounts. `network_mode` is
+/// "bridge" for the sandbox holder / init containers, or `container:<holder>` for
+/// sidecars; `holder_dns` adds the pod's DNS aliases (holder only).
 fn build_create_req(
     store: &SharedStore,
     ctx: &BridgeCtx,
     d: &Desired,
-    idx: usize,
     cspec: &Value,
+    network_mode: &str,
+    restart: &str,
+    holder_dns: bool,
 ) -> Option<slim_api::container::ContainerCreateRequest> {
     let image = cspec.get("image").and_then(|v| v.as_str())?.to_string();
-    let is_holder = idx == 0;
 
     let mut env = Vec::new();
     // In-cluster config for operators (client-go reads these env vars).
@@ -625,24 +712,17 @@ fn build_create_req(
     if let Some(sa_dir) = ensure_sa(ctx, &d.pod_ns) {
         binds.push(format!("{}:/var/run/secrets/kubernetes.io/serviceaccount:ro", sa_dir.display()));
     }
-    binds.extend(empty_dir_binds(ctx, d, cspec));
+    binds.extend(volume_binds(ctx, store, d, cspec));
 
-    // Holder owns the pod sandbox (bridge net + ports + DNS); sidecars join its
-    // netns via container:<holder> (engine resolves to /proc/<pid>/ns/net).
-    let network_mode = if is_holder {
-        "bridge".to_string()
-    } else {
-        format!("container:{}", d.holder_cname)
-    };
     let host_config = slim_api::container::HostConfig {
-        restart_policy: slim_api::container::RestartPolicy { name: d.restart.to_string(), maximum_retry_count: 0 },
-        network_mode,
+        restart_policy: slim_api::container::RestartPolicy { name: restart.to_string(), maximum_retry_count: 0 },
+        network_mode: network_mode.to_string(),
         binds,
         ..Default::default()
     };
     // DNS aliases (pod name + app label) belong to the holder, which owns the IP.
     let mut endpoints = std::collections::BTreeMap::new();
-    if is_holder {
+    if holder_dns {
         let mut aliases = vec![d.pod_name.clone()];
         if let Some(app) = d.labels.get("app").and_then(|v| v.as_str()) {
             aliases.push(app.to_string());
@@ -657,16 +737,15 @@ fn build_create_req(
     })
 }
 
-/// emptyDir volume mounts for `cspec`: resolve its volumeMounts against the pod's
-/// emptyDir volumes, backing each with a shared host dir so the pod's containers
-/// share the data. Non-emptyDir volume types are skipped (a slim liberty).
-fn empty_dir_binds(ctx: &BridgeCtx, d: &Desired, cspec: &Value) -> Vec<String> {
-    let mut empty: std::collections::BTreeSet<String> = Default::default();
+/// Resolve a container's volumeMounts against the pod's volumes into host binds.
+/// Supports emptyDir (shared per-pod host dir), configMap/secret (materialized to
+/// files, mounted read-only), and hostPath (direct bind). subPath + readOnly are
+/// honored. Other volume types (downwardAPI/projected/csi/...) are skipped.
+fn volume_binds(ctx: &BridgeCtx, store: &SharedStore, d: &Desired, cspec: &Value) -> Vec<String> {
+    let mut by_name: BTreeMap<String, Value> = BTreeMap::new();
     for v in d.template.get("volumes").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
-        if v.get("emptyDir").is_some() {
-            if let Some(n) = v.get("name").and_then(|x| x.as_str()) {
-                empty.insert(n.to_string());
-            }
+        if let Some(n) = v.get("name").and_then(|x| x.as_str()) {
+            by_name.insert(n.to_string(), v);
         }
     }
     let mut out = Vec::new();
@@ -677,17 +756,111 @@ fn empty_dir_binds(ctx: &BridgeCtx, d: &Desired, cspec: &Value) -> Vec<String> {
         ) else {
             continue;
         };
-        if !empty.contains(name) {
-            continue;
+        let Some(vol) = by_name.get(name) else { continue };
+        let sub = m.get("subPath").and_then(|v| v.as_str());
+        let ro = m.get("readOnly").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        if vol.get("emptyDir").is_some() {
+            let mut host = ctx.vol_root.join(&d.holder_cname).join(name);
+            if let Some(s) = sub {
+                host = host.join(s);
+            }
+            if std::fs::create_dir_all(&host).is_ok() {
+                out.push(bind_str(&host, mount_path, ro));
+            }
+        } else if let Some(cm) = vol.get("configMap") {
+            let cmname = cm.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let data = config_data(store, "configmaps", &d.pod_ns, cmname);
+            if let Some(b) = materialize_bind(ctx, d, &format!("cm-{name}"), &data, cm.get("items"), mount_path, sub) {
+                out.push(b);
+            }
+        } else if let Some(sec) = vol.get("secret") {
+            let sname = sec.get("secretName").and_then(|v| v.as_str()).unwrap_or("");
+            let data = secret_files(store, &d.pod_ns, sname);
+            if let Some(b) = materialize_bind(ctx, d, &format!("sec-{name}"), &data, sec.get("items"), mount_path, sub) {
+                out.push(b);
+            }
+        } else if let Some(hp) = vol.get("hostPath") {
+            if let Some(path) = hp.get("path").and_then(|v| v.as_str()) {
+                let mut src = PathBuf::from(path);
+                if let Some(s) = sub {
+                    src = src.join(s);
+                }
+                out.push(bind_str(&src, mount_path, ro));
+            }
         }
-        let mut host = ctx.vol_root.join(&d.holder_cname).join(name);
-        if let Some(sub) = m.get("subPath").and_then(|v| v.as_str()) {
-            host = host.join(sub);
+    }
+    out
+}
+
+fn bind_str(host: &std::path::Path, mount_path: &str, ro: bool) -> String {
+    if ro {
+        format!("{}:{}:ro", host.display(), mount_path)
+    } else {
+        format!("{}:{}", host.display(), mount_path)
+    }
+}
+
+/// Materialize configMap/secret data to a per-pod host dir (one file per key,
+/// honoring `items` key→path selection) and return a read-only bind. With a
+/// subPath, bind just that one file. Snapshot at create time (a slim liberty:
+/// updates to the ConfigMap/Secret don't propagate to a running container).
+fn materialize_bind(
+    ctx: &BridgeCtx,
+    d: &Desired,
+    tag: &str,
+    data: &BTreeMap<String, String>,
+    items: Option<&Value>,
+    mount_path: &str,
+    sub: Option<&str>,
+) -> Option<String> {
+    let dir = ctx.vol_root.join(&d.holder_cname).join(tag);
+    std::fs::create_dir_all(&dir).ok()?;
+    let mut files: Vec<(String, String)> = Vec::new();
+    if let Some(arr) = items.and_then(|v| v.as_array()) {
+        for it in arr {
+            let k = it.get("key").and_then(|v| v.as_str()).unwrap_or("");
+            let p = it.get("path").and_then(|v| v.as_str()).unwrap_or(k);
+            if let Some(val) = data.get(k) {
+                files.push((p.to_string(), val.clone()));
+            }
         }
-        if std::fs::create_dir_all(&host).is_err() {
-            continue;
+    } else {
+        for (k, v) in data {
+            files.push((k.clone(), v.clone()));
         }
-        out.push(format!("{}:{}", host.display(), mount_path));
+    }
+    for (rel, val) in &files {
+        let fpath = dir.join(rel);
+        if let Some(parent) = fpath.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&fpath, val);
+    }
+    match sub {
+        Some(s) => Some(bind_str(&dir.join(s), mount_path, true)),
+        None => Some(bind_str(&dir, mount_path, true)),
+    }
+}
+
+/// Secret data decoded to plaintext: base64 `.data` values + plaintext `.stringData`.
+fn secret_files(store: &SharedStore, ns: &str, name: &str) -> BTreeMap<String, String> {
+    let Some(info) = store.lookup("", "secrets") else { return BTreeMap::new() };
+    let Some(obj) = store.get(&info, ns, name) else { return BTreeMap::new() };
+    let mut out = BTreeMap::new();
+    if let Some(m) = obj.get("data").and_then(|d| d.as_object()) {
+        for (k, v) in m {
+            if let Some(s) = v.as_str() {
+                out.insert(k.clone(), decode_secret(s));
+            }
+        }
+    }
+    if let Some(m) = obj.get("stringData").and_then(|d| d.as_object()) {
+        for (k, v) in m {
+            if let Some(s) = v.as_str() {
+                out.insert(k.clone(), s.to_string());
+            }
+        }
     }
     out
 }
@@ -766,7 +939,7 @@ fn decode_secret(v: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| v.to_string())
 }
 
-fn sync_pod(store: &SharedStore, d: &Desired, phase: &str, ip: &str, msg: &str, cstatuses: &[Value]) {
+fn sync_pod(store: &SharedStore, d: &Desired, phase: &str, ip: &str, msg: &str, cstatuses: &[Value], init_statuses: &[Value]) {
     let Some(info) = store.lookup("", "pods") else { return };
     let mut labels = d.labels.clone();
     if let Some(o) = labels.as_object_mut() {
@@ -776,10 +949,13 @@ fn sync_pod(store: &SharedStore, d: &Desired, phase: &str, ip: &str, msg: &str, 
         let mut it = d.owner.splitn(3, '/');
         (it.next().unwrap_or("").to_string(), { it.next(); it.next().unwrap_or("").to_string() })
     };
-    // Pod is Ready iff every container reports ready (Phase 2 makes per-container
-    // readiness probe-driven; for now ready == running).
+    // Pod is Ready iff every main container reports ready.
     let all_ready = !cstatuses.is_empty()
         && cstatuses.iter().all(|c| c.get("ready").and_then(|r| r.as_bool()).unwrap_or(false));
+    // Initialized iff every init container has terminated successfully.
+    let initialized = init_statuses
+        .iter()
+        .all(|c| c.pointer("/state/terminated/exitCode").and_then(|v| v.as_i64()) == Some(0));
     let yn = |b: bool| if b { "True" } else { "False" };
     let pod = json!({
         "apiVersion": "v1",
@@ -796,10 +972,11 @@ fn sync_pod(store: &SharedStore, d: &Desired, phase: &str, ip: &str, msg: &str, 
             "podIP": ip,
             "hostIP": "10.88.0.1",
             "message": msg,
+            "initContainerStatuses": init_statuses,
             "containerStatuses": cstatuses,
             "conditions": [
                 {"type":"PodScheduled","status":"True"},
-                {"type":"Initialized","status":"True"},
+                {"type":"Initialized","status": yn(initialized)},
                 {"type":"ContainersReady","status": yn(all_ready)},
                 {"type":"Ready","status": yn(all_ready)},
             ],

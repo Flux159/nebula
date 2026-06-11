@@ -102,6 +102,9 @@ struct KrunApi {
     krun_vm_pause: Option<unsafe extern "C" fn(u32) -> i32>,
     krun_vm_resume: Option<unsafe extern "C" fn(u32) -> i32>,
     krun_vm_save: Option<unsafe extern "C" fn(u32, *const c_char) -> i32>,
+    /// Optional: restore from a snapshot directory instead of booting
+    /// (linux x86_64 fork).
+    krun_set_restore: Option<unsafe extern "C" fn(u32, *const c_char) -> i32>,
 }
 
 #[cfg(windows)]
@@ -209,6 +212,7 @@ fn load_api() -> Result<&'static KrunApi> {
                 krun_vm_pause: sym(handle, "krun_vm_pause").ok(),
                 krun_vm_resume: sym(handle, "krun_vm_resume").ok(),
                 krun_vm_save: sym(handle, "krun_vm_save").ok(),
+                krun_set_restore: sym(handle, "krun_set_restore").ok(),
             })
         }
     });
@@ -658,6 +662,20 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
                         | VIRGLRENDERER_USE_EXTERNAL_BLOB,
                 ),
             )?;
+        }
+
+        // Restore from a snapshot directory instead of cold-booting. The
+        // device config above must match what the VM was saved with — the
+        // VMM re-creates the devices from it, then applies their saved state.
+        if let Some(restore_dir) = &spec.restore_path {
+            let set_restore = api.krun_set_restore.ok_or_else(|| {
+                Error::backend(
+                    BACKEND,
+                    "this libkrun build lacks snapshot restore (krun_set_restore)",
+                )
+            })?;
+            let dir_c = cstr(&restore_dir.to_string_lossy());
+            check("krun_set_restore", set_restore(ctx, dir_c.as_ptr()))?;
         }
 
         // Worker control channel: serves pause/save/resume for snapshots

@@ -340,3 +340,30 @@ limitations; routine TODOs live in code.)
   * Windows/WHP parity after KVM works: same flow, vcpu state via
     WHvGet/SetVirtualProcessorRegisters (alignment wrapper) + XSAVE state;
     memory restore via MapViewOfFile copy-on-write.
+
+- 2026-06-11 — krun restore WORKS on Linux/KVM: full round-trip (snapshot a
+  live vessel -> stop -> restore) resumes in ~107ms with tmpfs contents and
+  uptime continuity intact. Three findings from getting it green:
+  * mmap file offsets must be page-aligned: memory.bin's region data now
+    starts at a 4KiB boundary (header padded with a hole). First attempt
+    failed with EINVAL mapping region @0x0 at offset 40.
+  * Ring-cursor reconstruction from RAM must resume BOTH cursors at
+    `used.idx`, not next_avail at `avail.idx`: descriptors the driver posted
+    that the device never returned (vsock/net RX buffer pools the device
+    holds long-term, in-flight requests) live between used.idx and avail.idx,
+    and the device's internal copies die with the old process. Restoring
+    next_avail=avail.idx skips them — symptom: guest alive (timer ticks) but
+    ALL vsock dead (muxer has no RX buffers to deliver into), agent never
+    answers.
+  * After the activate() replay, kick every ready queue's eventfd once: the
+    driver's notification-suppression state predates the restore, so the
+    re-offered descriptors would otherwise sit unprocessed until the next
+    organic kick.
+  * Bonus fix: libkrun's build.rs used #[cfg(target_os)] (HOST os in a build
+    script) and leaked -install_name into mac->windows-gnu cross-links; now
+    dispatches on CARGO_CFG_TARGET_OS. Upstream candidate.
+  * kvmclock is restored to the saved instant, so guest wall-clock resumes
+    behind real time until NTP/agent corrects it — same semantics as VZ.
+  * `cargo build -p libkrun` WITHOUT `--features blk,net` produces a
+    featureless .so that breaks vessel boot ("NetSpec::Nat needs NET=1") —
+    always build the fork on the ubuntu box with `--features blk,net`.
