@@ -187,3 +187,49 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/nebula-*-windows-x86_64.zip*
+
+  # nebula-slim host CLIs: docker-slim / kubectl-slim / helm-slim — pure
+  # Rust, no Go runtime, the embed kit's client side. The slim guest
+  # (rootfs-slim) ships from the Guest images workflow.
+  slim-clis:
+    strategy:
+      matrix:
+        include:
+          - { runner: macos-15, os: macos, arch: aarch64 }
+          - { runner: ubuntu-24.04, os: linux, arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, os: linux, arch: aarch64 }
+          - { runner: windows-latest, os: windows, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: slim
+      - name: Build slim CLIs
+        working-directory: slim
+        run: cargo build --release -p docker-slim -p kubectl-slim -p helm-slim
+      - name: Package
+        shell: bash
+        run: |
+          ver=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          stage="nebula-slim-clis-${ver}-${{ matrix.os }}-${{ matrix.arch }}"
+          mkdir -p "dist/$stage"
+          ext=""
+          [ "${{ matrix.os }}" = "windows" ] && ext=".exe"
+          for b in docker-slim kubectl-slim helm-slim; do
+            cp "slim/target/release/$b$ext" "dist/$stage/"
+          done
+          tar -C dist -czf "dist/$stage.tar.gz" "$stage"
+          (cd dist && shasum -a 256 "$stage.tar.gz" > "$stage.tar.gz.sha256"             || sha256sum "$stage.tar.gz" > "$stage.tar.gz.sha256")
+          ls -lh dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nebula-slim-clis-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/nebula-slim-clis-*.tar.gz*
+          if-no-files-found: error
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/nebula-slim-clis-*.tar.gz*

@@ -34,6 +34,23 @@ jobs:
         run: vessel/build-rootfs.sh
       - name: Package
         run: scripts/package-images.sh
+      # nebula-slim guest: slimd + pause cross-built with zig as the musl
+      # C compiler (ring), then the slim-flavor rootfs.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+      - name: Build slimd + pause (musl)
+        run: ARCH=${{ matrix.arch }} slim/scripts/build-musl.sh
+      - name: Build slim rootfs
+        run: |
+          export SLIMD_BIN="$PWD/slim/target/${{ matrix.musl }}/release/slimd"
+          export PAUSE_BIN="$PWD/slim/target/${{ matrix.musl }}/release/pause"
+          FLAVOR=slim vessel/build-rootfs.sh
+      - name: Package slim rootfs
+        run: |
+          gzip -9 -c vessel/out/rootfs-slim.img > "dist/rootfs-slim-${{ matrix.arch }}.img.gz"
+          (cd dist && shasum -a 256 "rootfs-slim-${{ matrix.arch }}.img.gz" >> "SHA256SUMS-${{ matrix.arch }}")
+          ls -lh dist/
       - uses: actions/upload-artifact@v4
         with:
           name: guest-images-${{ matrix.arch }}
@@ -45,4 +62,5 @@ jobs:
           files: |
             dist/kernel-Image-${{ matrix.arch }}.gz
             dist/rootfs-${{ matrix.arch }}.img.gz
+            dist/rootfs-slim-${{ matrix.arch }}.img.gz
             dist/SHA256SUMS-${{ matrix.arch }}
