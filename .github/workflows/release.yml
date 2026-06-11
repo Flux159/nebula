@@ -6,6 +6,11 @@ name: Release build
 # DMG to the GitHub release).
 on:
   workflow_dispatch:
+    inputs:
+      notarize:
+        description: "Apple notarize + staple (slow, ~15 min; required for distribution, off for pipeline test runs)"
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
 
@@ -47,7 +52,11 @@ jobs:
       - name: Build Nebula.app
         run: scripts/bundle-app.sh
 
+      # Tags always get the real Developer ID + notarization; manual runs
+      # only when asked — the ad-hoc DMG below is enough to verify the
+      # pipeline and saves ~15 min per iteration.
       - name: Sign, notarize, staple
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.notarize
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
@@ -56,6 +65,16 @@ jobs:
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: scripts/sign-release.sh
+
+      - name: Package DMG (ad-hoc signed, no notarization)
+        if: "!(startsWith(github.ref, 'refs/tags/v') || inputs.notarize)"
+        run: |
+          ver=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          mkdir -p dist
+          hdiutil create -volname "Nebula" \
+            -srcfolder ui/src-tauri/target/release/bundle/macos/Nebula.app \
+            -ov -format UDZO "dist/Nebula_${ver}_aarch64.dmg" >/dev/null
+          echo "ad-hoc DMG: dist/Nebula_${ver}_aarch64.dmg (right-click-open / xattr -d com.apple.quarantine to run)"
 
       - uses: actions/upload-artifact@v4
         with:
