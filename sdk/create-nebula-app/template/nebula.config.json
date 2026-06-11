@@ -1,0 +1,10 @@
+{
+  "flavor": "{{FLAVOR}}",
+  "apiPort": 7461,
+  "dnsPort": 42061,
+  "k8sPort": 6461,
+  "dnsZone": "{{APP_NAME}}.local",
+  "maxRamMib": 8192,
+  "cpus": 4,
+  "dataDiskGib": 32
+}

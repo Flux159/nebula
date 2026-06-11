@@ -1,0 +1,11 @@
+{
+  "name": "{{APP_NAME}}",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "engine:up": "node scripts/engine.mjs up",
+    "engine:down": "node scripts/engine.mjs down",
+    "engine:status": "node scripts/engine.mjs status",
+    "start": "node src/index.mjs"
+  }
+}

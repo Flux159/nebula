@@ -1,6 +1,14 @@
 # Nebula — "Build Your Own Agent Orchestrator" documentation (plan)
 
-Status: **planned**, not yet written. This is the spec for a guide we publish
+Status: **planned**, not yet written.
+
+> Progress 2026-06-11: deliverable #1 exists in v0 — `sdk/create-nebula-app`
+> scaffolds a dependency-free app (slim engine by default, `--full` opt-out)
+> with engine bootstrap, a vendored API client, AGENTS.md for coding agents,
+> and the components/ contract stub. Verified end-to-end against CI-built
+> slim artifacts (engine up 460ms; live VM fork demo green). The first
+> component (model-config: llama.cpp + API keys, from the galaxy app) slots
+> into components/ per the v0 contract in the template. This is the spec for a guide we publish
 **after** Nebula is open-sourced and Luminal ships. It is not the guide itself;
 it captures the goal, the deliverables, the outline, and open questions so the
 guide can be written (by us or by an agent) without re-deriving the vision.

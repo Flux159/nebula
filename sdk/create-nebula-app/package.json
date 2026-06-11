@@ -1,0 +1,10 @@
+{
+  "name": "create-nebula-app",
+  "version": "0.1.0",
+  "description": "Scaffold a local-first app on the Nebula engine (slim by default): isolated microVMs, containers, kubernetes, snapshots and live branching — all on the user's machine.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": { "create-nebula-app": "./index.mjs" },
+  "files": ["index.mjs", "template"],
+  "repository": { "type": "git", "url": "https://github.com/Flux159/nebula", "directory": "sdk/create-nebula-app" }
+}
