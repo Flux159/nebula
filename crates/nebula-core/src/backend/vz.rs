@@ -302,7 +302,6 @@ impl VmHandle for VzVm {
 // memory-state snapshots.
 // ---------------------------------------------------------------------------
 
-use serde::{Deserialize, Serialize};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 

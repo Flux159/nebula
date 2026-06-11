@@ -58,8 +58,27 @@ impl Display for CreateMmioTransportError {
 ///
 /// Typically one page (4096 bytes) of MMIO address space is sufficient to handle this transport
 /// and inner virtio device.
+/// Snapshot image of an MMIO transport and its (frozen) queue config.
+#[derive(Debug, Clone)]
+pub struct MmioTransportState {
+    pub device_type: u32,
+    pub features_select: u32,
+    pub acked_features_select: u32,
+    pub queue_select: u32,
+    pub device_status: u32,
+    pub config_generation: u32,
+    pub shm_region_select: u32,
+    pub interrupt_status: u64,
+    pub acked_features: u64,
+    pub queue_states: Vec<QueueState>,
+}
+
 pub struct MmioTransport {
     device: Arc<Mutex<dyn VirtioDevice>>,
+    /// Queue configuration frozen at DRIVER_OK (virtio forbids
+    /// reconfiguration while active) — captured for snapshots, since the
+    /// live queues move into the device/worker at activation.
+    activated_queue_states: Option<Vec<QueueState>>,
     // The register where feature bits are stored.
     pub(crate) features_select: u32,
     // The register where features page is selected.
@@ -183,6 +202,7 @@ impl MmioTransport {
         Ok(MmioTransport {
             interrupt: InterruptTransport::new(intc, debug_log_target)?,
             device,
+            activated_queue_states: None,
             features_select: 0,
             acked_features_select: 0,
             queue_select: 0,
@@ -194,6 +214,72 @@ impl MmioTransport {
             queue_config,
             shm_region_select: 0,
         })
+    }
+
+    /// Capture the transport + queue state for a snapshot. The vcpus must
+    /// be paused and the device quiesced (workers drained).
+    pub fn snapshot_state(&self) -> MmioTransportState {
+        let queue_states = match (&self.activated_queue_states, &self.queues) {
+            // Post-activation: the frozen-at-DRIVER_OK configuration.
+            (Some(states), _) => states.clone(),
+            // Pre-activation: whatever the driver has configured so far.
+            (None, Some(queues)) => queues.iter().map(|q| q.save_state()).collect(),
+            (None, None) => Vec::new(),
+        };
+        MmioTransportState {
+            device_type: self.locked_device().device_type(),
+            features_select: self.features_select,
+            acked_features_select: self.acked_features_select,
+            queue_select: self.queue_select,
+            device_status: self.device_status,
+            config_generation: self.config_generation,
+            shm_region_select: self.shm_region_select,
+            interrupt_status: self.interrupt.0.status.load(Ordering::SeqCst) as u64,
+            acked_features: self.locked_device().acked_features(),
+            queue_states,
+        }
+    }
+
+    /// Restore transport + device state from a snapshot. Queue ring indices
+    /// are reconstructed from (already restored) guest memory; if the device
+    /// was active at capture time its activation is replayed, which respawns
+    /// device workers with the restored queues.
+    pub fn restore_from_state(&mut self, st: &MmioTransportState) {
+        self.features_select = st.features_select;
+        self.acked_features_select = st.acked_features_select;
+        self.queue_select = st.queue_select;
+        self.config_generation = st.config_generation;
+        self.shm_region_select = st.shm_region_select;
+        self.interrupt
+            .0
+            .status
+            .store(st.interrupt_status as usize, Ordering::SeqCst);
+        self.locked_device().set_acked_features(st.acked_features);
+
+        let mut queues = Self::create_queues(&self.queue_config);
+        for (q, qs) in queues.iter_mut().zip(st.queue_states.iter()) {
+            q.restore_state(qs);
+            if qs.ready != 0 {
+                // Device-side ring positions: the avail/used indices the
+                // driver and a quiesced device agree on live in guest RAM.
+                use vm_memory::{Bytes, GuestAddress};
+                let avail_idx: u16 = self
+                    .mem
+                    .read_obj(GuestAddress(qs.avail_ring + 2))
+                    .unwrap_or(qs.next_avail);
+                let used_idx: u16 = self
+                    .mem
+                    .read_obj(GuestAddress(qs.used_ring + 2))
+                    .unwrap_or(qs.next_used);
+                q.restore_ring_positions(avail_idx, used_idx);
+            }
+        }
+        self.queues = Some(queues);
+
+        self.device_status = st.device_status;
+        if st.device_status & device_status::DRIVER_OK != 0 {
+            self.activate();
+        }
     }
 
     /// Create queues from queue configuration.
@@ -302,6 +388,7 @@ impl MmioTransport {
         let Some(queues) = self.queues.take() else {
             return;
         };
+        self.activated_queue_states = Some(queues.iter().map(|q| q.save_state()).collect());
 
         let mut device_queues: Vec<DeviceQueue> = queues
             .into_iter()

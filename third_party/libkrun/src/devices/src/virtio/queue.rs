@@ -380,6 +380,14 @@ impl Queue {
         }
     }
 
+    /// Set the device-side ring cursors (used at snapshot restore, where
+    /// the agreed positions are read back from guest RAM).
+    pub fn restore_ring_positions(&mut self, next_avail: u16, next_used: u16) {
+        self.next_avail = Wrapping(next_avail);
+        self.next_used = Wrapping(next_used);
+        self.num_added = Wrapping(0);
+    }
+
     /// Restore driver-visible state captured by [`save_state`](Self::save_state).
     pub fn restore_state(&mut self, st: &QueueState) {
         self.max_size = st.max_size;
