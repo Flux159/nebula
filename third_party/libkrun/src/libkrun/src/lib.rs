@@ -153,7 +153,7 @@ impl KrunfwBindings {
 }
 
 #[derive(Clone)]
-#[cfg(feature = "net")]
+#[cfg(all(unix, feature = "net"))]
 enum LegacyNetworkConfig {
     VirtioNetPasst(RawFd),
     VirtioNetGvproxy(PathBuf),
@@ -168,7 +168,7 @@ struct ContextConfig {
     env: Option<String>,
     args: Option<String>,
     rlimits: Option<String>,
-    #[cfg(feature = "net")]
+    #[cfg(all(unix, feature = "net"))]
     legacy_net_cfg: Option<LegacyNetworkConfig>,
     #[cfg(feature = "net")]
     legacy_mac: Option<[u8; 6]>,
@@ -1012,7 +1012,7 @@ const NET_ALL_FEATURES: u32 = NET_FEATURE_CSUM
 
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
-#[cfg(feature = "net")]
+#[cfg(all(unix, feature = "net"))]
 pub unsafe extern "C" fn krun_add_net_unixstream(
     ctx_id: u32,
     c_path: *const c_char,
@@ -1073,7 +1073,7 @@ pub unsafe extern "C" fn krun_add_net_unixstream(
 
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
-#[cfg(feature = "net")]
+#[cfg(all(unix, feature = "net"))]
 pub unsafe extern "C" fn krun_add_net_usernet(ctx_id: u32, c_mac: *const u8) -> i32 {
     // In-process usermode NAT (no passt/gvproxy): a socketpair where one end
     // feeds the standard unixstream virtio-net backend and the other is
@@ -1110,7 +1110,54 @@ pub unsafe extern "C" fn krun_add_net_usernet(ctx_id: u32, c_mac: *const u8) -> 
 
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
-#[cfg(feature = "net")]
+#[cfg(all(windows, feature = "net"))]
+pub unsafe extern "C" fn krun_add_net_usernet(ctx_id: u32, c_mac: *const u8) -> i32 {
+    // Same in-process NAT, but over a loopback TCP pair (Windows has no
+    // socketpair): one end feeds the winsock virtio-net backend, the other
+    // is served by the usernet thread.
+    use std::os::windows::io::IntoRawSocket;
+
+    let mac: [u8; 6] = match unsafe { slice::from_raw_parts(c_mac, 6) }.try_into() {
+        Ok(m) => m,
+        Err(_) => return -libc::EINVAL,
+    };
+
+    let pair = (|| -> std::io::Result<(std::net::TcpStream, std::net::TcpStream)> {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let addr = listener.local_addr()?;
+        let a = std::net::TcpStream::connect(addr)?;
+        let (b, _) = listener.accept()?;
+        a.set_nodelay(true)?;
+        b.set_nodelay(true)?;
+        Ok((a, b))
+    })();
+    let (nat_end, device_end) = match pair {
+        Ok(p) => p,
+        Err(e) => {
+            error!("usernet: creating loopback pair failed: {e}");
+            return -libc::EIO;
+        }
+    };
+    usernet::spawn_stream(nat_end, mac);
+
+    match CTX_MAP.lock().unwrap().entry(ctx_id) {
+        Entry::Occupied(mut ctx_cfg) => {
+            let cfg = ctx_cfg.get_mut();
+            create_virtio_net(
+                cfg,
+                VirtioNetBackend::WinsockFd(device_end.into_raw_socket()),
+                mac,
+                0,
+            );
+        }
+        Entry::Vacant(_) => return -libc::ENOENT,
+    }
+    KRUN_SUCCESS
+}
+
+#[allow(clippy::missing_safety_doc)]
+#[unsafe(no_mangle)]
+#[cfg(all(unix, feature = "net"))]
 pub unsafe extern "C" fn krun_add_net_unixgram(
     ctx_id: u32,
     c_path: *const c_char,
@@ -1242,7 +1289,7 @@ pub unsafe extern "C" fn krun_add_net_tap(
 
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
-#[cfg(feature = "net")]
+#[cfg(all(unix, feature = "net"))]
 pub unsafe extern "C" fn krun_set_passt_fd(ctx_id: u32, fd: c_int) -> i32 {
     if fd < 0 {
         return -libc::EINVAL;
@@ -1264,7 +1311,7 @@ pub unsafe extern "C" fn krun_set_passt_fd(ctx_id: u32, fd: c_int) -> i32 {
 
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
-#[cfg(feature = "net")]
+#[cfg(all(unix, feature = "net"))]
 pub unsafe extern "C" fn krun_set_gvproxy_path(ctx_id: u32, c_path: *const c_char) -> i32 {
     unsafe {
         let path_str = match CStr::from_ptr(c_path).to_str() {
@@ -3188,7 +3235,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         return -libc::EINVAL;
     }
 
-    #[cfg(feature = "net")]
+    #[cfg(all(unix, feature = "net"))]
     {
         if let Some(legacy_net_cfg) = ctx_cfg.legacy_net_cfg.clone() {
             let backend = match legacy_net_cfg {
@@ -3219,8 +3266,10 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         VsockConfig::Implicit => {
             // Implicit vsock configuration - use heuristics
             // Check if TSI should be enabled based on network configuration
-            #[cfg(feature = "net")]
+            #[cfg(all(unix, feature = "net"))]
             let enable_tsi = ctx_cfg.vmr.net.list.is_empty() && ctx_cfg.legacy_net_cfg.is_none();
+            #[cfg(all(windows, feature = "net"))]
+            let enable_tsi = ctx_cfg.vmr.net.list.is_empty();
             #[cfg(not(feature = "net"))]
             let enable_tsi = true;
 

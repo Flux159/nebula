@@ -19,9 +19,21 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, UdpSocket};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(windows)]
+use std::os::windows::io::AsRawSocket;
 use std::time::{Duration, Instant};
+
+/// Transport carrying the framed ethernet stream to the virtio-net device:
+/// one end of a socketpair on unix, one end of a loopback TCP pair on
+/// Windows. Identical Read/Write/set_nonblocking surface.
+#[cfg(unix)]
+type VmStream = UnixStream;
+#[cfg(windows)]
+type VmStream = TcpStream;
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -44,6 +56,7 @@ const UDP_IDLE: Duration = Duration::from_secs(60);
 
 /// Spawn the NAT thread serving `fd` (one end of a socketpair whose other
 /// end was handed to the virtio-net unixstream backend).
+#[cfg(unix)]
 pub fn spawn(fd: OwnedFd, guest_mac: [u8; 6]) {
     std::thread::Builder::new()
         .name("usernet".into())
@@ -57,10 +70,24 @@ pub fn spawn(fd: OwnedFd, guest_mac: [u8; 6]) {
         .expect("spawn usernet thread");
 }
 
+/// Windows: same NAT thread over one end of a loopback TCP pair (the other
+/// end goes to the virtio-net winsock backend).
+#[cfg(windows)]
+pub fn spawn_stream(stream: TcpStream, guest_mac: [u8; 6]) {
+    std::thread::Builder::new()
+        .name("usernet".into())
+        .spawn(move || {
+            if let Err(e) = run(stream, EthernetAddress(guest_mac)) {
+                log::error!("usernet exited: {e}");
+            }
+        })
+        .expect("spawn usernet thread");
+}
+
 // --- framed pipe <-> smoltcp device -----------------------------------------
 
 struct Pipe {
-    stream: UnixStream,
+    stream: VmStream,
     rx_partial: Vec<u8>,
     /// Parsed inbound ethernet frames waiting for the interface.
     rx: VecDeque<Vec<u8>>,
@@ -69,7 +96,7 @@ struct Pipe {
 }
 
 impl Pipe {
-    fn new(stream: UnixStream) -> std::io::Result<Self> {
+    fn new(stream: VmStream) -> std::io::Result<Self> {
         stream.set_nonblocking(true)?;
         Ok(Self {
             stream,
@@ -208,7 +235,7 @@ fn map_dst(ip: Ipv4Address, port: u16) -> SocketAddrV4 {
     }
 }
 
-fn run(stream: UnixStream, guest_mac: EthernetAddress) -> std::io::Result<()> {
+fn run(stream: VmStream, guest_mac: EthernetAddress) -> std::io::Result<()> {
     let mut pipe = Pipe::new(stream)?;
     let mut config = Config::new(HardwareAddress::Ethernet(GW_MAC));
     config.random_seed = 0x6e6562756c61; // deterministic is fine here
@@ -620,6 +647,7 @@ fn pump_udp(
 }
 
 /// poll(2) on the pipe + all host sockets so the loop sleeps when idle.
+#[cfg(unix)]
 fn wait_readable(
     pipe: &Pipe,
     tcp_flows: &[TcpFlow],
@@ -656,6 +684,53 @@ fn wait_readable(
         libc::poll(
             fds.as_mut_ptr(),
             fds.len() as _,
+            timeout.as_millis() as i32,
+        );
+    }
+    Ok(())
+}
+
+/// WSAPoll on the pipe + all host sockets — everything here is a SOCKET on
+/// Windows (the VMM pipe is a loopback TcpStream).
+#[cfg(windows)]
+fn wait_readable(
+    pipe: &Pipe,
+    tcp_flows: &[TcpFlow],
+    udp_flows: &HashMap<(SocketAddrV4, SocketAddrV4), UdpFlow>,
+    timeout: Duration,
+) -> std::io::Result<()> {
+    use windows_sys::Win32::Networking::WinSock::{POLLIN, POLLOUT, SOCKET, WSAPOLLFD, WSAPoll};
+
+    let mut fds: Vec<WSAPOLLFD> = Vec::with_capacity(1 + tcp_flows.len() + udp_flows.len());
+    let mut events = POLLIN;
+    if !pipe.tx_pending.is_empty() {
+        events |= POLLOUT;
+    }
+    fds.push(WSAPOLLFD {
+        fd: pipe.stream.as_raw_socket() as SOCKET,
+        events: events as i16,
+        revents: 0,
+    });
+    for f in tcp_flows {
+        if let Some(h) = &f.host {
+            fds.push(WSAPOLLFD {
+                fd: h.as_raw_socket() as SOCKET,
+                events: POLLIN as i16,
+                revents: 0,
+            });
+        }
+    }
+    for f in udp_flows.values() {
+        fds.push(WSAPOLLFD {
+            fd: f.host.as_raw_socket() as SOCKET,
+            events: POLLIN as i16,
+            revents: 0,
+        });
+    }
+    unsafe {
+        WSAPoll(
+            fds.as_mut_ptr(),
+            fds.len() as u32,
             timeout.as_millis() as i32,
         );
     }

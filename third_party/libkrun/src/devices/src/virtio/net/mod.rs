@@ -15,8 +15,12 @@ mod backend;
 pub mod device;
 #[cfg(target_os = "linux")]
 mod tap;
+#[cfg(unix)]
 mod unixgram;
+#[cfg(unix)]
 mod unixstream;
+#[cfg(windows)]
+mod winsock;
 mod worker;
 
 // https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-2050006

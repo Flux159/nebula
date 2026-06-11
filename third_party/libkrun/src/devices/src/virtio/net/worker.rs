@@ -1,8 +1,12 @@
 use crate::virtio::net::backend::ConnectError;
 #[cfg(target_os = "linux")]
 use crate::virtio::net::tap::Tap;
+#[cfg(unix)]
 use crate::virtio::net::unixgram::Unixgram;
+#[cfg(unix)]
 use crate::virtio::net::unixstream::Unixstream;
+#[cfg(windows)]
+use crate::virtio::net::winsock::Winsock;
 use crate::virtio::net::{MAX_BUFFER_SIZE, QUEUE_SIZE};
 use crate::virtio::{DeviceQueue, InterruptTransport};
 
@@ -12,7 +16,10 @@ use super::device::{FrontendError, RxError, TxError, VirtioNetBackend};
 
 #[cfg(target_os = "macos")]
 use std::os::fd::RawFd;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(windows)]
+use utils::windows::AsRawFd;
 use std::thread;
 use std::{cmp, result};
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
@@ -46,21 +53,33 @@ impl NetWorker {
         cfg_backend: VirtioNetBackend,
     ) -> Result<Self, ConnectError> {
         let backend = match cfg_backend {
+            #[cfg(windows)]
+            VirtioNetBackend::WinsockFd(sock) => {
+                use std::os::windows::io::FromRawSocket;
+                // SAFETY: the library user (krun_add_net_usernet) hands us a
+                // healthy connected socket it no longer owns.
+                let stream = unsafe { std::net::TcpStream::from_raw_socket(sock) };
+                Box::new(Winsock::new(stream)?) as Box<dyn NetBackend + Send>
+            }
+            #[cfg(unix)]
             VirtioNetBackend::UnixstreamFd(fd) => {
                 // SAFETY: we need to trust that the library user has configured
                 // the backend with a healthy file descriptor.
                 let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
                 Box::new(Unixstream::new(owned_fd)) as Box<dyn NetBackend + Send>
             }
+            #[cfg(unix)]
             VirtioNetBackend::UnixstreamPath(path) => {
                 Box::new(Unixstream::open(path)?) as Box<dyn NetBackend + Send>
             }
+            #[cfg(unix)]
             VirtioNetBackend::UnixgramFd(fd) => {
                 // SAFETY: we need to trust that the library user has configured
                 // the backend with a healthy file descriptor.
                 let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
                 Box::new(Unixgram::new(owned_fd)) as Box<dyn NetBackend + Send>
             }
+            #[cfg(unix)]
             VirtioNetBackend::UnixgramPath(path, vfkit_magic) => {
                 Box::new(Unixgram::open(path, vfkit_magic)?) as Box<dyn NetBackend + Send>
             }
@@ -116,6 +135,7 @@ impl NetWorker {
             virtq_tx_ev_fd,
             &EpollEvent::new(EventSet::IN, virtq_tx_ev_fd as u64),
         );
+        #[cfg(unix)]
         let _ = epoll.ctl(
             ControlOperation::Add,
             backend_socket,
@@ -123,6 +143,15 @@ impl NetWorker {
                 EventSet::IN | EventSet::OUT | EventSet::EDGE_TRIGGERED | EventSet::READ_HANG_UP,
                 backend_socket as u64,
             ),
+        );
+        // Windows: backend_socket is a WSAEVENT handle (FD_READ|FD_CLOSE).
+        // Writes never defer (winsock backend retries internally), so only
+        // read interest is needed.
+        #[cfg(windows)]
+        let _ = epoll.ctl(
+            ControlOperation::Add,
+            backend_socket,
+            &EpollEvent::new(EventSet::IN, backend_socket as u64),
         );
 
         let mut epoll_events = vec![EpollEvent::new(EventSet::empty(), 0); 32];
@@ -140,6 +169,9 @@ impl NetWorker {
                                 self.process_tx_queue_event();
                             }
                             _ if source == backend_socket => {
+                                // Reset the readiness source first (no-op on
+                                // unix; WSAEnumNetworkEvents on Windows).
+                                self.backend.ack_events();
                                 if event_set.contains(EventSet::HANG_UP)
                                     || event_set.contains(EventSet::READ_HANG_UP)
                                 {
@@ -189,8 +221,11 @@ impl NetWorker {
     }
 
     pub(crate) fn process_rx_queue_event(&mut self) {
-        if let Err(e) = self.rx_q.event.read() {
-            log::error!("Failed to get rx event from queue: {e:?}");
+        match self.rx_q.event.read() {
+            Ok(_) => {}
+            // Spurious wakeup from the Windows epoll bridge.
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return,
+            Err(e) => log::error!("Failed to get rx event from queue: {e:?}"),
         }
         if let Err(e) = self.rx_q.queue.disable_notification(&self.mem) {
             error!("error disabling queue notifications: {e:?}");
@@ -206,6 +241,8 @@ impl NetWorker {
     pub(crate) fn process_tx_queue_event(&mut self) {
         match self.tx_q.event.read() {
             Ok(_) => self.process_tx_loop(),
+            // Spurious wakeup from the Windows epoll bridge.
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => {
                 log::error!("Failed to get tx queue event from queue: {e:?}");
             }

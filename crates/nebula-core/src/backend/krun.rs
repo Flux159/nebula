@@ -544,7 +544,7 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
             if force_passt || api.krun_add_net_usernet.is_none() {
                 return Err(Error::backend(
                     BACKEND,
-                    "NetSpec::Nat on Windows needs the fork's usernet (not ported yet)",
+                    "NetSpec::Nat on Windows needs a krun.dll built with NET=1 (usernet)",
                 ));
             }
             #[cfg(unix)]

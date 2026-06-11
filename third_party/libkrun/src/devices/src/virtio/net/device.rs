@@ -18,6 +18,7 @@ use super::worker::NetWorker;
 
 use std::cmp;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 use virtio_bindings::virtio_net::VIRTIO_NET_F_MAC;
@@ -61,12 +62,20 @@ unsafe impl ByteValued for VirtioNetConfig {}
 
 #[derive(Clone)]
 pub enum VirtioNetBackend {
+    #[cfg(unix)]
     UnixstreamFd(RawFd),
+    #[cfg(unix)]
     UnixstreamPath(PathBuf),
+    #[cfg(unix)]
     UnixgramFd(RawFd),
+    #[cfg(unix)]
     UnixgramPath(PathBuf, bool),
     #[cfg(target_os = "linux")]
     Tap(String),
+    /// A connected loopback TCP socket speaking the same 4-byte-BE framed
+    /// ethernet protocol as the unixstream backend (raw SOCKET value).
+    #[cfg(windows)]
+    WinsockFd(u64),
 }
 
 pub struct Net {

@@ -29,7 +29,7 @@ pub mod gpu;
 pub mod input;
 pub mod linux_errno;
 mod mmio;
-#[cfg(all(unix, feature = "net"))]
+#[cfg(feature = "net")]
 pub mod net;
 mod queue;
 #[cfg(all(unix, not(feature = "tee")))]
@@ -49,7 +49,7 @@ pub use self::fs::*;
 #[cfg(feature = "gpu")]
 pub use self::gpu::*;
 pub use self::mmio::*;
-#[cfg(all(unix, feature = "net"))]
+#[cfg(feature = "net")]
 pub use self::net::Net;
 pub use self::queue::{Descriptor, DescriptorChain, Queue};
 #[cfg(all(unix, not(feature = "tee")))]
