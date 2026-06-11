@@ -35,4 +35,10 @@ docker build \
     --target export \
     --output type=local,dest=out \
     kernel/
+# Canonical artifact name is out/Image on both arches (x86_64 emits an
+# ELF vmlinux; everything downstream — install-image, packaging — keys
+# off the single name).
+if [ -f out/vmlinux ] && [ ! -f out/Image ]; then
+    cp out/vmlinux out/Image
+fi
 ls -la out/Image out/vmlinux 2>/dev/null || true
