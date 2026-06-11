@@ -21,7 +21,7 @@ pub fn up() -> anyhow::Result<()> {
     let nebulad = exe
         .parent()
         .context("exe has no parent dir")?
-        .join("nebulad");
+        .join(format!("nebulad{}", std::env::consts::EXE_SUFFIX));
     anyhow::ensure!(
         nebulad.is_file(),
         "nebulad binary not found next to nebula ({})",
