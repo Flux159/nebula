@@ -40,9 +40,9 @@ jobs:
             exit 1
           fi
           mkdir -p dist vessel/out
-          gh run download "$run_id" --name guest-images --dir dist
-          gzip -dc dist/kernel-Image.gz > vessel/out/Image
-          gzip -dc dist/rootfs.img.gz > vessel/out/rootfs.img
+          gh run download "$run_id" --name guest-images-arm64 --dir dist
+          gzip -dc dist/kernel-Image-arm64.gz > vessel/out/Image
+          gzip -dc dist/rootfs-arm64.img.gz > vessel/out/rootfs.img
 
       - name: Build Nebula.app
         run: scripts/bundle-app.sh
@@ -68,3 +68,89 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/Nebula_*_aarch64.dmg
+
+  linux-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build libkrun fork (.so)
+        run: |
+          cd third_party/libkrun
+          cargo build --release -p libkrun --features blk,net
+          ls -la target/release/libkrun.so*
+
+      - name: Build nebula + nebulad
+        run: cargo build --release -p nebula-cli -p nebulad
+
+      - name: Package tarball
+        run: |
+          ver=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          stage="nebula-${ver}-linux-x86_64"
+          mkdir -p "dist/$stage/lib"
+          cp target/release/nebula target/release/nebulad "dist/$stage/"
+          # the krun backend looks for lib/libkrun.so.1 next to the binaries
+          cp third_party/libkrun/target/release/libkrun.so.*.* "dist/$stage/lib/libkrun.so.1"
+          tar -C dist -czf "dist/$stage.tar.gz" "$stage"
+          (cd dist && shasum -a 256 "$stage.tar.gz" > "$stage.tar.gz.sha256")
+          ls -lh dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nebula-linux-x86_64
+          path: dist/nebula-*-linux-x86_64.tar.gz*
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/nebula-*-linux-x86_64.tar.gz*
+
+  windows-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build krun.dll (fork, WHP backend)
+        shell: pwsh
+        run: |
+          cd third_party/libkrun
+          # init-blob compiles a Linux init.c we never use; bypass on Windows hosts.
+          New-Item -ItemType File -Force -Path stub-init | Out-Null
+          $env:KRUN_INIT_BINARY_PATH = (Resolve-Path stub-init).Path
+          cargo build --release -p libkrun --features blk,net
+          Get-Item target/release/krun.dll
+
+      - name: Build nebula + nebulad
+        run: cargo build --release -p nebula-cli -p nebulad
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version.*"(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $stage = "nebula-$ver-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path "dist/$stage" | Out-Null
+          Copy-Item target/release/nebula.exe, target/release/nebulad.exe "dist/$stage/"
+          # the krun backend probes for krun.dll next to the binaries
+          Copy-Item third_party/libkrun/target/release/krun.dll "dist/$stage/"
+          Compress-Archive -Path "dist/$stage" -DestinationPath "dist/$stage.zip"
+          $hash = (Get-FileHash "dist/$stage.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $stage.zip" | Set-Content -Encoding ascii "dist/$stage.zip.sha256"
+          Get-ChildItem dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nebula-windows-x86_64
+          path: dist/nebula-*-windows-x86_64.zip*
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/nebula-*-windows-x86_64.zip*
