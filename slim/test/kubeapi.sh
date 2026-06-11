@@ -33,23 +33,23 @@ O=$(curl -s $URL/version); echo "$O" | grep -q gitVersion && ok "GET /version" |
 O=$($KC api-resources 2>&1); echo "$O" | grep -q deployments && ok "kubectl api-resources" || bad api-resources "$O"
 
 printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: cfg, namespace: demo}\ndata: {greeting: hi}\n' > /tmp/cm.yaml
-O=$($KC apply --validate=false -f /tmp/cm.yaml 2>&1); echo "$O" | grep -q "configmap/cfg created" && ok "apply configmap" || bad apply-cm "$O"
+O=$($KC apply -f /tmp/cm.yaml 2>&1); echo "$O" | grep -q "configmap/cfg created" && ok "apply configmap" || bad apply-cm "$O"
 O=$($KC -n demo get cm cfg -o jsonpath='{.data.greeting}' 2>&1); [ "$O" = hi ] && ok "get -o jsonpath" || bad get-cm "$O"
 
 printf 'apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata: {name: widgets.example.com}\nspec:\n  group: example.com\n  scope: Namespaced\n  names: {plural: widgets, singular: widget, kind: Widget, shortNames: [wg]}\n  versions: [{name: v1, served: true, storage: true}]\n' > /tmp/crd.yaml
-O=$($KC apply --validate=false -f /tmp/crd.yaml 2>&1); echo "$O" | grep -q created && ok "apply CRD" || bad apply-crd "$O"
+O=$($KC apply -f /tmp/crd.yaml 2>&1); echo "$O" | grep -q created && ok "apply CRD" || bad apply-crd "$O"
 rm -rf /tmp/kubeapi-cache  # refresh discovery so the new CRD is visible
 O=$($KC api-resources 2>&1); echo "$O" | grep -q widgets && ok "CRD in discovery" || bad crd-disco "$O"
 
 printf 'apiVersion: example.com/v1\nkind: Widget\nmetadata: {name: w1, namespace: demo}\nspec: {size: 7}\n' > /tmp/cr.yaml
-O=$($KC apply --validate=false -f /tmp/cr.yaml 2>&1); echo "$O" | grep -q "widget.example.com/w1 created" && ok "apply custom resource" || bad apply-cr "$O"
+O=$($KC apply -f /tmp/cr.yaml 2>&1); echo "$O" | grep -q "widget.example.com/w1 created" && ok "apply custom resource" || bad apply-cr "$O"
 O=$($KC -n demo get widget w1 -o jsonpath='{.spec.size}' 2>&1); [ "$O" = 7 ] && ok "custom resource round-trips" || bad cr-spec "$O"
 
 # WATCH: stream new + replay existing
 ( timeout 6 $KC -n demo get widgets -w -o name > /tmp/watch.out 2>&1 ) & WPID=$!
 sleep 1
 printf 'apiVersion: example.com/v1\nkind: Widget\nmetadata: {name: w2, namespace: demo}\nspec: {size: 9}\n' > /tmp/cr2.yaml
-$KC apply --validate=false -f /tmp/cr2.yaml >/dev/null 2>&1
+$KC apply -f /tmp/cr2.yaml >/dev/null 2>&1
 wait $WPID 2>/dev/null
 grep -q "widget.example.com/w2" /tmp/watch.out && ok "watch streamed new object" || bad watch "$(cat /tmp/watch.out)"
 grep -q "widget.example.com/w1" /tmp/watch.out && ok "watch replayed existing" || bad watch-replay "$(cat /tmp/watch.out)"

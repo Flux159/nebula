@@ -686,6 +686,7 @@ dependencies = [
  "slim-build",
  "slim-http",
  "slim-image",
+ "slim-kubeapi",
  "slim-net",
  "slim-runtime",
  "tar",

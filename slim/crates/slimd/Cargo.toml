@@ -16,3 +16,4 @@ slim-image.workspace = true
 slim-runtime.workspace = true
 slim-net.workspace = true
 slim-build.workspace = true
+slim-kubeapi.workspace = true

@@ -12,6 +12,7 @@ mod dns;
 mod engine;
 mod exec;
 mod inspect;
+mod kube_bridge;
 mod names;
 mod router;
 mod streams;
@@ -34,6 +35,13 @@ fn main() {
         }
     };
     engine.boot();
+
+    // Kubernetes apiserver-lite + controller bridge (Deployments → containers).
+    // Disable with SLIM_KUBE_API=off; address via SLIM_KUBE_API_ADDR.
+    if std::env::var("SLIM_KUBE_API").as_deref() != Ok("off") {
+        let addr = std::env::var("SLIM_KUBE_API_ADDR").unwrap_or_else(|_| "0.0.0.0:6443".to_string());
+        kube_bridge::start(&engine, &addr);
+    }
 
     println!("slimd: listening on {socket} (data {data})");
     let engine_for_handler = engine.clone();

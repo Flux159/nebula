@@ -68,8 +68,23 @@ impl ApiServer {
             ("GET", ["openapi", "v3"]) => write_json(w, 200, &self.openapi_root()),
             ("GET", ["openapi", "v3", "api", "v1"]) => write_json(w, 200, &self.openapi_gv("", "v1")),
             ("GET", ["openapi", "v3", "apis", g, v]) => write_json(w, 200, &self.openapi_gv(g, v)),
+            // kubectl's client-side `apply` validator downloads OpenAPI v2 in
+            // gnostic protobuf and errors if it 404s. We serve a minimal valid
+            // Document (swagger/info/empty paths, no definitions) so the
+            // download succeeds and validation finds no schema → skips → stock
+            // `kubectl apply` works without --validate=false.
+            ("GET", ["openapi", "v2"]) => write_raw(
+                w,
+                200,
+                // The canonical type uses `@v1.0`, but `@` isn't a valid MIME
+                // token char so Go's mime.ParseMediaType (in the kubectl
+                // client) rejects it. The deprecated dotted form parses
+                // cleanly and kubectl still accepts it as proto OpenAPI.
+                "application/com.github.proto-openapi.spec.v2.v1.0+protobuf",
+                &openapi_v2_proto(),
+            ),
             ("GET", ["openapi", ..]) => {
-                write_json(w, 404, &status_obj(404, "only openapi v3 is served by slim", "NotFound"))
+                write_json(w, 404, &status_obj(404, "only openapi v2/v3 are served by slim", "NotFound"))
             }
 
             // ---- core group: /api/v1/... ----
@@ -111,7 +126,12 @@ impl ApiServer {
             return write_json(w, 404, &status_obj(404, &format!("the server could not find the requested resource ({group}/{resource})"), "NotFound"));
         };
 
-        // status/scale subresources: operate on the parent object's field.
+        // The scale subresource needs a real Scale object response (kubectl
+        // `scale` decodes it), so route it specially.
+        if subresource == Some("scale") {
+            return self.handle_scale(verb, &info, &ns, name.unwrap_or(""), req, w);
+        }
+
         let watch = query_bool(&req.query, "watch");
 
         match verb {
@@ -212,6 +232,36 @@ impl ApiServer {
             Some(obj) => write_json(w, 200, &obj),
             None => write_json(w, 404, &status_obj(404, &format!("{} \"{name}\" not found", info.singular), "NotFound")),
         }
+    }
+
+    /// The `/scale` subresource: GET returns an autoscaling/v1 Scale built
+    /// from `.spec.replicas`; PUT/PATCH sets `.spec.replicas` on the parent
+    /// and returns the updated Scale (what kubectl `scale` expects).
+    fn handle_scale(&self, verb: Verb, info: &ResourceInfo, ns: &Option<String>, name: &str, req: &Req, w: &mut TcpStream) -> std::io::Result<()> {
+        let nsv = ns.clone().unwrap_or_default();
+        let Some(mut obj) = self.store.get(info, &nsv, name) else {
+            return write_json(w, 404, &status_obj(404, &format!("{} \"{name}\" not found", info.singular), "NotFound"));
+        };
+        if matches!(verb, Verb::Update | Verb::Patch) {
+            if let Ok(body) = serde_json::from_slice::<Value>(&req.body) {
+                if let Some(r) = body.pointer("/spec/replicas").and_then(|v| v.as_i64()) {
+                    obj.pointer_mut("/spec")
+                        .and_then(|s| s.as_object_mut())
+                        .map(|s| s.insert("replicas".into(), json!(r)));
+                    obj = self.store.put(info, obj, &nsv, name, false);
+                }
+            }
+        }
+        let replicas = obj.pointer("/spec/replicas").and_then(|v| v.as_i64()).unwrap_or(1);
+        let rv = obj.pointer("/metadata/resourceVersion").cloned().unwrap_or(json!("0"));
+        let scale = json!({
+            "apiVersion": "autoscaling/v1",
+            "kind": "Scale",
+            "metadata": {"name": name, "namespace": nsv, "resourceVersion": rv},
+            "spec": {"replicas": replicas},
+            "status": {"replicas": replicas},
+        });
+        write_json(w, 200, &scale)
     }
 
     fn do_watch(&self, info: &ResourceInfo, ns: Option<&str>, req: &Req, w: &mut TcpStream) -> std::io::Result<()> {
@@ -504,6 +554,51 @@ fn write_json(w: &mut TcpStream, code: u16, body: &Value) -> std::io::Result<()>
     w.write_all(head.as_bytes())?;
     w.write_all(&bytes)?;
     w.flush()
+}
+
+fn write_raw(w: &mut TcpStream, code: u16, ctype: &str, body: &[u8]) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 {code} {}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        reason_phrase(code),
+        body.len()
+    );
+    w.write_all(head.as_bytes())?;
+    w.write_all(body)?;
+    w.flush()
+}
+
+/// A minimal gnostic `openapi.v2.Document` protobuf: swagger="2.0",
+/// info{title,version}, empty paths, no definitions. Just enough for kubectl's
+/// validator to parse it and find no schema (→ validation skipped).
+fn openapi_v2_proto() -> Vec<u8> {
+    fn varint(mut n: usize) -> Vec<u8> {
+        let mut o = Vec::new();
+        loop {
+            let b = (n & 0x7f) as u8;
+            n >>= 7;
+            if n > 0 {
+                o.push(b | 0x80);
+            } else {
+                o.push(b);
+                break;
+            }
+        }
+        o
+    }
+    fn ld(field: u32, body: &[u8]) -> Vec<u8> {
+        let mut o = vec![((field << 3) | 2) as u8]; // wire type 2 = length-delimited
+        o.extend(varint(body.len()));
+        o.extend_from_slice(body);
+        o
+    }
+    let mut info = Vec::new();
+    info.extend(ld(1, b"slim")); // Info.title
+    info.extend(ld(2, b"v0")); //   Info.version
+    let mut doc = Vec::new();
+    doc.extend(ld(1, b"2.0")); // Document.swagger
+    doc.extend(ld(2, &info)); //  Document.info
+    doc.extend(ld(8, &[])); //    Document.paths (empty)
+    doc
 }
 
 fn write_text(w: &mut TcpStream, code: u16, body: &str) -> std::io::Result<()> {

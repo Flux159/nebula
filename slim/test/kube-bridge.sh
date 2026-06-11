@@ -1,0 +1,54 @@
+#!/bin/bash
+# Tier-B end-to-end: slimd hosts the apiserver-lite + controller bridge; a real
+# `kubectl apply` of a Deployment spawns REAL containers on the slim engine.
+#
+# Runs slimd in a privileged container inside the nebula engine (kube API
+# published on 16443 → reachable from the host), drives it with real kubectl.
+set -u
+SLIMD="${SLIMD:-$(dirname "$0")/../target/aarch64-unknown-linux-musl/release/slimd}"
+DSLIM="${DSLIM:-$(dirname "$0")/../target/aarch64-unknown-linux-musl/release/docker-slim}"
+STAGE="$HOME/.slim-bridge-test"
+PASS=0; FAIL=0
+ok(){ PASS=$((PASS+1)); echo "PASS: $1"; }
+bad(){ FAIL=$((FAIL+1)); echo "FAIL: $1 -- $2"; }
+
+rm -rf "$STAGE"; mkdir -p "$STAGE"; cp "$SLIMD" "$STAGE/slimd"; cp "$DSLIM" "$STAGE/docker-slim"
+cat > "$STAGE/dep.yaml" <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: web, namespace: default}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: web}}
+  template:
+    metadata: {labels: {app: web}}
+    spec: {containers: [{name: web, image: alpine:3.19, command: ["sh","-c","echo up; sleep 600"]}]}
+YAML
+
+docker rm -f slim-bridge >/dev/null 2>&1
+docker run -d --privileged -p 16443:6443 -v "$STAGE:/slim" --name slim-bridge alpine:3.19 sh -c \
+  'apk add --no-cache iptables ip6tables iproute2 >/dev/null 2>&1; mkdir -p /var/lib/nebula && mount -t tmpfs tmpfs /var/lib/nebula; export SLIM_DATA=/var/lib/nebula/slim SLIM_RUN_DIR=/var/lib/nebula/run SLIM_KUBE_API_ADDR=0.0.0.0:6443; exec /slim/slimd' >/dev/null 2>&1
+trap 'docker rm -f slim-bridge >/dev/null 2>&1' EXIT
+for i in $(seq 1 40); do curl -s http://localhost:16443/version >/dev/null 2>&1 && break; sleep 1; done
+
+export KUBECONFIG="$STAGE/kubeconfig"
+printf 'apiVersion: v1\nkind: Config\nclusters: [{name: s, cluster: {server: "http://localhost:16443"}}]\ncontexts: [{name: s, context: {cluster: s, user: s}}]\ncurrent-context: s\nusers: [{name: s, user: {}}]\n' > "$KUBECONFIG"
+KC="kubectl --cache-dir=$STAGE/kc"
+psnames(){ docker exec slim-bridge sh -c '/slim/docker-slim ps --format "{{.Names}}"' 2>/dev/null | tr -d '"/[]' | sort; }
+
+curl -s http://localhost:16443/version | grep -q gitVersion && ok "apiserver reachable" || bad apiserver "down"
+O=$($KC apply -f "$STAGE/dep.yaml" 2>&1); echo "$O" | grep -q "deployment.apps/web created" && ok "kubectl apply deployment (no flags)" || bad apply "$O"
+sleep 5
+N=$(psnames | grep -c "default_web-"); [ "$N" -eq 2 ] && ok "deployment spawned 2 real containers" || bad spawn "got $N: $(psnames)"
+O=$($KC get pods 2>&1); echo "$O" | grep -q "web-0" && ok "kubectl get pods shows synthesized pods" || bad getpods "$O"
+O=$($KC scale deployment/web --replicas=3 2>&1); echo "$O" | grep -q scaled && ok "kubectl scale (clean)" || bad scale "$O"
+sleep 5
+N=$(psnames | grep -c "default_web-"); [ "$N" -eq 3 ] && ok "scaled up to 3 containers" || bad scaleup "got $N"
+$KC scale deployment/web --replicas=1 >/dev/null 2>&1; sleep 5
+N=$(psnames | grep -c "default_web-"); [ "$N" -eq 1 ] && ok "scaled down to 1 container" || bad scaledown "got $N"
+$KC delete deployment web >/dev/null 2>&1; sleep 5
+N=$(psnames | grep -c "default_web-"); [ "$N" -eq 0 ] && ok "delete removed all containers" || bad delete "got $N"
+O=$($KC get pods 2>&1); echo "$O" | grep -qi "no resources" && ok "pods cleaned up" || bad podsgone "$O"
+
+echo ""; echo "RESULT: $PASS passed, $FAIL failed"
+[ $FAIL -eq 0 ]
