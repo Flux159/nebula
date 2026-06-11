@@ -1760,12 +1760,13 @@ pub struct VcpuState {
 
 // --- snapshot serialization -------------------------------------------------
 //
-// Raw same-machine encoding: the kvm_bindings types are repr(C) POD, and a
+// Raw same-machine encoding: the kvm_bindings types are repr(C) plain data
+// (kvm_xsave carries an empty flexible-array tail, hence no Copy), and a
 // snapshot is only ever restored on the host that took it (same kernel, same
 // KVM ABI), so fixed-size structs are written as raw bytes and the FAM
 // wrappers (cpuid/msrs) as a length-prefixed entry slice.
 
-fn write_pod<T: Copy, W: std::io::Write>(w: &mut W, v: &T) -> std::io::Result<()> {
+fn write_pod<T, W: std::io::Write>(w: &mut W, v: &T) -> std::io::Result<()> {
     // SAFETY: T is a repr(C) POD kvm_bindings struct; reading its bytes is sound.
     let bytes = unsafe {
         std::slice::from_raw_parts(v as *const T as *const u8, std::mem::size_of::<T>())
@@ -1773,7 +1774,7 @@ fn write_pod<T: Copy, W: std::io::Write>(w: &mut W, v: &T) -> std::io::Result<()
     w.write_all(bytes)
 }
 
-fn read_pod<T: Copy, R: std::io::Read>(r: &mut R) -> std::io::Result<T> {
+fn read_pod<T, R: std::io::Read>(r: &mut R) -> std::io::Result<T> {
     let mut v = std::mem::MaybeUninit::<T>::zeroed();
     // SAFETY: writing size_of::<T>() bytes fully initializes the POD value.
     unsafe {
@@ -1784,7 +1785,7 @@ fn read_pod<T: Copy, R: std::io::Read>(r: &mut R) -> std::io::Result<T> {
     }
 }
 
-fn write_entries<T: Copy, W: std::io::Write>(w: &mut W, entries: &[T]) -> std::io::Result<()> {
+fn write_entries<T, W: std::io::Write>(w: &mut W, entries: &[T]) -> std::io::Result<()> {
     write_pod(w, &(entries.len() as u64))?;
     for e in entries {
         write_pod(w, e)?;
@@ -1792,13 +1793,19 @@ fn write_entries<T: Copy, W: std::io::Write>(w: &mut W, entries: &[T]) -> std::i
     Ok(())
 }
 
-fn read_entries<T: Copy, R: std::io::Read>(r: &mut R) -> std::io::Result<Vec<T>> {
+fn read_entries<T, R: std::io::Read>(r: &mut R) -> std::io::Result<Vec<T>> {
     let n: u64 = read_pod(r)?;
     let mut out = Vec::with_capacity(n as usize);
     for _ in 0..n {
         out.push(read_pod::<T, R>(r)?);
     }
     Ok(out)
+}
+
+impl std::fmt::Debug for VcpuState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VcpuState {{ .. }}")
+    }
 }
 
 impl VcpuState {
