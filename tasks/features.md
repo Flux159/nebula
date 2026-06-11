@@ -875,3 +875,26 @@ vessel-agent, symbolicate with `atos -o dist-debug/nebulad.dSYM/...` and
   --target x86_64-pc-windows-gnu -p libkrun --features blk` in the fork
   (also `-p nebulad -p nebula-cli` at the workspace root). This catches
   everything except linking/runtime.
+
+### Windows milestone — 2026-06-10: AGENT HEALTHY on native WHP
+
+`nebula up` → `nebula status` → `nebula exec` work end-to-end on the Windows
+box (no WSL2, no QEMU — our fork's krun.dll on Windows Hypervisor Platform):
+
+```
+nebula: running
+  backend:  krun | cpus 32 | max ram 4096 MiB
+  agent:    v0.1.0 healthy | kernel 6.12.58 | guest uptime 83s
+$ nebula exec uname -a
+Linux nebula 6.12.58 #1 SMP PREEMPT_DYNAMIC ... x86_64 Linux
+```
+
+Guest boots in ~2s (nebula-init t=2.02s through agent+containerd+dockerd).
+Agent control channel runs over the new TCP-loopback vsock backend.
+Remaining for Windows v1: usernet port (guest outbound networking →
+container pulls; socketpair → loopback TCP pair in the fork), `nebula
+install-image` flow for Windows (images were hand-copied), Windows CI/CD
+release artifacts (zip with nebula.exe/nebulad.exe/krun.dll), balloon stays
+disabled. Debug crumbs that mattered: WHV_REGISTER_VALUE 16-byte alignment
+(see issues.md), stale-pid liveness via tasklist, PowerShell `>` corrupts
+binary redirects (use gzip -d in place).
