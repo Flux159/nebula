@@ -101,6 +101,7 @@ struct KrunApi {
     /// Optional: pause/resume all vCPUs (snapshot support; linux/windows fork).
     krun_vm_pause: Option<unsafe extern "C" fn(u32) -> i32>,
     krun_vm_resume: Option<unsafe extern "C" fn(u32) -> i32>,
+    krun_vm_save: Option<unsafe extern "C" fn(u32, *const c_char) -> i32>,
 }
 
 #[cfg(windows)]
@@ -207,6 +208,7 @@ fn load_api() -> Result<&'static KrunApi> {
                 krun_start_enter: sym(handle, "krun_start_enter")?,
                 krun_vm_pause: sym(handle, "krun_vm_pause").ok(),
                 krun_vm_resume: sym(handle, "krun_vm_resume").ok(),
+                krun_vm_save: sym(handle, "krun_vm_save").ok(),
             })
         }
     });
@@ -664,12 +666,13 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
         if let Some(ctl_path) = spec.control_path.clone() {
             let pause = api.krun_vm_pause;
             let resume = api.krun_vm_resume;
+            let save = api.krun_vm_save;
             let _ = std::fs::remove_file(&ctl_path);
             match crate::ipc::listen(&ctl_path) {
                 Ok(listener) => {
                     std::thread::Builder::new()
                         .name("vmm-ctl".into())
-                        .spawn(move || serve_worker_control(listener, ctx, pause, resume))
+                        .spawn(move || serve_worker_control(listener, ctx, pause, resume, save))
                         .ok();
                 }
                 Err(e) => eprintln!("krun-worker: control listener {}: {e}", ctl_path.display()),
@@ -694,6 +697,7 @@ fn serve_worker_control(
     ctx: u32,
     pause: Option<unsafe extern "C" fn(u32) -> i32>,
     resume: Option<unsafe extern "C" fn(u32) -> i32>,
+    save: Option<unsafe extern "C" fn(u32, *const c_char) -> i32>,
 ) {
     use crate::backend::{WorkerControl, WorkerReply};
     use std::io::{BufRead, Write};
@@ -766,12 +770,24 @@ fn serve_worker_control(
                         None,
                     ),
                 },
-                WorkerControl::Save { .. } => reply(
-                    &mut writer,
-                    false,
-                    Some("krun memory snapshots: save not implemented yet".into()),
-                    None,
-                ),
+                WorkerControl::Save { path } => match save {
+                    Some(f) => {
+                        let c_path = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+                        let rc = unsafe { f(ctx, c_path.as_ptr()) };
+                        reply(
+                            &mut writer,
+                            rc == 0,
+                            (rc != 0).then(|| format!("krun_vm_save failed: {rc}")),
+                            None,
+                        );
+                    }
+                    None => reply(
+                        &mut writer,
+                        false,
+                        Some("this libkrun build has no snapshot-save support".into()),
+                        None,
+                    ),
+                },
                 WorkerControl::State => reply(
                     &mut writer,
                     true,

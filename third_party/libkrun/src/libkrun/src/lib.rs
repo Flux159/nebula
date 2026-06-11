@@ -3173,6 +3173,29 @@ pub extern "C" fn krun_vm_pause(_ctx_id: u32) -> i32 {
     }
 }
 
+/// Snapshot the paused VM's full state into the directory at `c_dir`
+/// (created if needed). Pause first; resume after. Restore support is
+/// still in progress — the snapshot records its completeness level.
+#[cfg(target_os = "linux")]
+#[allow(clippy::missing_safety_doc)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn krun_vm_save(_ctx_id: u32, c_dir: *const c_char) -> i32 {
+    let Some(vmm) = RUNNING_VMM.get() else {
+        return -libc::EAGAIN;
+    };
+    let dir = match unsafe { CStr::from_ptr(c_dir) }.to_str() {
+        Ok(p) => std::path::PathBuf::from(p),
+        Err(_) => return -libc::EINVAL,
+    };
+    match vmm.lock().unwrap().save_snapshot(&dir) {
+        Ok(()) => KRUN_SUCCESS,
+        Err(e) => {
+            error!("krun_vm_save: {e}");
+            -libc::EIO
+        }
+    }
+}
+
 /// Resume previously paused guest vCPUs.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 #[unsafe(no_mangle)]

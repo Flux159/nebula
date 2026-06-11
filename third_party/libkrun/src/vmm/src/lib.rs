@@ -418,6 +418,81 @@ impl Vmm {
     }
 
     /// Returns a reference to the inner `GuestMemoryMmap` object if present, or `None` otherwise.
+    /// Capture a full machine snapshot into `dir` (created if needed).
+    ///
+    /// Layout: memory.bin (guest RAM), vm.state (irqchip/PIT/clock),
+    /// vcpus.state (count-prefixed per-vcpu KVM state), format.txt.
+    /// The vcpus must already be paused. Device state is not captured yet —
+    /// restore support tracks that work (format.txt records completeness).
+    #[cfg(target_os = "linux")]
+    pub fn save_snapshot(&mut self, dir: &std::path::Path) -> std::result::Result<(), String> {
+        use std::io::Write;
+
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+
+        let vm_state = self.vm.save_state().map_err(|e| format!("vm state: {e}"))?;
+        let vcpu_states = self
+            .save_vcpu_states()
+            .map_err(|e| format!("vcpu states: {e}"))?;
+
+        let mut f = std::io::BufWriter::new(
+            std::fs::File::create(dir.join("vm.state")).map_err(|e| e.to_string())?,
+        );
+        vm_state
+            .serialize_into(&mut f)
+            .and_then(|()| f.flush())
+            .map_err(|e| format!("write vm.state: {e}"))?;
+
+        let mut f = std::io::BufWriter::new(
+            std::fs::File::create(dir.join("vcpus.state")).map_err(|e| e.to_string())?,
+        );
+        write_u64(&mut f, vcpu_states.len() as u64).map_err(|e| e.to_string())?;
+        for st in &vcpu_states {
+            st.serialize_into(&mut f)
+                .map_err(|e| format!("write vcpu state: {e}"))?;
+        }
+        f.flush().map_err(|e| e.to_string())?;
+
+        self.save_memory(&dir.join("memory.bin"))
+            .map_err(|e| format!("write memory.bin: {e}"))?;
+
+        // Version + completeness marker. Restore refuses anything but a
+        // format it fully understands.
+        std::fs::write(dir.join("format.txt"), "krun-snapshot-v0 no-device-state\n")
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Write all guest memory regions to `path` for a snapshot.
+    ///
+    /// Format: u64 region count, then per region (u64 guest_addr, u64 len)
+    /// headers, then the raw region bytes back to back. Call only while the
+    /// vcpus are paused.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub fn save_memory(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        use vm_memory::{Address, GuestMemory, GuestMemoryRegion};
+
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(path)?);
+        let regions: Vec<_> = self.guest_memory.iter().collect();
+        write_u64(&mut out, regions.len() as u64)?;
+        for r in &regions {
+            write_u64(&mut out, r.start_addr().raw_value())?;
+            write_u64(&mut out, r.len())?;
+        }
+        for r in &regions {
+            // SAFETY: the region is a live mapping of len bytes; vcpus are
+            // paused so the snapshot is consistent.
+            let host = self
+                .guest_memory
+                .get_host_address(r.start_addr())
+                .map_err(|e| std::io::Error::other(format!("host addr: {e}")))?;
+            let bytes = unsafe { std::slice::from_raw_parts(host, r.len() as usize) };
+            out.write_all(bytes)?;
+        }
+        out.flush()
+    }
+
     pub fn guest_memory(&self) -> &GuestMemoryMmap {
         &self.guest_memory
     }
@@ -517,4 +592,9 @@ impl Subscriber for Vmm {
             self.exit_evt.as_raw_fd() as u64,
         )]
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn write_u64<W: std::io::Write>(w: &mut W, v: u64) -> std::io::Result<()> {
+    w.write_all(&v.to_le_bytes())
 }
