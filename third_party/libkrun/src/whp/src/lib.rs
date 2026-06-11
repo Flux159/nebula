@@ -36,6 +36,28 @@ use windows_sys::Win32::System::Hypervisor::{
 };
 use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
+/// Host wall-progressing reference time in 100ns units (the Hyper-V TLFS
+/// partition-reference-time format), backed by QPC. WHP's own partition
+/// reference time only advances while a VP is inside
+/// `WHvRunVirtualProcessor` — with exit-on-HLT idle handling the guest
+/// clock froze while idle — so the VMM serves HV_X64_MSR_TIME_REF_COUNT
+/// from this instead.
+pub fn host_reference_time_100ns() -> u64 {
+    let mut qpc: i64 = 0;
+    let mut freq: i64 = 0;
+    unsafe {
+        let _ = QueryPerformanceCounter(&mut qpc);
+        let _ = QueryPerformanceFrequency(&mut freq);
+    }
+    if freq <= 0 {
+        return 0;
+    }
+    // Split to avoid overflow: seconds * 1e7 + remainder scaled.
+    let q = qpc as u128;
+    let f = freq as u128;
+    ((q / f) * 10_000_000 + (q % f) * 10_000_000 / f) as u64
+}
+
 /// `WHV_REGISTER_VALUE` is `DECLSPEC_ALIGN(16)` in the SDK, but the
 /// windows-sys binding is only 8-aligned. WinHvPlatform reads the array with
 /// aligned vector loads, so an 8-mod-16 stack array access-violates.
@@ -343,10 +365,22 @@ impl WhpVm {
                 // Bit 3: AccessPartitionReferenceCounter
                 // Bit 7: Hypercalls
                 // Bit 8: AccessVpIndex
-                // Bit 9: AccessPartitionReferenceTsc
+                // Bit 9: AccessPartitionReferenceTsc — intentionally OFF:
+                //   the TSC page reads through the VIRTUAL TSC, which only
+                //   advances while a VP is inside WHvRunVirtualProcessor.
+                //   WHP doesn't park HLT'd VPs (we sleep on the host per
+                //   HLT exit), so with the TSC page the guest clock froze
+                //   while idle (observed 30 min drift in 30 min). The
+                //   reference counter MSR advances in real time per the
+                //   TLFS, so the guest falls back to the MSR clocksource.
                 // Bit 11: AccessFrequencyRegs
+                // Bit 3 (AccessPartitionReferenceCounter) is also OFF: WHP's
+                // partition reference time has the same only-advances-while-
+                // running behavior, so reads of HV_X64_MSR_TIME_REF_COUNT
+                // must exit to the VMM (UnhandledMsrs bitmap), which serves
+                // them from host QPC (host_reference_time_100ns).
                 unsafe {
-                    p.SyntheticProcessorFeaturesBanks.Anonymous.AsUINT64[0] = 0xB8F;
+                    p.SyntheticProcessorFeaturesBanks.Anonymous.AsUINT64[0] = 0x987;
                 }
             },
         )?;
@@ -390,8 +424,14 @@ impl WhpVm {
         const ACCESS_REF_COUNTER: u32 = 1 << 1;
         const ACCESS_HYPERCALLS: u32 = 1 << 5;
         const ACCESS_VP_INDEX: u32 = 1 << 6;
+        #[allow(dead_code)]
         const ACCESS_REF_TSC: u32 = 1 << 9;
         const ACCESS_FREQ_REGS: u32 = 1 << 11;
+        // ACCESS_REF_TSC intentionally absent: the TSC page reads through
+        // the virtual TSC, which only advances while a VP is inside
+        // WHvRunVirtualProcessor — with our sleep-per-HLT idle handling the
+        // guest clock froze while idle. The reference counter MSR advances
+        // in real time (TLFS), so the guest uses hyperv_clocksource_msr.
         cpuid_results.push(WHV_X64_CPUID_RESULT {
             Function: 0x40000003,
             Reserved: [0; 3],
@@ -399,7 +439,6 @@ impl WhpVm {
                 | ACCESS_REF_COUNTER
                 | ACCESS_HYPERCALLS
                 | ACCESS_VP_INDEX
-                | ACCESS_REF_TSC
                 | ACCESS_FREQ_REGS,
             Ebx: 0,
             Ecx: 0,

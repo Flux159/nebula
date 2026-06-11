@@ -43,6 +43,10 @@ use crate::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
 use crate::vmm_config::net::NetBuilder;
 #[cfg(target_arch = "x86_64")]
 use devices::legacy::Cmos;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use devices::legacy::IoApic;
+#[cfg(target_arch = "x86_64")]
+use devices::legacy::IrqChipT;
 #[cfg(all(target_os = "linux", target_arch = "riscv64"))]
 use devices::legacy::KvmAia;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -52,10 +56,6 @@ use devices::legacy::Serial;
 use devices::legacy::VcpuList;
 #[cfg(target_os = "macos")]
 use devices::legacy::{GicV3, HvfGicV3};
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use devices::legacy::IoApic;
-#[cfg(target_arch = "x86_64")]
-use devices::legacy::IrqChipT;
 use devices::legacy::{IrqChip, IrqChipDevice};
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 use devices::legacy::{KvmGicV2, KvmGicV3};
@@ -84,12 +84,12 @@ use crate::vstate::MeasuredRegion;
 use crate::vstate::{Error as VstateError, Vcpu, VcpuConfig, Vm};
 use arch::{ArchMemoryInfo, InitrdConfig};
 use device_manager::shm::ShmManager;
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+use devices::virtio::VirtioShmRegion;
 #[cfg(feature = "gpu")]
 use devices::virtio::display::DisplayInfo;
 #[cfg(feature = "gpu")]
 use devices::virtio::display::NoopDisplayBackend;
-#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-use devices::virtio::VirtioShmRegion;
 #[cfg(all(unix, not(any(feature = "tee", feature = "aws-nitro"))))]
 use devices::virtio::fs::ExportTable;
 use flate2::read::GzDecoder;

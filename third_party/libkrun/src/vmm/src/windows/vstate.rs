@@ -18,11 +18,10 @@ use std::thread;
 
 use super::super::{FC_EXIT_CODE_GENERIC_ERROR, FC_EXIT_CODE_OK};
 
-use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
 use utils::eventfd::EventFd;
 use vm_memory::{
-    Address, Bytes, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryMmap,
-    GuestMemoryRegion,
+    Address, Bytes, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryMmap, GuestMemoryRegion,
 };
 use whp::{self, CpuidExitInfo, MsrExitInfo, VcpuExitReason, WhpEmulator, WhpVcpu, WhpVm};
 use windows_sys::Win32::Foundation::S_OK;
@@ -107,10 +106,7 @@ impl Vm {
         Ok(Vm { whp_vm })
     }
 
-    pub fn memory_init(
-        &mut self,
-        guest_mem: &GuestMemoryMmap,
-    ) -> Result<()> {
+    pub fn memory_init(&mut self, guest_mem: &GuestMemoryMmap) -> Result<()> {
         for region in guest_mem.iter() {
             // It's safe to unwrap because the guest address is valid.
             let host_addr = guest_mem.get_host_address(region.start_addr()).unwrap();
@@ -169,11 +165,19 @@ unsafe extern "system" fn io_port_callback(
     if io.Direction != 0 {
         let data_bytes = io.Data.to_le_bytes();
         let access_size = (io.AccessSize as usize).min(data_bytes.len());
-        bus.write(ctx.vp_index as u64, io.Port as u64, &data_bytes[..access_size]);
+        bus.write(
+            ctx.vp_index as u64,
+            io.Port as u64,
+            &data_bytes[..access_size],
+        );
     } else {
         let mut data_bytes = [0u8; 4];
         let access_size = (io.AccessSize as usize).min(data_bytes.len());
-        bus.read(ctx.vp_index as u64, io.Port as u64, &mut data_bytes[..access_size]);
+        bus.read(
+            ctx.vp_index as u64,
+            io.Port as u64,
+            &mut data_bytes[..access_size],
+        );
         io.Data = u32::from_le_bytes(data_bytes);
     }
     S_OK
@@ -190,12 +194,12 @@ unsafe extern "system" fn memory_callback(
     };
     let size = (ma.AccessSize as usize).min(ma.Data.len());
 
-    // Try guest RAM first. If the GPA is in a RAM region succeeds immediately. 
+    // Try guest RAM first. If the GPA is in a RAM region succeeds immediately.
     // Otherwise it's an actual MMIO access and we fall through to the MMIO bus.
     if !ctx.guest_mem.is_null() {
         let gpa = GuestAddress(ma.GpaAddress);
-        let mem = unsafe { &*ctx.guest_mem };        
-        if ma.Direction != 0 {            
+        let mem = unsafe { &*ctx.guest_mem };
+        if ma.Direction != 0 {
             if mem.write_slice(&ma.Data[..size], gpa).is_ok() {
                 return S_OK;
             }
@@ -315,7 +319,7 @@ impl Vcpu {
         let emulator =
             WhpEmulator::new(build_emulator_callbacks()).map_err(Error::CreateEmulator)?;
         debug!("vcpu {id}: emulator created");
-        
+
         let (event_sender, event_receiver) = unbounded();
         let (response_sender, response_receiver) = unbounded();
 
@@ -340,7 +344,10 @@ impl Vcpu {
         kernel_boot: bool,
     ) -> Result<()> {
         if kernel_boot {
-            debug!("vcpu configure: setup_regs entry=0x{:x}", kernel_start_addr.raw_value());
+            debug!(
+                "vcpu configure: setup_regs entry=0x{:x}",
+                kernel_start_addr.raw_value()
+            );
             arch::x86_64::regs::setup_regs(&self.whp_vcpu, kernel_start_addr.raw_value())
                 .map_err(Error::REGSConfiguration)?;
             debug!("vcpu configure: setup_sregs");
@@ -348,8 +355,7 @@ impl Vcpu {
                 .map_err(Error::SREGSConfiguration)?;
             if self.cpu_index() == 0 {
                 debug!("vcpu configure: setup_msrs");
-                arch::x86_64::msr::setup_msrs(&self.whp_vcpu)
-                    .map_err(Error::MSRSConfiguration)?;
+                arch::x86_64::msr::setup_msrs(&self.whp_vcpu).map_err(Error::MSRSConfiguration)?;
             }
             debug!("vcpu configure: done");
         }
@@ -487,10 +493,10 @@ impl Vcpu {
                 Ok(VcpuEmulation::Handled)
             }
             VcpuExitReason::Halt => {
-                // A Linux guest hits HLT when idle. 
-                // WHP handles most HLT states internally (if interrupts are enabled), 
+                // A Linux guest hits HLT when idle.
+                // WHP handles most HLT states internally (if interrupts are enabled),
                 // but if we land here, the vCPU is truly stalled.
-                
+
                 // Check if we should actually be shutting down.
                 if self.exit_evt.is_signaled() {
                     return Ok(VcpuEmulation::Stopped);
@@ -508,17 +514,24 @@ impl Vcpu {
                 Ok(VcpuEmulation::Handled)
             }
             VcpuExitReason::Canceled => {
-                // If the vCPU was canceled while waiting for an interrupt window, 
-                // and the guest has now unmasked interrupts (IF=1), clear the window 
+                // If the vCPU was canceled while waiting for an interrupt window,
+                // and the guest has now unmasked interrupts (IF=1), clear the window
                 // request to prevent a spurious InterruptWindow exit storm on re-entry.
-                let rflags = self.whp_vcpu.get_registers64([WHvX64RegisterRflags]).unwrap_or([0]);
+                let rflags = self
+                    .whp_vcpu
+                    .get_registers64([WHvX64RegisterRflags])
+                    .unwrap_or([0]);
                 if rflags[0] & 0x200 != 0 {
                     let _ = self.whp_vcpu.clear_interrupt_window();
                 }
                 Ok(VcpuEmulation::Handled)
             }
             _ => {
-                error!("vCPU {} unhandled or unexpected exit reason: {:?}", self.cpu_index(), reason);
+                error!(
+                    "vCPU {} unhandled or unexpected exit reason: {:?}",
+                    self.cpu_index(),
+                    reason
+                );
                 Err(Error::VcpuUnhandledExit)
             }
         };
@@ -534,12 +547,19 @@ impl Vcpu {
 
     /// Handle an MSR read/write exit for Hyper-V synthetic MSRs.
     fn handle_msr_access(&self, info: &MsrExitInfo) -> Result<()> {
-        let mut rax = 0u64;
-        let mut rdx = 0u64;
+        // HV_X64_MSR_TIME_REF_COUNT: partition reference time, 100ns units.
+        // Served from host QPC because WHP's own reference time only
+        // advances while a VP is running (idle guests froze in time).
+        const HV_X64_MSR_TIME_REF_COUNT: u32 = 0x4000_0020;
 
         if info.is_write {
             self.whp_vcpu.advance_rip().map_err(Error::Emulation)
         } else {
+            let value = match info.msr_number {
+                HV_X64_MSR_TIME_REF_COUNT => whp::host_reference_time_100ns(),
+                _ => 0,
+            };
+            let (rax, rdx) = (value & 0xFFFF_FFFF, value >> 32);
             self.whp_vcpu
                 .complete_msr_read(rax, rdx)
                 .map_err(Error::Emulation)
@@ -655,11 +675,7 @@ mod tests {
         (vm, vcpu, gm)
     }
 
-    fn queue_event_expect_response(
-        handle: &VcpuHandle,
-        event: VcpuEvent,
-        response: VcpuResponse,
-    ) {
+    fn queue_event_expect_response(handle: &VcpuHandle, event: VcpuEvent, response: VcpuResponse) {
         handle
             .send_event(event)
             .expect("failed to send event to vcpu");
@@ -721,10 +737,7 @@ mod tests {
     #[test]
     fn test_build_emulator_callbacks() {
         let cbs = build_emulator_callbacks();
-        assert_eq!(
-            cbs.Size,
-            mem::size_of::<WHV_EMULATOR_CALLBACKS>() as u32,
-        );
+        assert_eq!(cbs.Size, mem::size_of::<WHV_EMULATOR_CALLBACKS>() as u32,);
         assert!(cbs.WHvEmulatorIoPortCallback.is_some());
         assert!(cbs.WHvEmulatorMemoryCallback.is_some());
         assert!(cbs.WHvEmulatorGetVirtualProcessorRegisters.is_some());
