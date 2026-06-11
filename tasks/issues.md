@@ -278,3 +278,29 @@ limitations; routine TODOs live in code.)
   EventFd. Handled by treating `WouldBlock` queue-event reads as quiet no-ops
   (block/vsock/console). If we ever see sustained spinning, the fix is to
   re-arm only after the consumer resets the event.
+
+- **(2026-06-10) winsock SD_RECEIVE shutdown RSTs with queued data.** The guest
+  closes exec streams with both vsock shutdown flags; mapping that to
+  `Shutdown::Both` on the host loopback TcpStream made winsock send RST when
+  inbound data was still queued, destroying the final output + exit status of
+  short commands race-dependently (unix sockets never do this). The Windows
+  vsock backend now propagates only the FIN (SD_SEND) and ignores the
+  receive-half shutdown.
+
+- **(2026-06-10) WHP guests booted with a 1999 wall clock — CMOS had no RTC.**
+  The fork's CMOS device only carried memory-size registers; the mc146818
+  driver read zeros and Linux fell back to 1999-11-30, breaking every TLS
+  handshake (docker pulls failed before the first byte). KVM masked this via
+  kvmclock; WHP has no paravirt clock. Fixed by serving live BCD time/date/
+  status RTC registers from the host clock. Long-running guests still have no
+  time sync (no NTP without... actually usernet provides outbound — guests
+  can NTP; the engine vessel doesn't run an NTP daemon). Watch for drift on
+  long-lived Windows vessels; candidate: Hyper-V reference-TSC time sync or a
+  periodic agent settimeofday.
+
+- **(2026-06-10) Force-killing the Windows VM worker corrupts the data disk**
+  (expected — dirty ext4, no journal replay survived repeated mid-write
+  kills during bring-up; EBADMSG from /var/lib/nebula afterwards). Dev-loop
+  hygiene: `nebula down` (graceful) before rebuilds; recovery: delete
+  data.img. The guest could run e2fsck -p on mount failure in nebula-init —
+  TODO worth doing for crash resilience on all OSes.
