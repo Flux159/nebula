@@ -1,17 +1,27 @@
 # Better slim Kubernetes — the apiserver-lite roadmap
 
-> **Status (2026-06): Tier A is built.** `slim-kubeapi` is a passive
-> apiserver-lite — discovery, generic CRUD, **watch** (resourceVersion +
-> 410-on-stale), and **dynamic CRD registration** over an in-memory store.
-> Validated against **real `kubectl` v1.35** (12/12): `api-resources`, core
-> CRUD, applying a CRD → it appears in discovery → custom-resource round-trip,
-> and `kubectl get -w` streaming both replayed and live events. It does NOT
-> reconcile (a stored Deployment doesn't run — that's the facade / Tier B).
-> One caveat: `kubectl apply` does a client-side OpenAPI-v2-*protobuf*
-> preflight slim doesn't serve, so CLI users pass `--validate=false`;
-> client-go operators don't do that preflight and need no flag. Remaining to
-> ship it to in-pod operators: host it in the vessel on a TLS port + project a
-> ServiceAccount token/CA + a `kubernetes.default` Service (integration, below).
+> **Status (2026-06): Tiers A + B built and wired in.** This roadmap is now
+> largely shipped:
+> - **Tier A — passive apiserver** (`slim-kubeapi`): discovery, generic CRUD,
+>   **watch** (resourceVersion + 410-on-stale), **dynamic CRD registration**,
+>   merge-patch, status + scale subresources, OpenAPI **v2 (protobuf) + v3** so
+>   **stock `kubectl apply` works with no flags**. Validated vs real `kubectl`.
+> - **Hosted in slimd** on `:6443` over **TLS** (self-signed CA via rcgen+rustls).
+> - **Tier B — controller bridge**: slimd reconciles stored
+>   Deployments/ReplicaSets/StatefulSets/Jobs/Pods into **real engine
+>   containers** and writes Pod status back. `kubectl apply` of a Deployment
+>   actually spawns containers; scale/delete reconcile. (test/kube-bridge.sh, 9/9)
+> - **In-pod operators**: each pod gets the projected ServiceAccount dir
+>   (ca.crt/token/namespace) + `KUBERNETES_SERVICE_*` env + a `kubernetes`
+>   Service, so a client-go in-cluster client connects over CA-verified TLS.
+>   (test/kube-incluster.sh, 10/10 — real in-pod curl lists pods)
+>
+> Still genuinely out of scope (the hard tail below): real RBAC enforcement,
+> admission/conversion webhooks, multi-version CRD conversion, kubelet
+> exec/log/port-forward *proxying through the apiserver* (slim does exec/logs
+> via the engine, not the apiserver subresource), and the full operator
+> ecosystem. The pieces below describe what an operator needs; most of the
+> "passive" half is now done.
 
 
 

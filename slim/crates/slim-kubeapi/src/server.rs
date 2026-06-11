@@ -7,7 +7,7 @@
 use crate::store::{Gone, ResourceInfo, SharedStore, WatchEvent};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::Arc;
 
 pub struct ApiServer {
@@ -38,18 +38,25 @@ impl ApiServer {
         Ok(())
     }
 
-    fn handle_conn(&self, stream: TcpStream) -> std::io::Result<()> {
-        let mut reader = BufReader::new(stream.try_clone()?);
-        let Some(req) = read_request(&mut reader)? else { return Ok(()) };
-        let mut w = stream;
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.route(&req, &mut w)));
-        if let Ok(Err(_)) | Err(_) = res {
-            let _ = write_json(&mut w, 500, &status_obj(500, "internal error", "InternalError"));
+    /// Generic over the stream so the same handlers serve plain TCP and TLS
+    /// (rustls StreamOwned). The full request is read up front, then handlers
+    /// write to the stream as `&mut dyn Write`.
+    pub fn handle_conn<S: Read + Write>(&self, mut stream: S) -> std::io::Result<()> {
+        let req = {
+            let mut reader = BufReader::new(&mut stream);
+            match read_request(&mut reader)? {
+                Some(r) => r,
+                None => return Ok(()),
+            }
+        };
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.route(&req, &mut stream)));
+        if matches!(res, Ok(Err(_)) | Err(_)) {
+            let _ = write_json(&mut stream, 500, &status_obj(500, "internal error", "InternalError"));
         }
         Ok(())
     }
 
-    fn route(&self, req: &Req, w: &mut TcpStream) -> std::io::Result<()> {
+    fn route(&self, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
         let segs: Vec<&str> = req.path.split('/').filter(|s| !s.is_empty()).collect();
         match (req.method.as_str(), segs.as_slice()) {
             // ---- meta / discovery ----
@@ -111,7 +118,7 @@ impl ApiServer {
     ///   [namespaces, ns, resource]
     ///   [namespaces, ns, resource, name]
     ///   [namespaces, ns, resource, name, subresource]
-    fn handle_resource(&self, group: &str, _version: &str, rest: &[&str], req: &Req, w: &mut TcpStream, verb: Verb) -> std::io::Result<()> {
+    fn handle_resource(&self, group: &str, _version: &str, rest: &[&str], req: &Req, w: &mut dyn Write, verb: Verb) -> std::io::Result<()> {
         let (ns, resource, name, subresource): (Option<String>, &str, Option<&str>, Option<&str>) = match rest {
             ["namespaces", ns, resource] => (Some(ns.to_string()), resource, None, None),
             ["namespaces", ns, resource, name] => (Some(ns.to_string()), resource, Some(name), None),
@@ -145,7 +152,7 @@ impl ApiServer {
         }
     }
 
-    fn do_list(&self, info: &ResourceInfo, ns: Option<&str>, req: &Req, w: &mut TcpStream) -> std::io::Result<()> {
+    fn do_list(&self, info: &ResourceInfo, ns: Option<&str>, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
         let labels = label_selector(&req.query);
         let (items, rv) = self.store.list(info, ns, &labels);
         let list = json!({
@@ -157,7 +164,7 @@ impl ApiServer {
         write_json(w, 200, &list)
     }
 
-    fn do_get(&self, info: &ResourceInfo, ns: &Option<String>, name: &str, w: &mut TcpStream) -> std::io::Result<()> {
+    fn do_get(&self, info: &ResourceInfo, ns: &Option<String>, name: &str, w: &mut dyn Write) -> std::io::Result<()> {
         let nsv = ns.clone().unwrap_or_default();
         match self.store.get(info, &nsv, name) {
             Some(obj) => write_json(w, 200, &obj),
@@ -165,7 +172,7 @@ impl ApiServer {
         }
     }
 
-    fn do_create(&self, info: &ResourceInfo, ns: &Option<String>, req: &Req, w: &mut TcpStream) -> std::io::Result<()> {
+    fn do_create(&self, info: &ResourceInfo, ns: &Option<String>, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
         let Ok(obj) = serde_json::from_slice::<Value>(&req.body) else {
             return write_json(w, 400, &status_obj(400, "invalid body", "BadRequest"));
         };
@@ -185,7 +192,7 @@ impl ApiServer {
         write_json(w, 201, &created)
     }
 
-    fn do_update(&self, info: &ResourceInfo, ns: &Option<String>, name: &str, sub: Option<&str>, req: &Req, w: &mut TcpStream) -> std::io::Result<()> {
+    fn do_update(&self, info: &ResourceInfo, ns: &Option<String>, name: &str, sub: Option<&str>, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
         let Ok(mut obj) = serde_json::from_slice::<Value>(&req.body) else {
             return write_json(w, 400, &status_obj(400, "invalid body", "BadRequest"));
         };
@@ -208,7 +215,7 @@ impl ApiServer {
         write_json(w, 200, &saved)
     }
 
-    fn do_patch(&self, info: &ResourceInfo, ns: &Option<String>, name: &str, sub: Option<&str>, req: &Req, w: &mut TcpStream) -> std::io::Result<()> {
+    fn do_patch(&self, info: &ResourceInfo, ns: &Option<String>, name: &str, sub: Option<&str>, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
         let nsv = ns.clone().unwrap_or_default();
         let Some(mut existing) = self.store.get(info, &nsv, name) else {
             return write_json(w, 404, &status_obj(404, &format!("{} \"{name}\" not found", info.singular), "NotFound"));
@@ -226,7 +233,7 @@ impl ApiServer {
         write_json(w, 200, &saved)
     }
 
-    fn do_delete(&self, info: &ResourceInfo, ns: &Option<String>, name: &str, w: &mut TcpStream) -> std::io::Result<()> {
+    fn do_delete(&self, info: &ResourceInfo, ns: &Option<String>, name: &str, w: &mut dyn Write) -> std::io::Result<()> {
         let nsv = ns.clone().unwrap_or_default();
         match self.store.delete(info, &nsv, name) {
             Some(obj) => write_json(w, 200, &obj),
@@ -237,7 +244,7 @@ impl ApiServer {
     /// The `/scale` subresource: GET returns an autoscaling/v1 Scale built
     /// from `.spec.replicas`; PUT/PATCH sets `.spec.replicas` on the parent
     /// and returns the updated Scale (what kubectl `scale` expects).
-    fn handle_scale(&self, verb: Verb, info: &ResourceInfo, ns: &Option<String>, name: &str, req: &Req, w: &mut TcpStream) -> std::io::Result<()> {
+    fn handle_scale(&self, verb: Verb, info: &ResourceInfo, ns: &Option<String>, name: &str, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
         let nsv = ns.clone().unwrap_or_default();
         let Some(mut obj) = self.store.get(info, &nsv, name) else {
             return write_json(w, 404, &status_obj(404, &format!("{} \"{name}\" not found", info.singular), "NotFound"));
@@ -264,7 +271,7 @@ impl ApiServer {
         write_json(w, 200, &scale)
     }
 
-    fn do_watch(&self, info: &ResourceInfo, ns: Option<&str>, req: &Req, w: &mut TcpStream) -> std::io::Result<()> {
+    fn do_watch(&self, info: &ResourceInfo, ns: Option<&str>, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
         let labels = label_selector(&req.query);
         let since = query_str(&req.query, "resourceVersion").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
         let (backlog, rx) = match self.store.watch(info, ns, labels, since) {
@@ -476,7 +483,7 @@ fn merge(base: &mut Value, patch: &Value) {
 
 // ---- HTTP plumbing ----
 
-fn read_request(reader: &mut BufReader<TcpStream>) -> std::io::Result<Option<Req>> {
+fn read_request<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Req>> {
     let mut head = Vec::new();
     loop {
         let mut line = Vec::new();
@@ -544,7 +551,7 @@ fn label_selector(q: &[(String, String)]) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-fn write_json(w: &mut TcpStream, code: u16, body: &Value) -> std::io::Result<()> {
+fn write_json(w: &mut dyn Write, code: u16, body: &Value) -> std::io::Result<()> {
     let bytes = serde_json::to_vec(body).unwrap_or_default();
     let head = format!(
         "HTTP/1.1 {code} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -556,7 +563,7 @@ fn write_json(w: &mut TcpStream, code: u16, body: &Value) -> std::io::Result<()>
     w.flush()
 }
 
-fn write_raw(w: &mut TcpStream, code: u16, ctype: &str, body: &[u8]) -> std::io::Result<()> {
+fn write_raw(w: &mut dyn Write, code: u16, ctype: &str, body: &[u8]) -> std::io::Result<()> {
     let head = format!(
         "HTTP/1.1 {code} {}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         reason_phrase(code),
@@ -601,7 +608,7 @@ fn openapi_v2_proto() -> Vec<u8> {
     doc
 }
 
-fn write_text(w: &mut TcpStream, code: u16, body: &str) -> std::io::Result<()> {
+fn write_text(w: &mut dyn Write, code: u16, body: &str) -> std::io::Result<()> {
     let head = format!(
         "HTTP/1.1 {code} {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         reason_phrase(code),
@@ -612,7 +619,7 @@ fn write_text(w: &mut TcpStream, code: u16, body: &str) -> std::io::Result<()> {
     w.flush()
 }
 
-fn write_watch_event(w: &mut TcpStream, ev: &WatchEvent) -> std::io::Result<()> {
+fn write_watch_event(w: &mut dyn Write, ev: &WatchEvent) -> std::io::Result<()> {
     let frame = json!({"type": ev.typ, "object": ev.object});
     let mut line = serde_json::to_vec(&frame).unwrap_or_default();
     line.push(b'\n');

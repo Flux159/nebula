@@ -13,32 +13,93 @@ use crate::engine::EngineRef;
 use serde_json::{json, Value};
 use slim_kubeapi::{ApiServer, SharedStore, Store};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 const OWNER: &str = "io.nebula.kube.owner"; // "<kind>/<ns>/<name>"
 const POD_OF: &str = "io.nebula.kube.pod"; // "<ns>/<podname>"
 const MANAGED: &str = "io.nebula.kube.bridge"; // "true"
 
-/// Start the apiserver-lite + the reconcile loop. Returns the shared store
-/// (so callers could seed it). Spawns background threads; never blocks.
+/// In-cluster context the bridge projects into pods so client-go operators
+/// reach the apiserver (KUBERNETES_SERVICE_HOST/PORT + the ServiceAccount dir).
+struct BridgeCtx {
+    ca_pem: String,
+    sa_root: PathBuf,
+    kube_host: String, // the bridge gateway IP slimd's TLS listener is on
+    kube_port: u16,
+}
+
+/// Start the apiserver-lite (TLS) + the reconcile loop. Spawns background
+/// threads; never blocks. Returns the shared store.
 pub fn start(engine: &EngineRef, api_addr: &str) -> SharedStore {
     let store = Store::new();
     seed_cluster(&store);
 
-    // Serve the API.
+    // The gateway IP of the default bridge is where containers reach slimd.
+    let gw = engine
+        .net
+        .get(slim_net::DEFAULT_NETWORK)
+        .map(|n| n.gateway())
+        .unwrap_or_else(|| "10.88.0.1".to_string());
+    let port: u16 = api_addr.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(6443);
+
     let api = ApiServer::new(store.clone());
     let addr = api_addr.to_string();
-    std::thread::spawn(move || {
-        if let Err(e) = api.serve(&addr) {
-            eprintln!("slimd: kube apiserver on {addr} stopped: {e}");
+    // TLS so in-cluster operators (always HTTPS) can connect; the CA is
+    // projected into pods. Falls back to plain HTTP if cert generation fails.
+    let gw_ip = gw.parse::<std::net::IpAddr>().ok();
+    let ca_pem = match slim_kubeapi::generate_tls(&[], gw_ip.as_slice()) {
+        Ok(id) => {
+            let ca = id.ca_pem.clone();
+            let api2 = api.clone();
+            let addr2 = addr.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = id.serve(api2, &addr2) {
+                    eprintln!("slimd: kube apiserver (TLS) on {addr2} stopped: {e}");
+                }
+            });
+            println!("slimd: kube apiserver-lite listening on https://{api_addr}");
+            ca
         }
-    });
-    println!("slimd: kube apiserver-lite listening on {api_addr}");
+        Err(e) => {
+            eprintln!("slimd: TLS cert gen failed ({e}); serving plain HTTP");
+            let api2 = api.clone();
+            let addr2 = addr.clone();
+            std::thread::spawn(move || {
+                let _ = api2.serve(&addr2);
+            });
+            String::new()
+        }
+    };
 
-    // Reconcile loop.
+    let ctx = BridgeCtx {
+        ca_pem,
+        sa_root: engine.paths.data.join("kube-sa"),
+        kube_host: gw,
+        kube_port: port,
+    };
+    register_kubernetes_service(&store, engine, &ctx);
+
     let engine = engine.clone();
     let store2 = store.clone();
-    std::thread::spawn(move || reconcile_loop(&engine, &store2));
+    std::thread::spawn(move || reconcile_loop(&engine, &store2, &ctx));
     store
+}
+
+/// Create the `kubernetes` Service in default + point its DNS at the apiserver.
+fn register_kubernetes_service(store: &SharedStore, engine: &EngineRef, ctx: &BridgeCtx) {
+    if let Some(info) = store.lookup("", "services") {
+        store.put(
+            &info,
+            json!({"metadata":{"name":"kubernetes","namespace":"default","labels":{"component":"apiserver"}},
+                   "spec":{"clusterIP": ctx.kube_host, "ports":[{"name":"https","port":ctx.kube_port,"targetPort":ctx.kube_port}]}}),
+            "default",
+            "kubernetes",
+            true,
+        );
+    }
+    for name in ["kubernetes.default.svc.cluster.local", "kubernetes.default.svc", "kubernetes.default", "kubernetes"] {
+        engine.dns.set(name, &ctx.kube_host);
+    }
 }
 
 /// Minimal cluster scaffolding so kubectl/operators see a sane world.
@@ -64,9 +125,9 @@ fn seed_cluster(store: &SharedStore) {
     }
 }
 
-fn reconcile_loop(engine: &EngineRef, store: &SharedStore) {
+fn reconcile_loop(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx) {
     loop {
-        if let Err(e) = reconcile_once(engine, store) {
+        if let Err(e) = reconcile_once(engine, store, ctx) {
             eprintln!("slimd: kube reconcile error: {e}");
         }
         std::thread::sleep(std::time::Duration::from_millis(1000));
@@ -83,7 +144,7 @@ struct Desired {
     restart: &'static str,
 }
 
-fn reconcile_once(engine: &EngineRef, store: &SharedStore) -> std::io::Result<()> {
+fn reconcile_once(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx) -> std::io::Result<()> {
     let mut desired: BTreeMap<String, Desired> = BTreeMap::new();
 
     // Deployments / ReplicaSets / StatefulSets → N replicas.
@@ -113,7 +174,7 @@ fn reconcile_once(engine: &EngineRef, store: &SharedStore) -> std::io::Result<()
 
     // Ensure desired containers exist + sync Pod objects.
     for d in desired.values() {
-        ensure_container(engine, store, d);
+        ensure_container(engine, store, ctx, d);
     }
 
     // Remove orphan containers we own that are no longer desired.
@@ -193,10 +254,10 @@ fn collect_bare_pod(obj: &Value, out: &mut BTreeMap<String, Desired>) {
     );
 }
 
-fn ensure_container(engine: &EngineRef, store: &SharedStore, d: &Desired) {
+fn ensure_container(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: &Desired) {
     let exists = engine.get_entry(&d.cname).is_ok();
     if !exists {
-        let Some(req) = build_create_req(store, d) else { return };
+        let Some(req) = build_create_req(store, ctx, d) else { return };
         // Pull image if needed, then create+start.
         let image = req.config.image.clone();
         if engine.store.resolve(&image).is_none() {
@@ -235,12 +296,17 @@ fn ensure_container(engine: &EngineRef, store: &SharedStore, d: &Desired) {
 
 /// Translate a pod template into a docker-style create request, resolving env
 /// from ConfigMaps/Secrets in the store.
-fn build_create_req(store: &SharedStore, d: &Desired) -> Option<slim_api::container::ContainerCreateRequest> {
+fn build_create_req(store: &SharedStore, ctx: &BridgeCtx, d: &Desired) -> Option<slim_api::container::ContainerCreateRequest> {
     let containers = d.template.get("containers").and_then(|c| c.as_array())?;
     let c0 = containers.first()?;
     let image = c0.get("image").and_then(|v| v.as_str())?.to_string();
 
     let mut env = Vec::new();
+    // In-cluster config for operators (client-go reads these env vars).
+    env.push(format!("KUBERNETES_SERVICE_HOST={}", ctx.kube_host));
+    env.push(format!("KUBERNETES_SERVICE_PORT={}", ctx.kube_port));
+    env.push(format!("KUBERNETES_SERVICE_PORT_HTTPS={}", ctx.kube_port));
+    env.push(format!("KUBERNETES_PORT=tcp://{}:{}", ctx.kube_host, ctx.kube_port));
     // envFrom
     for ef in c0.get("envFrom").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
         if let Some(n) = ef.pointer("/configMapRef/name").and_then(|v| v.as_str()) {
@@ -300,12 +366,19 @@ fn build_create_req(store: &SharedStore, d: &Desired) -> Option<slim_api::contai
     if !entrypoint.is_empty() {
         config.entrypoint = Some(entrypoint);
     }
+    // Project the ServiceAccount dir (ca.crt + token + namespace) so in-cluster
+    // clients authenticate/verify TLS the standard way.
+    let mut binds = Vec::new();
+    if let Some(sa_dir) = ensure_sa(ctx, &d.pod_ns) {
+        binds.push(format!("{}:/var/run/secrets/kubernetes.io/serviceaccount:ro", sa_dir.display()));
+    }
     let host_config = slim_api::container::HostConfig {
         restart_policy: slim_api::container::RestartPolicy {
             name: d.restart.to_string(),
             maximum_retry_count: 0,
         },
         network_mode: "bridge".to_string(),
+        binds,
         ..Default::default()
     };
     // Endpoint alias = the pod's app label + pod name, for in-cluster DNS.
@@ -324,6 +397,26 @@ fn build_create_req(store: &SharedStore, d: &Desired) -> Option<slim_api::contai
         host_config,
         networking_config: slim_api::container::NetworkingConfig { endpoints_config: endpoints },
     })
+}
+
+/// Write (idempotently) the ServiceAccount dir for a namespace: ca.crt, a
+/// static bearer token (auth isn't enforced — the VM is the boundary), and the
+/// namespace file. Returns the dir to bind-mount, or None if no CA (plain HTTP).
+fn ensure_sa(ctx: &BridgeCtx, ns: &str) -> Option<PathBuf> {
+    if ctx.ca_pem.is_empty() {
+        return None;
+    }
+    let dir = ctx.sa_root.join(ns);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return None;
+    }
+    let _ = std::fs::write(dir.join("ca.crt"), &ctx.ca_pem);
+    let _ = std::fs::write(dir.join("namespace"), ns);
+    let token_path = dir.join("token");
+    if !token_path.exists() {
+        let _ = std::fs::write(&token_path, format!("slim-sa.{ns}.token"));
+    }
+    Some(dir)
 }
 
 fn config_data(store: &SharedStore, resource: &str, ns: &str, name: &str) -> BTreeMap<String, String> {

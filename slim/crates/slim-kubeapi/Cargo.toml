@@ -9,3 +9,7 @@ serde.workspace = true
 serde_json.workspace = true
 httparse.workspace = true
 libc.workspace = true
+# TLS for in-pod operators (client-go in-cluster config is always HTTPS).
+# ring backend: builds cleanly for the musl guest (same as ureq's ring).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }

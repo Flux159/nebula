@@ -79,6 +79,39 @@ struct ChildPlan {
 const TMPFS_FLAGS: libc::c_ulong = libc::MS_NOSUID;
 const BIND: libc::c_ulong = libc::MS_BIND | libc::MS_REC;
 
+/// Join a container-absolute path under `root`, resolving symlink components
+/// but clamping them inside `root` (absolute links restart at root, `..` can't
+/// escape). Prevents bind targets under symlinked dirs (e.g. /var/run -> /run)
+/// from resolving onto the host. Bounded against symlink loops.
+fn secure_join(root: &Path, target: &str) -> std::path::PathBuf {
+    let mut cur = root.to_path_buf();
+    let mut hops = 0;
+    for comp in target.split('/').filter(|c| !c.is_empty() && *c != ".") {
+        if comp == ".." {
+            if cur != *root {
+                cur.pop();
+            }
+            continue;
+        }
+        let next = cur.join(comp);
+        match std::fs::read_link(&next) {
+            Ok(link) if hops < 40 => {
+                hops += 1;
+                cur = if link.is_absolute() {
+                    root.join(link.strip_prefix("/").unwrap_or(&link))
+                } else {
+                    cur.join(link)
+                };
+                if !cur.starts_with(root) {
+                    cur = root.to_path_buf();
+                }
+            }
+            _ => cur = next,
+        }
+    }
+    cur
+}
+
 fn build_plan(spec: &ContainerSpec) -> io::Result<ChildPlan> {
     let root = &spec.rootfs;
     if !root.is_dir() {
@@ -109,8 +142,11 @@ fn build_plan(spec: &ContainerSpec) -> io::Result<ChildPlan> {
     // Bind mounts: parent pre-creates targets (dir or empty file) inside the
     // merged rootfs so the child only needs mount(2).
     for b in &spec.binds {
-        let rel = b.target.trim_start_matches('/');
-        let tgt = root.join(rel);
+        // Resolve the target through symlinks CONFINED to the rootfs. Distros
+        // symlink e.g. /var/run -> /run (absolute); a naive root.join() would
+        // let the OS resolve that to the HOST's /run and the bind would land
+        // outside the container. secure_join keeps resolution inside root.
+        let tgt = secure_join(root, &b.target);
         if b.source.is_dir() {
             std::fs::create_dir_all(&tgt)?;
         } else {
@@ -705,7 +741,23 @@ pub fn exec_in_container_cg(
     let proc_root = PathBuf::from(format!("/proc/{target_pid}/root"));
     let (uid, gid, sgids, home) = resolve_user(&proc_root, &spec.user)?;
 
-    let mut env = spec.env.clone();
+    // docker exec inherits the container's environment. Read the running
+    // PID 1's /proc/<pid>/environ (NUL-separated), then let the exec's own env
+    // override per key, then fill defaults.
+    let mut env: Vec<String> = std::fs::read(format!("/proc/{target_pid}/environ"))
+        .map(|b| {
+            b.split(|c| *c == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| String::from_utf8_lossy(s).into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    for e in &spec.env {
+        if let Some((k, _)) = e.split_once('=') {
+            env.retain(|x| !x.starts_with(&format!("{k}=")));
+        }
+        env.push(e.clone());
+    }
     let has = |k: &str, env: &[String]| env.iter().any(|e| e.starts_with(&format!("{k}=")));
     if !has("PATH", &env) {
         env.push("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into());

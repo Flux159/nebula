@@ -12,9 +12,11 @@
 
 pub mod server;
 pub mod store;
+pub mod tls;
 
 pub use server::ApiServer;
 pub use store::{ResourceInfo, SharedStore, Store};
+pub use tls::{generate as generate_tls, TlsIdentity};
 
 /// Convenience: build a store and serve the API on `addr` (blocking).
 pub fn serve(addr: &str) -> std::io::Result<()> {
