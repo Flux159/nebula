@@ -1,6 +1,6 @@
 {
   "name": "@nebula-vm/sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Client SDK for Nebula — containers, Kubernetes, and microVMs on macOS",
   "license": "MIT",
   "type": "module",
