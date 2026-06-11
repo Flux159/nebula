@@ -73,6 +73,8 @@ pub struct Store {
     pub root: PathBuf,
     pub arch: String,
     db: Mutex<Db>,
+    /// db.json reads/writes are cross-process coordinated (shared layer cache).
+    shared: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -99,7 +101,55 @@ impl Store {
             a => a,
         }
         .to_string();
-        Ok(Store { root: root.to_path_buf(), arch, db: Mutex::new(db) })
+        // Shared mode: when the image store is an explicit (potentially shared)
+        // location, make db.json reads/writes cross-process safe so several
+        // engines can share one layer cache. Layers/blobs are content-addressed
+        // and idempotent, so only db.json metadata needs coordinating.
+        let shared = std::env::var("NEBULA_IMAGES_DIR").map(|v| !v.trim().is_empty()).unwrap_or(false);
+        Ok(Store { root: root.to_path_buf(), arch, db: Mutex::new(db), shared })
+    }
+
+    /// Take an exclusive cross-process lock on the store (shared mode only).
+    /// The returned file holds the flock until dropped.
+    fn flock_exclusive(&self) -> Option<std::fs::File> {
+        if !self.shared {
+            return None;
+        }
+        use std::os::unix::io::AsRawFd;
+        let f = std::fs::OpenOptions::new().create(true).write(true).open(self.root.join(".db.lock")).ok()?;
+        unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+        Some(f)
+    }
+
+    /// In shared mode, reload db.json from disk so this engine sees images other
+    /// engines pulled into the shared cache. No-op for a private store.
+    fn refresh(&self) {
+        if !self.shared {
+            return;
+        }
+        if let Ok(b) = std::fs::read(self.root.join("db.json")) {
+            if let Ok(disk) = serde_json::from_slice::<Db>(&b) {
+                *self.db.lock().unwrap() = disk;
+            }
+        }
+    }
+
+    /// Mutate the db under an exclusive cross-process lock (shared mode reloads
+    /// the latest on-disk db first, so concurrent engines don't clobber each
+    /// other's adds/removes), then persist atomically.
+    fn with_write_db<R>(&self, f: impl FnOnce(&mut Db) -> R) -> R {
+        let _lock = self.flock_exclusive();
+        let mut db = self.db.lock().unwrap();
+        if self.shared {
+            if let Ok(b) = std::fs::read(self.root.join("db.json")) {
+                if let Ok(disk) = serde_json::from_slice::<Db>(&b) {
+                    *db = disk;
+                }
+            }
+        }
+        let r = f(&mut db);
+        self.save_db(&db);
+        r
     }
 
     fn save_db(&self, db: &Db) {
@@ -248,8 +298,7 @@ impl Store {
             os: oci.os.clone(),
             config: oci.config.clone(),
         };
-        {
-            let mut db = self.db.lock().unwrap();
+        self.with_write_db(|db| {
             db.images.insert(image_id.clone(), record.clone());
             let repo_key = r.familiar_repo();
             if !r.tag.is_empty() {
@@ -259,8 +308,7 @@ impl Store {
                 .entry(repo_key)
                 .or_default()
                 .insert(manifest_digest.clone(), image_id.clone());
-            self.save_db(&db);
-        }
+        });
         emit(PullEvent::Status(format!("Digest: {manifest_digest}")));
         emit(PullEvent::Status(format!(
             "Status: Downloaded newer image for {}",
@@ -272,6 +320,7 @@ impl Store {
     // ---------- lookup / list / tag / remove ----------
 
     pub fn resolve(&self, name_or_id: &str) -> Option<ImageRecord> {
+        self.refresh();
         let db = self.db.lock().unwrap();
         // repo:tag / repo@digest forms.
         let r = Reference::parse(name_or_id);
@@ -302,6 +351,7 @@ impl Store {
     }
 
     pub fn repo_tags(&self, image_id: &str) -> Vec<String> {
+        self.refresh();
         let db = self.db.lock().unwrap();
         let mut tags = Vec::new();
         for (repo, m) in db.repos.iter() {
@@ -315,6 +365,7 @@ impl Store {
     }
 
     pub fn repo_digests(&self, image_id: &str) -> Vec<String> {
+        self.refresh();
         let db = self.db.lock().unwrap();
         let mut out = Vec::new();
         for (repo, m) in db.digests.iter() {
@@ -328,6 +379,7 @@ impl Store {
     }
 
     pub fn list(&self) -> Vec<ImageRecord> {
+        self.refresh();
         self.db.lock().unwrap().images.values().cloned().collect()
     }
 
@@ -336,12 +388,12 @@ impl Store {
             .resolve(src)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("No such image: {src}")))?;
         let t = Reference::parse(target);
-        let mut db = self.db.lock().unwrap();
-        db.repos
-            .entry(t.familiar_repo())
-            .or_default()
-            .insert(if t.tag.is_empty() { "latest".into() } else { t.tag }, rec.id);
-        self.save_db(&db);
+        self.with_write_db(|db| {
+            db.repos
+                .entry(t.familiar_repo())
+                .or_default()
+                .insert(if t.tag.is_empty() { "latest".into() } else { t.tag }, rec.id);
+        });
         Ok(())
     }
 
@@ -357,64 +409,62 @@ impl Store {
         let rec = self.resolve(name_or_id).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("No such image: {name_or_id}"))
         })?;
-        let mut out = Vec::new();
-        let mut db = self.db.lock().unwrap();
-
         let r = Reference::parse(name_or_id);
-        let by_tag = db.repos.get(&r.familiar_repo()).and_then(|m| m.get(&r.tag)).is_some();
-        let all_tags: usize = db
-            .repos
-            .values()
-            .flat_map(|m| m.values())
-            .filter(|id| **id == rec.id)
-            .count();
+        self.with_write_db(|db| {
+            let mut out = Vec::new();
+            let by_tag = db.repos.get(&r.familiar_repo()).and_then(|m| m.get(&r.tag)).is_some();
+            let all_tags: usize = db
+                .repos
+                .values()
+                .flat_map(|m| m.values())
+                .filter(|id| **id == rec.id)
+                .count();
 
-        if by_tag && all_tags > 1 && !force {
-            // Untag only.
-            db.repos.get_mut(&r.familiar_repo()).unwrap().remove(&r.tag);
-            self.save_db(&db);
-            return Ok(vec![ImageDeleteResponse {
-                untagged: Some(format!("{}:{}", r.familiar_repo(), r.tag)),
-                deleted: None,
-            }]);
-        }
-        if in_use(&rec.id) && !force {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "conflict: unable to remove repository reference \"{name_or_id}\" (must force) - container is using its referenced image"
-                ),
-            ));
-        }
-        // Drop all tags + digests, then the image and any unshared layers.
-        for (repo, m) in db.repos.iter_mut() {
-            m.retain(|tag, id| {
-                if id == &rec.id {
-                    out.push(ImageDeleteResponse {
-                        untagged: Some(format!("{repo}:{tag}")),
-                        deleted: None,
-                    });
-                    false
-                } else {
-                    true
-                }
-            });
-        }
-        for m in db.digests.values_mut() {
-            m.retain(|_, id| id != &rec.id);
-        }
-        db.images.remove(&rec.id);
-        let still_used: std::collections::BTreeSet<&String> =
-            db.images.values().flat_map(|i| i.diff_ids.iter()).collect();
-        for diff in &rec.diff_ids {
-            if !still_used.contains(diff) {
-                let _ = std::fs::remove_dir_all(self.layer_dir(diff));
+            if by_tag && all_tags > 1 && !force {
+                // Untag only.
+                db.repos.get_mut(&r.familiar_repo()).unwrap().remove(&r.tag);
+                return Ok(vec![ImageDeleteResponse {
+                    untagged: Some(format!("{}:{}", r.familiar_repo(), r.tag)),
+                    deleted: None,
+                }]);
             }
-        }
-        let _ = std::fs::remove_file(self.blob_path(&rec.id));
-        out.push(ImageDeleteResponse { untagged: None, deleted: Some(rec.id.clone()) });
-        self.save_db(&db);
-        Ok(out)
+            if in_use(&rec.id) && !force {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "conflict: unable to remove repository reference \"{name_or_id}\" (must force) - container is using its referenced image"
+                    ),
+                ));
+            }
+            // Drop all tags + digests, then the image and any unshared layers.
+            for (repo, m) in db.repos.iter_mut() {
+                m.retain(|tag, id| {
+                    if id == &rec.id {
+                        out.push(ImageDeleteResponse {
+                            untagged: Some(format!("{repo}:{tag}")),
+                            deleted: None,
+                        });
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            for m in db.digests.values_mut() {
+                m.retain(|_, id| id != &rec.id);
+            }
+            db.images.remove(&rec.id);
+            let still_used: std::collections::BTreeSet<&String> =
+                db.images.values().flat_map(|i| i.diff_ids.iter()).collect();
+            for diff in &rec.diff_ids {
+                if !still_used.contains(diff) {
+                    let _ = std::fs::remove_dir_all(self.layer_dir(diff));
+                }
+            }
+            let _ = std::fs::remove_file(self.blob_path(&rec.id));
+            out.push(ImageDeleteResponse { untagged: None, deleted: Some(rec.id.clone()) });
+            Ok(out)
+        })
     }
 
     /// Register an image built locally (docker build / commit).
@@ -425,16 +475,16 @@ impl Store {
         tag_as: Option<&str>,
     ) -> io::Result<()> {
         std::fs::write(self.blob_path(&record.id), config_raw)?;
-        let mut db = self.db.lock().unwrap();
-        db.images.insert(record.id.clone(), record.clone());
-        if let Some(t) = tag_as {
-            let t = Reference::parse(t);
-            db.repos
-                .entry(t.familiar_repo())
-                .or_default()
-                .insert(if t.tag.is_empty() { "latest".into() } else { t.tag }, record.id.clone());
-        }
-        self.save_db(&db);
+        self.with_write_db(|db| {
+            db.images.insert(record.id.clone(), record.clone());
+            if let Some(t) = tag_as {
+                let t = Reference::parse(t);
+                db.repos
+                    .entry(t.familiar_repo())
+                    .or_default()
+                    .insert(if t.tag.is_empty() { "latest".into() } else { t.tag }, record.id.clone());
+            }
+        });
         Ok(())
     }
 

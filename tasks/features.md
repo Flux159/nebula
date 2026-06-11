@@ -917,3 +917,24 @@ wrapping + a bundled docker client are follow-ups).
 Three more fork bugs found and fixed on the way (issues.md): winsock
 SD_RECEIVE RST eating exec output, CMOS lacking RTC time registers
 (1999 clock → all TLS dead), spurious IOCP epoll wakeups.
+
+## HTTP embedding API (task #29, 2026-06-11)
+
+nebulad's v1alpha1 REST API is the embedding surface for nebula AND
+nebula-slim (same daemon, same API; slim only swaps guest profile/packaging).
+Decisions from the design discussion:
+- hyper 1.x directly (not axum — strictly larger, it wraps hyper; our routing
+  is a dozen fixed paths + a raw proxy). Dedicated tokio current-thread
+  runtime; the rest of nebulad stays sync.
+- Auth: NEBULA_API_TOKEN -> `Authorization: Bearer` on everything but
+  /healthz. Default bind 127.0.0.1; NEBULA_API_HOST/api_host overrides;
+  non-loopback binds REQUIRE a token (refused otherwise).
+- Container/k8s planes are PASSTHROUGH, not wrappers: /docker/* proxies
+  verbatim to the engine dockerd (any Docker SDK works unmodified;
+  with_upgrades for attach/exec hijack), GET /v1alpha1/kubeconfig hands out
+  the standalone kubeconfig for any k8s client.
+- Next: hoist vessel lifecycle out of nebula-cli/vessels.rs into
+  nebula_core::vessels (CLI stays daemon-free, calls the same library), then
+  REST endpoints: GET/POST /v1alpha1/vessels, POST .../{name}/snapshot|
+  restore|branch|start|stop, DELETE .../{name}. Branch-over-HTTP is the
+  tree-search embedding primitive. Then TS/Python SDK updates.

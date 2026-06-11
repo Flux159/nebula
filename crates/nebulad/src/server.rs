@@ -55,12 +55,19 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
     // Elastic memory (Phase 4).
     let balloon = crate::balloon::start(vessel.clone());
 
-    // REST API for SDKs/UI (Phase 10).
+    // REST API for SDKs/UI/embedders (Phase 10; hyper since the HTTP-embedding work).
     let cfg = crate::config::Config::load(&paths.config_toml()).unwrap_or_default();
+    let kubeconfig = paths
+        .config_toml()
+        .parent()
+        .map(|home| home.join("kubeconfig"))
+        .unwrap_or_default();
     crate::api::start(
         vessel.clone(),
         balloon.clone(),
         paths.docker_sock(),
+        kubeconfig,
+        cfg.api_host.clone(),
         cfg.api_port.unwrap_or(crate::api::DEFAULT_API_PORT),
     );
 

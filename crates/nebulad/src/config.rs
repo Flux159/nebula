@@ -17,9 +17,12 @@ pub struct Config {
     pub kernel: Option<PathBuf>,
     /// Override the rootfs image path (default: ~/.nebula/disks/rootfs.img).
     pub rootfs: Option<PathBuf>,
-    /// REST API port on 127.0.0.1 (default 7440; 0 disables the API).
+    /// REST API port (default 7440; 0 disables the API).
     /// Embedders running alongside a standalone Nebula should set this.
     pub api_port: Option<u16>,
+    /// REST API bind address (default 127.0.0.1). NEBULA_API_HOST overrides.
+    /// Non-loopback binds require NEBULA_API_TOKEN (bearer auth).
+    pub api_host: Option<String>,
     /// Local DNS zone for container names (default "nebula.local").
     /// Embedders can brand it: dns_zone = "galaxy.local".
     pub dns_zone: Option<String>,

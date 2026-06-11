@@ -50,7 +50,10 @@ impl Engine {
         let paths = Paths {
             data: data.to_path_buf(),
             state: data.join("containers"),
-            images: data.join("images"),
+            // NEBULA_IMAGES_DIR points the image/layer store at a shared, persistent
+            // location so multiple engines reuse one cache (pull-once, reuse-many,
+            // offline after warm-up). Must be a real (non-overlay) filesystem.
+            images: std::env::var("NEBULA_IMAGES_DIR").map(PathBuf::from).unwrap_or_else(|_| data.join("images")),
             volumes: data.join("volumes"),
             run: PathBuf::from(std::env::var("SLIM_RUN_DIR").unwrap_or_else(|_| "/run/slim".into())),
         };
