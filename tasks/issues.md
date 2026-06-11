@@ -299,10 +299,16 @@ limitations; routine TODOs live in code.)
   running on Hyper-V"). Root cause: the WHP partition advertises the Hyper-V
   identity + reference counter/TSC (synthetic features 0xB8F) but the guest
   kernel had no CONFIG_HYPERV/CONFIG_HYPERV_TIMER, so the hypervisor-served
-  clocksource didn't exist. Fragment now enables them; guest runs on
-  hyperv_clocksource_tsc_page with zero drift (uptime tracks wall time).
-  Remaining polish: ~15s constant boot offset (RTC read + boot duration) —
-  an agent settimeofday-from-host at first health check would zero it.
+  clocksource didn't exist. Fragment now enables them — which exposed part 3:
+  **WHP partition reference time (ref counter AND TSC page) only advances
+  while a VP is inside WHvRunVirtualProcessor.** With sleep-per-HLT idle
+  handling, both Hyper-V clocksources froze while idle. Final fix: the VMM
+  serves HV_X64_MSR_TIME_REF_COUNT itself from host QPC (CPUID drops
+  ACCESS_REF_TSC; features bank 0x987 so the MSR exits to userspace).
+  Verified: /proc/uptime tracks daemon wall time exactly; wall clock within
+  1s of host through boot. Cost: one MSR exit per guest clock read — a
+  host-backed TSC page is a future optimization if clock-read overhead ever
+  shows up in profiles.
 
 - **(2026-06-10) Force-killing the Windows VM worker corrupts the data disk**
   (expected — dirty ext4, no journal replay survived repeated mid-write
