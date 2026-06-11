@@ -21,12 +21,15 @@ impl Console {
             return false;
         }
 
-        if let Err(e) = self.queue_events[queue_index].read() {
-            error!("Failed to read event from queue index {queue_index}: {e:?}");
-            return false;
+        match self.queue_events[queue_index].read() {
+            Ok(_) => true,
+            // Spurious wakeup from the Windows epoll bridge.
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(e) => {
+                error!("Failed to read event from queue index {queue_index}: {e:?}");
+                false
+            }
         }
-
-        true
     }
 
     fn notify_port_queue_event(&mut self, queue_index: usize) {

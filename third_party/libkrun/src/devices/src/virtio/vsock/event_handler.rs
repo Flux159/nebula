@@ -27,10 +27,11 @@ impl Vsock {
         }
 
         let mut raise_irq = false;
-        if let Err(e) = self.queue_events[RXQ_INDEX].read() {
-            error!("Failed to get vsock rx queue event: {e:?}");
-        } else {
-            raise_irq |= self.process_stream_rx();
+        match self.queue_events[RXQ_INDEX].read() {
+            Ok(_) => raise_irq |= self.process_stream_rx(),
+            // Spurious wakeup from the Windows epoll bridge; nothing queued.
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => error!("Failed to get vsock rx queue event: {e:?}"),
         }
         raise_irq
     }
@@ -45,15 +46,17 @@ impl Vsock {
         }
 
         let mut raise_irq = false;
-        if let Err(e) = self.queue_events[TXQ_INDEX].read() {
-            error!("Failed to get vsock tx queue event: {e:?}");
-        } else {
-            raise_irq |= self.process_stream_tx();
-            // The backend may have queued up responses to the packets we sent during
-            // TX queue processing. If that happened, we need to fetch those responses
-            // and place them into RX buffers.
-            if self.muxer.has_pending_rx() {
-                raise_irq |= self.process_stream_rx();
+        match self.queue_events[TXQ_INDEX].read() {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => error!("Failed to get vsock tx queue event: {e:?}"),
+            Ok(_) => {
+                raise_irq |= self.process_stream_tx();
+                // The backend may have queued up responses to the packets we sent during
+                // TX queue processing. If that happened, we need to fetch those responses
+                // and place them into RX buffers.
+                if self.muxer.has_pending_rx() {
+                    raise_irq |= self.process_stream_rx();
+                }
             }
         }
         raise_irq
@@ -68,8 +71,10 @@ impl Vsock {
             return false;
         }
 
-        if let Err(e) = self.queue_events[EVQ_INDEX].read() {
-            error!("Failed to consume vsock evq event: {e:?}");
+        match self.queue_events[EVQ_INDEX].read() {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => error!("Failed to consume vsock evq event: {e:?}"),
         }
         false
     }

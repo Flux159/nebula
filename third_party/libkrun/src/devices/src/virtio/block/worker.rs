@@ -140,10 +140,12 @@ impl BlockWorker {
     }
 
     fn process_queue_event(&mut self) {
-        if let Err(e) = self.device_queue.event.read() {
-            error!("Failed to get queue event: {e:?}");
-        } else {
-            self.process_virtio_queues();
+        match self.device_queue.event.read() {
+            Ok(_) => self.process_virtio_queues(),
+            // Spurious wakeup: the Windows epoll bridge can deliver one
+            // extra completion per level-triggered re-arm.
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => error!("Failed to get queue event: {e:?}"),
         }
     }
 
