@@ -47,11 +47,34 @@ curl -H "Authorization: Bearer $NEBULA_API_TOKEN" http://host:7440/v1alpha1/stat
 | `GET /v1alpha1/kubeconfig` | standalone kubeconfig YAML (404 until k8s is up) |
 | `GET /v1alpha1/containers` | compat shim; prefer `/docker/...` below |
 
-Vessel lifecycle endpoints (`/v1alpha1/vessels`, snapshot/restore/branch)
-are landing with the `nebula_core::vessels` hoist — the CLI and the API will
-share one implementation. Branching is the embedding primitive to know
-about: a memory snapshot fans out into N live mid-execution clones
-(copy-on-write RAM on macOS/Linux) in roughly a second per clone.
+### Vessels
+
+The CLI and these endpoints share one implementation (`nebula_core::vessels`).
+
+| method & path | does |
+|---|---|
+| `GET /v1alpha1/vessels` | list (name, running, cpus, mem, gpu, backend) |
+| `POST /v1alpha1/vessels` | create + boot: `{"name":"a","cpus":2,"mem_mib":2048,"data_gib":16,"backend":"krun","volumes":["scratch:8"],"no_start":false}` (all but `name` optional) |
+| `GET /v1alpha1/vessels/{name}` | one vessel's summary |
+| `DELETE /v1alpha1/vessels/{name}?force=true` | remove (force stops it first) |
+| `POST .../{name}/start` · `POST .../{name}/stop` | lifecycle |
+| `POST .../{name}/exec` | `{"cmd":"sh","args":["-c","..."]}` in that vessel |
+| `GET /POST .../{name}/snapshots` | list / take (`{"label":"s1","mode":"auto\|memory\|disk"}`) |
+| `DELETE .../{name}/snapshots/{label}` | drop a snapshot |
+| `POST .../{name}/restore` | `{"label":"s1"}` — live-resumes memory snapshots |
+| `POST .../{name}/branch` | `{"new_name":"agent","label":"s1","count":8}` (max 64) |
+
+Branching is the embedding primitive to know: a memory snapshot fans out
+into N live **mid-execution** clones — copy-on-write RAM on macOS/Linux —
+in about a second per clone:
+
+```ts
+// eight live forks of a running agent VM, RAM and processes intact
+await fetch(`${api}/v1alpha1/vessels/agent0/branch`, {
+  method: "POST", headers,
+  body: JSON.stringify({ new_name: "fork", label: "s1", count: 8 }),
+});
+```
 
 ## Containers: `/docker/...`
 

@@ -27,7 +27,8 @@ fn main() -> anyhow::Result<()> {
     // krun (Linux/Windows), that binary is nebulad, so route the arg before clap.
     {
         let mut args = std::env::args().skip(1);
-        if args.next().as_deref() == Some("krun-worker") {
+        let first = args.next();
+        if first.as_deref() == Some("krun-worker") {
             let spec = match (args.next().as_deref(), args.next()) {
                 (Some("--spec"), Some(json)) => json,
                 (Some("--spec-file"), Some(path)) => match std::fs::read_to_string(&path) {
@@ -52,6 +53,36 @@ fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+        // vz vessels started through the REST API spawn the current exe
+        // (nebulad) as their worker, mirroring the CLI's vz-worker.
+        #[cfg(target_os = "macos")]
+        if first.as_deref() == Some("vz-worker") {
+            let mut spec = None;
+            let mut restore: Option<std::path::PathBuf> = None;
+            let mut control: Option<std::path::PathBuf> = None;
+            while let Some(a) = args.next() {
+                match a.as_str() {
+                    "--spec" => spec = args.next(),
+                    "--restore" => restore = args.next().map(Into::into),
+                    "--control" => control = args.next().map(Into::into),
+                    other => {
+                        eprintln!("vz-worker: unknown arg {other}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            let Some(spec) = spec else {
+                eprintln!("vz-worker: usage: nebulad vz-worker --spec <json> [--restore <p>] [--control <p>]");
+                std::process::exit(2);
+            };
+            if let Err(e) =
+                nebula_core::backend::vz::run_worker(&spec, restore.as_deref(), control.as_deref())
+            {
+                eprintln!("vz-worker: {e}");
+                std::process::exit(1);
+            }
+            std::process::exit(0);
         }
     }
     let _ = Args::parse();

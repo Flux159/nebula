@@ -3,6 +3,7 @@
 //! hyper 1.x on a dedicated tokio current-thread runtime; the rest of
 //! nebulad stays sync. Endpoints:
 //!
+//! ```text
 //!   GET  /healthz                    liveness (auth-exempt)
 //!   GET  /v1alpha1/status            engine + agent + memory status
 //!   GET  /v1alpha1/stats             balloon/footprint stats
@@ -10,10 +11,13 @@
 //!   POST /v1alpha1/exec              {"cmd": "...", "args": [...]} -> ExecResult
 //!   POST /v1alpha1/balloon           {"target_mib": N}
 //!   GET  /v1alpha1/containers        compat shim (full plane below)
+//!   ANY  /v1alpha1/vessels[...]      vessel lifecycle (list/create/start/
+//!                                    stop/rm/exec/snapshots/restore/branch)
 //!   ANY  /docker/...                 verbatim container-engine proxy
-//!   ANY  /k8s/...                    verbatim apiserver proxy (slim only:
-//! slim's apiserver-lite speaks plain HTTP on a host socket; k3s is mTLS,
-//! so full nebula answers 501 here — fetch /v1alpha1/kubeconfig instead).
+//!   ANY  /k8s/...                    verbatim apiserver proxy (slim only;
+//!                                    k3s guests answer 501 — fetch
+//!                                    /v1alpha1/kubeconfig instead)
+//! ```
 //!
 //! Binding: `api_host` in config.toml, overridden by NEBULA_API_HOST
 //! (default 127.0.0.1). Auth: when NEBULA_API_TOKEN is set, every request
@@ -233,6 +237,12 @@ async fn route(ctx: Arc<Ctx>, req: Request<Incoming>) -> Result<Resp, hyper::Err
         return Ok(sock_proxy(&ctx.kube_sock, req, &path_q).await);
     }
 
+    if let Some(rest) = path.strip_prefix("/v1alpha1/vessels") {
+        let rest = rest.trim_start_matches('/').to_string();
+        let force = req.uri().query().is_some_and(|q| q.contains("force=true"));
+        return vessels_route(method, rest, force, req).await;
+    }
+
     match (method, path.as_str()) {
         (Method::GET, "/v1alpha1/status") => {
             let vessel = ctx.vessel.clone();
@@ -446,5 +456,255 @@ where
             Response::from_parts(parts, body.boxed())
         }
         Err(e) => err_json(502, format!("docker request: {e}")),
+    }
+}
+
+// --- vessels (named microVMs) -------------------------------------------------
+
+/// Routes under /v1alpha1/vessels. `rest` is the path after the prefix with
+/// the leading slash stripped: "", "<name>", or "<name>/<action>[/<label>]".
+async fn vessels_route(
+    method: Method,
+    rest: String,
+    force: bool,
+    req: Request<Incoming>,
+) -> Result<Resp, hyper::Error> {
+    use nebula_core::vessels as v;
+
+    let segs: Vec<String> = if rest.is_empty() {
+        vec![]
+    } else {
+        rest.split('/').map(str::to_string).collect()
+    };
+
+    // Everything here drives the same nebula_core::vessels the CLI uses;
+    // all of it blocks (worker spawns, agent waits), so run off-loop.
+    macro_rules! blocking {
+        ($body:expr) => {{
+            let out = tokio::task::spawn_blocking(move || $body).await;
+            Ok(match out {
+                Ok(Ok(value)) => json(200, &serde_json::json!(value)),
+                Ok(Err(e)) => err_json(409, format!("{e:#}")),
+                Err(e) => err_json(500, e),
+            })
+        }};
+    }
+
+    match (method, segs.as_slice()) {
+        (Method::GET, []) => blocking!(v::list()),
+        (Method::POST, []) => {
+            #[derive(serde::Deserialize)]
+            struct CreateBody {
+                name: String,
+                #[serde(default = "d_cpus")]
+                cpus: u32,
+                #[serde(default = "d_mem")]
+                mem_mib: u64,
+                #[serde(default)]
+                gpu: bool,
+                #[serde(default = "d_disk")]
+                data_gib: u64,
+                #[serde(default = "d_backend")]
+                backend: String,
+                /// "name:GiB" strings, same shape as the CLI's --volume.
+                #[serde(default)]
+                volumes: Vec<String>,
+                /// Create only — don't boot it.
+                #[serde(default)]
+                no_start: bool,
+            }
+            fn d_cpus() -> u32 {
+                2
+            }
+            fn d_mem() -> u64 {
+                2048
+            }
+            fn d_disk() -> u64 {
+                16
+            }
+            fn d_backend() -> String {
+                "krun".into()
+            }
+            let Ok(bytes) = read_body(req).await else {
+                return Ok(err_json(400, "body too large"));
+            };
+            let body: CreateBody = match serde_json::from_slice(&bytes) {
+                Ok(b) => b,
+                Err(e) => return Ok(err_json(400, e)),
+            };
+            blocking!((|| -> anyhow::Result<serde_json::Value> {
+                let volumes = v::parse_volumes(&body.volumes)?;
+                let opts = v::CreateOpts {
+                    name: body.name.clone(),
+                    cpus: body.cpus,
+                    mem: body.mem_mib,
+                    gpu: body.gpu,
+                    data_gib: body.data_gib,
+                    backend: body.backend.clone(),
+                    volumes,
+                };
+                let dir = v::dir_of(&body.name)?;
+                anyhow::ensure!(!dir.exists(), "vessel `{}` already exists", body.name);
+                let created = v::create(&opts, v::Rootfs::BaseImage);
+                if created.is_err() {
+                    let _ = std::fs::remove_dir_all(&dir);
+                }
+                created?;
+                if body.no_start {
+                    return Ok(serde_json::json!({"created": body.name}));
+                }
+                let started = v::start(&body.name)?;
+                Ok(serde_json::json!({"created": body.name, "start": started}))
+            })())
+        }
+        (Method::GET, [name]) => {
+            let name = name.clone();
+            blocking!((|| -> anyhow::Result<serde_json::Value> {
+                let all = v::list()?;
+                let one = all
+                    .into_iter()
+                    .find(|s| s.name == name)
+                    .ok_or_else(|| anyhow::anyhow!("no vessel named `{name}`"))?;
+                Ok(serde_json::json!(one))
+            })())
+        }
+        (Method::DELETE, [name]) => {
+            let name = name.clone();
+            blocking!(v::rm(&name, force).map(|()| serde_json::json!({"removed": name})))
+        }
+        (Method::POST, [name, action]) if action == "start" => {
+            let name = name.clone();
+            blocking!(v::start(&name))
+        }
+        (Method::POST, [name, action]) if action == "stop" => {
+            let name = name.clone();
+            blocking!(v::stop(&name))
+        }
+        (Method::POST, [name, action]) if action == "exec" => {
+            #[derive(serde::Deserialize)]
+            struct ExecBody {
+                cmd: String,
+                #[serde(default)]
+                args: Vec<String>,
+                #[serde(default = "d_timeout")]
+                timeout_ms: u64,
+            }
+            fn d_timeout() -> u64 {
+                30_000
+            }
+            let name = name.clone();
+            let Ok(bytes) = read_body(req).await else {
+                return Ok(err_json(400, "body too large"));
+            };
+            let body: ExecBody = match serde_json::from_slice(&bytes) {
+                Ok(b) => b,
+                Err(e) => return Ok(err_json(400, e)),
+            };
+            blocking!((|| -> anyhow::Result<serde_json::Value> {
+                let dir = v::dir_of(&name)?;
+                anyhow::ensure!(
+                    v::live_pid(&dir).is_some(),
+                    "vessel `{name}` is not running"
+                );
+                match v::agent_request(
+                    &dir,
+                    &nebula_core::proto::AgentRequest::Exec {
+                        cmd: body.cmd,
+                        args: body.args,
+                        env: vec![],
+                        timeout_ms: body.timeout_ms,
+                    },
+                )? {
+                    nebula_core::proto::AgentResponse::Exec(r) => Ok(serde_json::json!(r)),
+                    nebula_core::proto::AgentResponse::Error { message } => {
+                        anyhow::bail!("{message}")
+                    }
+                    other => anyhow::bail!("unexpected: {other:?}"),
+                }
+            })())
+        }
+        (Method::GET, [name, action]) if action == "snapshots" => {
+            let name = name.clone();
+            blocking!(v::snapshots(&name))
+        }
+        (Method::POST, [name, action]) if action == "snapshots" => {
+            #[derive(serde::Deserialize)]
+            struct SnapBody {
+                label: String,
+                /// "auto" (default) | "memory" | "disk"
+                #[serde(default)]
+                mode: Option<String>,
+            }
+            let name = name.clone();
+            let Ok(bytes) = read_body(req).await else {
+                return Ok(err_json(400, "body too large"));
+            };
+            let body: SnapBody = match serde_json::from_slice(&bytes) {
+                Ok(b) => b,
+                Err(e) => return Ok(err_json(400, e)),
+            };
+            let mode = match body.mode.as_deref() {
+                None | Some("auto") => v::SnapMode::Auto,
+                Some("memory") => v::SnapMode::Memory,
+                Some("disk") => v::SnapMode::DiskOnly,
+                Some(other) => {
+                    return Ok(err_json(
+                        400,
+                        format!("mode must be auto|memory|disk, got {other}"),
+                    ))
+                }
+            };
+            blocking!(v::snapshot(&name, &body.label, mode))
+        }
+        (Method::DELETE, [name, action, label]) if action == "snapshots" => {
+            let (name, label) = (name.clone(), label.clone());
+            blocking!(v::snapshot_rm(&name, &label).map(|()| serde_json::json!({"removed": label})))
+        }
+        (Method::POST, [name, action]) if action == "restore" => {
+            #[derive(serde::Deserialize)]
+            struct RestoreBody {
+                label: String,
+            }
+            let name = name.clone();
+            let Ok(bytes) = read_body(req).await else {
+                return Ok(err_json(400, "body too large"));
+            };
+            let body: RestoreBody = match serde_json::from_slice(&bytes) {
+                Ok(b) => b,
+                Err(e) => return Ok(err_json(400, e)),
+            };
+            blocking!(v::restore(&name, &body.label))
+        }
+        (Method::POST, [name, action]) if action == "branch" => {
+            #[derive(serde::Deserialize)]
+            struct BranchBody {
+                new_name: String,
+                #[serde(default)]
+                label: Option<String>,
+                #[serde(default = "d_count")]
+                count: u32,
+            }
+            fn d_count() -> u32 {
+                1
+            }
+            let name = name.clone();
+            let Ok(bytes) = read_body(req).await else {
+                return Ok(err_json(400, "body too large"));
+            };
+            let body: BranchBody = match serde_json::from_slice(&bytes) {
+                Ok(b) => b,
+                Err(e) => return Ok(err_json(400, e)),
+            };
+            if body.count > 64 {
+                return Ok(err_json(400, "count must be <= 64 per request"));
+            }
+            blocking!(v::branch(
+                &name,
+                &body.new_name,
+                body.label.as_deref(),
+                body.count
+            ))
+        }
+        _ => Ok(err_json(404, "not found")),
     }
 }
