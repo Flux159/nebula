@@ -14,6 +14,7 @@ pub mod initramfs;
 pub mod ipc;
 pub mod proto;
 pub mod spec;
+pub mod vessels;
 
 pub use backend::{VmHandle, VmState, VmmBackend};
 pub use error::{Error, Result};

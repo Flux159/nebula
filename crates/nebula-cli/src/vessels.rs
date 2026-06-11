@@ -1,34 +1,24 @@
 //! `nebula vessels` — persistent named microVMs alongside the engine vessel.
 //!
-//! Each named vessel is a libkrun VM with its own copy-on-write rootfs clone
-//! and sparse data disk, booting the same guest image as the engine but in
-//! agent-only mode (no docker/k8s — those live in the engine vessel, which
-//! this command intentionally cannot stop). The agent's vsock ports are
-//! mapped to per-vessel unix sockets, so exec/shell work daemon-free.
-//!
-//! Layout: ~/.nebula/vessels/<name>/{spec.json,pid,rootfs.img,data.img,
-//! console.log,agent.sock,shell.sock}
+//! The lifecycle logic lives in `nebula_core::vessels` (shared with
+//! nebulad's REST API); this module is the CLI presentation: argument
+//! shaping, engine routing, the engine-dependent image-build flows, and
+//! printing.
 
-use nebula_core::ipc;
-use nebula_core::ipc::IpcStream as UnixStream;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
+use nebula_core::ipc;
 use nebula_core::proto::*;
-use nebula_core::{BootSpec, ConsoleSpec, DiskSpec, NetSpec, VmSpec, VsockPortMap};
+use nebula_core::vessels as core;
+pub use nebula_core::vessels::SnapMode;
+use nebula_core::vessels::{
+    agent_request, clone_file, dir_of, is_engine, live_pid, read_spec, RestoreOutcome, Rootfs,
+    SnapshotOutcome, StartOutcome, StopOutcome,
+};
 
 use crate::client;
-
-/// Names that refer to the engine vessel (docker/k8s). Read-style commands
-/// route there transparently; destructive ones refuse and point at
-/// `nebula up` / `nebula down`.
-const RESERVED: &[&str] = &["vessel", "default", "engine", "nebula"];
-
-fn is_engine(name: &str) -> bool {
-    RESERVED.contains(&name)
-}
 
 pub struct NewOpts {
     pub name: String,
@@ -49,147 +39,12 @@ pub struct NewOpts {
     pub volumes: Vec<String>,
 }
 
-/// Parse `--volume name:GiB` specs. Names become mount points (/mnt/<name>)
-/// and disk files (vol-<name>.img), so they're strictly validated.
-fn parse_volumes(specs: &[String]) -> anyhow::Result<Vec<(String, u64)>> {
-    let mut out: Vec<(String, u64)> = Vec::new();
-    for s in specs {
-        let (name, size) = s
-            .split_once(':')
-            .with_context(|| format!("--volume wants name:GiB, got `{s}`"))?;
-        anyhow::ensure!(
-            !name.is_empty()
-                && name.len() <= 32
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'),
-            "volume names must be [a-z0-9_-] (max 32 chars), got `{name}`"
-        );
-        anyhow::ensure!(
-            name != "data",
-            "`data` is the built-in data disk (size it with --disk)"
-        );
-        anyhow::ensure!(
-            !out.iter().any(|(n, _)| n == name),
-            "duplicate volume `{name}`"
-        );
-        let gib: u64 = size
-            .parse()
-            .with_context(|| format!("volume `{name}`: bad size `{size}` (GiB)"))?;
-        anyhow::ensure!(
-            (1..=2048).contains(&gib),
-            "volume `{name}`: size must be 1..=2048 GiB"
-        );
-        out.push((name.to_string(), gib));
-    }
-    anyhow::ensure!(out.len() <= 8, "at most 8 extra volumes per vessel");
-    Ok(out)
-}
-
-/// Every disk image a vessel owns, in device order (rootfs=vda, data=vdb,
-/// volumes from vdc) — the set snapshots/branches must clone.
-fn disk_images(dir: &std::path::Path) -> Vec<String> {
-    let mut v = vec!["rootfs.img".to_string(), "data.img".to_string()];
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        let mut vols: Vec<String> = rd
-            .flatten()
-            .filter_map(|e| e.file_name().to_str().map(str::to_string))
-            .filter(|n| n.starts_with("vol-") && n.ends_with(".img"))
-            .collect();
-        vols.sort();
-        v.extend(vols);
-    }
-    v
-}
-
-fn vessels_root() -> anyhow::Result<PathBuf> {
-    Ok(client::nebula_home()?.join("vessels"))
-}
-
-fn dir_of(name: &str) -> anyhow::Result<PathBuf> {
-    validate_name(name)?;
-    Ok(vessels_root()?.join(name))
-}
-
-fn validate_name(name: &str) -> anyhow::Result<()> {
-    if RESERVED.contains(&name) {
-        bail!(
-            "`{name}` is the engine vessel — it runs docker/kubernetes and is managed with `nebula up` / `nebula down`"
-        );
-    }
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        bail!("vessel names must be non-empty [a-zA-Z0-9_-], got `{name}`");
-    }
-    Ok(())
-}
-
-fn read_spec(dir: &std::path::Path) -> anyhow::Result<VmSpec> {
-    let raw = std::fs::read_to_string(dir.join("spec.json"))
-        .with_context(|| format!("no vessel at {}", dir.display()))?;
-    Ok(serde_json::from_str(&raw)?)
-}
-
-/// Portable "is this pid alive" / "kill it" (vessel workers).
-fn pid_alive(pid: i32) -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::kill(pid, 0) == 0 }
-    }
-    #[cfg(windows)]
-    {
-        std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-            .unwrap_or(false)
-    }
-}
-
-fn pid_kill(pid: i32) {
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(pid, libc::SIGKILL);
-    }
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .output();
-    }
-}
-
-fn live_pid(dir: &std::path::Path) -> Option<i32> {
-    let pid: i32 = std::fs::read_to_string(dir.join("pid"))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
-    pid_alive(pid).then_some(pid)
-}
-
 pub fn new(opts: NewOpts) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        opts.backend == "krun" || opts.backend == "vz",
-        "--backend must be `krun` or `vz`, got `{}`",
-        opts.backend
-    );
-    anyhow::ensure!(
-        opts.backend != "vz" || cfg!(target_os = "macos"),
-        "--backend vz is Virtualization.framework (macOS-only) — use krun on Linux"
-    );
-    anyhow::ensure!(
-        !(opts.gpu && opts.backend == "vz"),
-        "GPU passthrough (Venus) is libkrun-only — drop --backend vz or --gpu"
-    );
     anyhow::ensure!(
         !(opts.from_image.is_some() && opts.rootfs_img.is_some()),
         "--from-image and --rootfs-img are mutually exclusive"
     );
-    let volumes = parse_volumes(&opts.volumes)?;
+    let volumes = core::parse_volumes(&opts.volumes)?;
     let dir = dir_of(&opts.name)?;
     anyhow::ensure!(
         !dir.exists(),
@@ -198,125 +53,50 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
         opts.name
     );
 
-    let home = client::nebula_home()?;
-    // Clone from the pristine store, not the engine's live (mutated) disk.
-    let base_rootfs = if home.join("images/rootfs-pristine.img").is_file() {
-        home.join("images/rootfs-pristine.img")
-    } else {
-        home.join("disks/rootfs.img")
-    };
-    let kernel = home.join("kernel/Image");
-    anyhow::ensure!(
-        kernel.is_file(),
-        "guest kernel missing — run `nebula up` once first"
-    );
-    anyhow::ensure!(
-        opts.from_image.is_some() || opts.rootfs_img.is_some() || base_rootfs.is_file(),
-        "guest images missing — run `nebula up` once first"
-    );
-
-    std::fs::create_dir_all(&dir)?;
-    if let Some(image) = &opts.from_image {
+    // Engine-dependent rootfs preparation stays in the CLI; the core create
+    // takes over once rootfs.img is in place (or clones the base image).
+    let rootfs = if let Some(image) = &opts.from_image {
+        std::fs::create_dir_all(&dir)?;
         // Docker image -> bootable microVM rootfs, built inside the engine
         // (it has docker + e2fsprogs; our static init/agent are injected so
         // ANY arm64 linux image becomes a manageable vessel).
         build_rootfs_from_image(image, &opts.name, &dir, opts.rootfs_mb, opts.data_gib)?;
+        Rootfs::Prepared
     } else if let Some(src) = &opts.rootfs_img {
         // Prebuilt rootfs file (vessels convert-image): offline, engine-free.
         anyhow::ensure!(src.is_file(), "no rootfs image at {}", src.display());
+        std::fs::create_dir_all(&dir)?;
         let raw = crate::commands::maybe_gunzip(src, &dir.join("rootfs.img"))?;
         if raw != dir.join("rootfs.img") {
             clone_file(&raw, &dir.join("rootfs.img"))?;
         }
         create_data_disk(&dir, opts.data_gib)?;
+        Rootfs::Prepared
     } else {
-        // APFS copy-on-write clone: instant and space-shared with the base.
-        clone_file(&base_rootfs, &dir.join("rootfs.img"))?;
-        let data = std::fs::File::create(dir.join("data.img"))?;
-        data.set_len(opts.data_gib * 1024 * 1024 * 1024)?;
-    }
-
-    // Extra volumes: sparse files; the guest formats + mounts them by name.
-    let mut disks = vec![
-        DiskSpec {
-            path: dir.join("rootfs.img"),
-            read_only: false,
-        },
-        DiskSpec {
-            path: dir.join("data.img"),
-            read_only: false,
-        },
-    ];
-    for (vname, gib) in &volumes {
-        let path = dir.join(format!("vol-{vname}.img"));
-        let f = std::fs::File::create(&path)?;
-        f.set_len(gib * 1024 * 1024 * 1024)?;
-        disks.push(DiskSpec {
-            path,
-            read_only: false,
-        });
-    }
-    let mut cmdline = String::from(
-        "console=hvc0 root=/dev/vda rw rootfstype=ext4 init=/sbin/nebula-init reboot=k panic=10 NEBULA_AGENT_ONLY=1",
-    );
-    if !volumes.is_empty() {
-        cmdline.push_str(" NEBULA_VOLUMES=");
-        cmdline.push_str(
-            &volumes
-                .iter()
-                .map(|(n, _)| n.as_str())
-                .collect::<Vec<_>>()
-                .join(","),
-        );
-    }
-
-    let vz = opts.backend == "vz";
-    let spec = VmSpec {
-        name: format!("vessel-{}", opts.name),
-        cpus: opts.cpus,
-        mem_mib: opts.mem.max(1024),
-        boot: BootSpec::Kernel {
-            kernel,
-            initramfs: None,
-            cmdline,
-        },
-        disks,
-        shares: vec![],
-        // NICs everywhere: VZ NAT on vz; the fork's in-process usernet NAT
-        // on krun (TSI never applied to our own-init disk boots).
-        net: NetSpec::Nat,
-        vsock: vz, // VZ needs the device for the worker's socket proxies
-        console: ConsoleSpec::File(dir.join("console.log")),
-        balloon: false,
-        rng: true,
-        rosetta: false,
-        gpu: opts.gpu,
-        // krun workers serve pause/save/resume here (vz uses its own
-        // vmm.sock wired by the vz-worker itself).
-        control_path: Some(dir.join("vmm.sock")),
-        restore_path: None,
-        vsock_ports: vec![
-            VsockPortMap {
-                port: VSOCK_PORT_CONTROL,
-                host_path: dir.join("agent.sock"),
-            },
-            VsockPortMap {
-                port: VSOCK_PORT_SHELL,
-                host_path: dir.join("shell.sock"),
-            },
-        ],
-        backend: Some(opts.backend.clone()),
-        // Stable MAC + machine id: keep the DHCP lease across restarts and
-        // keep the config identical to any saved machine state.
-        mac: if vz { Some(random_mac()?) } else { None },
-        machine_id: if vz { vz_machine_id() } else { None },
+        Rootfs::BaseImage
     };
-    std::fs::write(dir.join("spec.json"), serde_json::to_vec_pretty(&spec)?)?;
+
+    let create = core::CreateOpts {
+        name: opts.name.clone(),
+        cpus: opts.cpus,
+        mem: opts.mem,
+        gpu: opts.gpu,
+        data_gib: opts.data_gib,
+        backend: opts.backend.clone(),
+        volumes: volumes.clone(),
+    };
+    let created = core::create(&create, rootfs);
+    if created.is_err() {
+        // Don't leave a half-made dir behind a validation failure.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    created?;
+
     println!(
         "created vessel `{}` ({} cpus, {} MiB{}{})",
         opts.name,
         opts.cpus,
-        spec.mem_mib,
+        opts.mem.max(1024),
         if opts.gpu { ", gpu" } else { "" },
         if volumes.is_empty() {
             String::new()
@@ -334,215 +114,37 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
     start(&opts.name)
 }
 
-pub fn start(name: &str) -> anyhow::Result<()> {
-    start_with(name, None)
+fn print_started(name: &str, outcome: &StartOutcome) {
+    match outcome {
+        StartOutcome::AlreadyRunning => println!("vessel `{name}` is already running"),
+        StartOutcome::Started(s) => {
+            println!(
+                "vessel `{name}` {} in {}ms (kernel {}, agent v{})",
+                if s.resumed { "resumed" } else { "up" },
+                s.boot_ms,
+                s.kernel,
+                s.agent_version
+            );
+            println!("  shell: nebula vessels shell {name}");
+        }
+    }
 }
 
-/// Boot a vessel; with `restore` the worker resumes from a saved machine
-/// state (vz: a memory.vzstate file; krun on Linux x86_64: a memory.krun
-/// snapshot directory) instead of cold-booting the kernel.
-fn start_with(name: &str, restore: Option<&std::path::Path>) -> anyhow::Result<()> {
+pub fn start(name: &str) -> anyhow::Result<()> {
     if is_engine(name) {
         return crate::commands::up();
     }
-    let dir = dir_of(name)?;
-    let mut spec = read_spec(&dir)?;
-    if live_pid(&dir).is_some() {
-        println!("vessel `{name}` is already running");
-        return Ok(());
-    }
-    let backend = spec.backend.clone().unwrap_or_else(|| "krun".into());
-    let krun_restore_ok = cfg!(all(
-        any(target_os = "linux", target_os = "windows"),
-        target_arch = "x86_64"
-    ));
-    anyhow::ensure!(
-        restore.is_none() || backend == "vz" || krun_restore_ok,
-        "memory-state restore for krun vessels needs an x86_64 Linux or Windows host \
-         (use vz on macOS)"
-    );
-    if backend != "vz" {
-        // Transient: the worker reads it from its spec argument; the vessel's
-        // spec.json on disk is untouched, so later starts cold-boot normally.
-        spec.restore_path = restore.map(|p| p.to_path_buf());
-    }
-
-    // Windows: any inheritable handle leaks into the worker (CreateProcess
-    // bInheritHandles=TRUE whenever stdio is redirected). If our stdout is a
-    // pipeline pipe, the immortal worker holds it open and the parent shell
-    // never sees EOF — `nebula vessels new x | ...` hangs forever. Strip the
-    // inherit flag from our own stdio before spawning.
-    #[cfg(windows)]
-    unset_stdio_inheritance();
-
-    let spec_json = serde_json::to_string(&spec)?;
-    let exe = std::env::current_exe()?;
-    let child = if backend == "vz" {
-        // VZ writes the guest console itself (spec); stderr catches worker errors.
-        let log = std::fs::File::create(dir.join("worker.log"))?;
-        let mut cmd = std::process::Command::new(&exe);
-        cmd.arg("vz-worker")
-            .arg("--spec")
-            .arg(spec_json)
-            .arg("--control")
-            .arg(dir.join("vmm.sock"))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(log);
-        if let Some(state) = restore {
-            cmd.arg("--restore").arg(state);
-        }
-        cmd.spawn()?
-    } else {
-        let console = std::fs::File::create(dir.join("console.log"))?;
-        // stderr catches worker panics + fork log/trace output.
-        let log = std::fs::File::create(dir.join("worker.log"))?;
-        std::process::Command::new(&exe)
-            .arg("krun-worker")
-            .arg("--spec")
-            .arg(spec_json)
-            .stdin(std::process::Stdio::null())
-            .stdout(console)
-            .stderr(log)
-            .spawn()?
-    };
-    std::fs::write(dir.join("pid"), child.id().to_string())?;
-    std::mem::forget(child); // vessel outlives this CLI invocation
-
-    // Wait for the agent socket to answer.
-    let t0 = Instant::now();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if let Ok(AgentResponse::Health(h)) = agent_request(&dir, &AgentRequest::Health) {
-            println!(
-                "vessel `{name}` {} in {:?} (kernel {}, agent v{})",
-                if restore.is_some() { "resumed" } else { "up" },
-                t0.elapsed(),
-                h.kernel,
-                h.agent_version
-            );
-            println!("  shell: nebula vessels shell {name}");
-            return Ok(());
-        }
-        if live_pid(&dir).is_none() && t0.elapsed() > Duration::from_millis(500) {
-            bail!(
-                "vessel `{name}` worker exited — see {}",
-                dir.join(if backend == "vz" {
-                    "worker.log"
-                } else {
-                    "console.log"
-                })
-                .display()
-            );
-        }
-        if Instant::now() > deadline {
-            bail!(
-                "vessel `{name}` did not become healthy within 20s — see {}",
-                dir.join("console.log").display()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
-/// Strip the inherit flag from this process's stdio handles so spawned
-/// workers can't keep an ancestor's pipe alive past our exit.
-#[cfg(windows)]
-fn unset_stdio_inheritance() {
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetStdHandle(nstdhandle: u32) -> isize;
-        fn SetHandleInformation(hobject: isize, dwmask: u32, dwflags: u32) -> i32;
-    }
-    const HANDLE_FLAG_INHERIT: u32 = 1;
-    // STD_INPUT/OUTPUT/ERROR_HANDLE
-    for std in [-10i32 as u32, -11i32 as u32, -12i32 as u32] {
-        unsafe {
-            let h = GetStdHandle(std);
-            if h != 0 && h != -1 {
-                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
-            }
-        }
-    }
-}
-
-/// One connection to a VM worker's control socket (vz-worker or krun-worker;
-/// same JSON protocol). Sequential ops share the stream, so pause -> save ->
-/// resume cannot be interleaved by another client.
-struct VmmCtl {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
-}
-
-impl VmmCtl {
-    fn connect(dir: &std::path::Path) -> anyhow::Result<Self> {
-        let stream = ipc::connect(&dir.join("vmm.sock"))
-            .context("vessel has no live worker control socket")?;
-        stream.set_read_timeout(Some(Duration::from_secs(120)))?;
-        let writer = stream.try_clone()?;
-        Ok(Self {
-            reader: BufReader::new(stream),
-            writer,
-        })
-    }
-
-    fn op(&mut self, req: &nebula_core::backend::WorkerControl) -> anyhow::Result<()> {
-        let mut line = serde_json::to_string(req)?;
-        line.push('\n');
-        self.writer.write_all(line.as_bytes())?;
-        let mut resp = String::new();
-        self.reader.read_line(&mut resp)?;
-        let reply: nebula_core::backend::WorkerReply =
-            serde_json::from_str(resp.trim()).context("bad reply from worker")?;
-        anyhow::ensure!(
-            reply.ok,
-            "{}",
-            reply.error.unwrap_or_else(|| "vmm operation failed".into())
-        );
-        Ok(())
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn vz_machine_id() -> Option<String> {
-    Some(nebula_core::backend::vz::new_machine_id())
-}
-#[cfg(not(target_os = "macos"))]
-fn vz_machine_id() -> Option<String> {
-    None
-}
-
-fn random_mac() -> anyhow::Result<String> {
-    use std::io::Read;
-    let mut b = [0u8; 5];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut b)?;
-    // 0x02: locally administered, unicast.
-    Ok(format!(
-        "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        b[0], b[1], b[2], b[3], b[4]
-    ))
+    let outcome = core::start(name)?;
+    print_started(name, &outcome);
+    Ok(())
 }
 
 pub fn stop(name: &str) -> anyhow::Result<()> {
-    let dir = dir_of(name)?;
-    let Some(pid) = live_pid(&dir) else {
-        println!("vessel `{name}` is not running");
-        return Ok(());
-    };
-    // Graceful first: agent powers the guest off and the worker exits.
-    let _ = agent_request(&dir, &AgentRequest::Shutdown);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if !pid_alive(pid) {
-            println!("vessel `{name}` stopped");
-            let _ = std::fs::remove_file(dir.join("pid"));
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(100));
+    match core::stop(name)? {
+        StopOutcome::NotRunning => println!("vessel `{name}` is not running"),
+        StopOutcome::Stopped => println!("vessel `{name}` stopped"),
+        StopOutcome::Forced => println!("vessel `{name}` stopped (forced)"),
     }
-    pid_kill(pid);
-    let _ = std::fs::remove_file(dir.join("pid"));
-    println!("vessel `{name}` stopped (forced)");
     Ok(())
 }
 
@@ -587,14 +189,12 @@ pub fn reset(name: &str, wipe_data: bool) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&live);
     clone_file(&pristine, &live)?;
     if wipe_data {
-        let spec = read_spec(&dir)?;
         let size = std::fs::metadata(dir.join("data.img"))
             .map(|m| m.len())
             .unwrap_or(0);
         let _ = std::fs::remove_file(dir.join("data.img"));
         let f = std::fs::File::create(dir.join("data.img"))?;
         f.set_len(size)?;
-        let _ = spec; // sizes live on disk, spec unchanged
         println!("data disk wiped");
     }
     println!("vessel `{name}` rootfs restored to pristine");
@@ -732,33 +332,6 @@ fn engine_exec_long(script: &str) -> anyhow::Result<ExecResult> {
     }
 }
 
-fn clone_file(from: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()> {
-    // APFS clonefile on macOS; reflink (btrfs/XFS) on Linux. Falls back to a
-    // plain copy when CoW isn't available — including Windows, which has no
-    // `cp` at all (NTFS has no reflink; sparse ranges still copy as data).
-    let cloned = if cfg!(windows) {
-        false
-    } else {
-        let flag = if cfg!(target_os = "macos") {
-            "-c"
-        } else {
-            "--reflink=auto"
-        };
-        std::process::Command::new("cp")
-            .arg(flag)
-            .arg(from)
-            .arg(to)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    };
-    if !cloned {
-        std::fs::copy(from, to)
-            .with_context(|| format!("clone/copy {} -> {} failed", from.display(), to.display()))?;
-    }
-    Ok(())
-}
-
 /// Create a vessel data disk. Foreign rootfs images may lack e2fsprogs (so
 /// the guest can't format it itself); when the engine is up, pre-format
 /// host-side through the $HOME share like --from-image does.
@@ -826,257 +399,69 @@ pub fn convert_image(image: &str, out: &std::path::Path, rootfs_mb: u64) -> anyh
     Ok(())
 }
 
-fn snap_dir(dir: &std::path::Path, label: &str) -> PathBuf {
-    dir.join("snapshots").join(label)
-}
-
-fn validate_label(label: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !label.is_empty()
-            && label
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'),
-        "snapshot labels must be [a-zA-Z0-9._-], got `{label}`"
-    );
-    Ok(())
-}
-
-/// How much of a vessel a snapshot captures.
-#[derive(PartialEq, Clone, Copy)]
-pub enum SnapMode {
-    /// Memory + disks when possible (running vz vessel), else disks only.
-    Auto,
-    /// Memory + disks, or fail.
-    Memory,
-    /// Disks only.
-    DiskOnly,
-}
-
-/// Snapshot a vessel.
-///
-/// Memory mode (default on running vz vessels): pause -> save machine state
-/// -> clone disks -> resume. The guest never stops; restore resumes
-/// mid-execution with running processes, open sockets, and RAM (tmpfs etc.)
-/// intact.
-///
-/// Disk mode: stop (if running), APFS-clone both disks, restart — crash-
-/// consistent, ~0.2s stop + ~10ms clone + ~0.1s restart.
 pub fn snapshot(name: &str, label: &str, mode: SnapMode) -> anyhow::Result<()> {
-    validate_label(label)?;
-    let dir = dir_of(name)?;
-    anyhow::ensure!(dir.exists(), "no vessel named `{name}`");
-    let sdir = snap_dir(&dir, label);
-    anyhow::ensure!(!sdir.exists(), "snapshot `{label}` already exists");
-
-    let spec = read_spec(&dir)?;
-    let is_vz = spec.backend.as_deref() == Some("vz");
-    // Live memory capture: vz on macOS, krun on Linux x86_64 (Windows/WHP
-    // parity is in progress).
-    let memory_capable = (is_vz && cfg!(target_os = "macos"))
-        || (!is_vz
-            && cfg!(all(
-                any(target_os = "linux", target_os = "windows"),
-                target_arch = "x86_64"
-            )));
-    let running = live_pid(&dir).is_some();
-    let memory = match mode {
-        SnapMode::DiskOnly => false,
-        SnapMode::Memory => {
-            anyhow::ensure!(
-                memory_capable,
-                "memory snapshots aren't supported for {}-backed vessels on this platform yet",
-                spec.backend.as_deref().unwrap_or("krun")
-            );
-            anyhow::ensure!(
-                running,
-                "vessel `{name}` is not running — a memory snapshot captures a LIVE vm \
-                 (for a stopped vessel take a disk snapshot: --no-memory)"
-            );
-            true
-        }
-        SnapMode::Auto => {
-            if !memory_capable {
-                println!(
+    match core::snapshot(name, label, mode)? {
+        SnapshotOutcome::Memory { ms, state_mb } => println!(
+            "memory snapshot `{name}@{label}` taken in {:.2}s ({state_mb} MiB state, vessel never stopped)",
+            ms as f64 / 1000.0
+        ),
+        SnapshotOutcome::DiskOnly { ms, reason } => {
+            match reason {
+                core::DiskOnlyReason::BackendUnsupported => println!(
                     "note: disk-only snapshot — live memory capture isn't supported for this \
                      vessel's backend on this platform yet"
-                );
-            } else if !running {
-                println!(
+                ),
+                core::DiskOnlyReason::NotRunning => println!(
                     "note: vessel is stopped — disk-only snapshot (start it to capture memory)"
-                );
+                ),
+                core::DiskOnlyReason::Requested => {}
             }
-            memory_capable && running
+            println!(
+                "snapshot `{name}@{label}` taken in {:.0}s",
+                ms as f64 / 1000.0
+            );
         }
-    };
-
-    if memory {
-        std::fs::create_dir_all(&sdir)?;
-        let t0 = Instant::now();
-        let mut ctl = VmmCtl::connect(&dir)?;
-        use nebula_core::backend::WorkerControl;
-        // vz saves a single state file; krun saves a snapshot directory.
-        let state_path = if is_vz {
-            sdir.join("memory.vzstate")
-        } else {
-            sdir.join("memory.krun")
-        };
-        ctl.op(&WorkerControl::Pause)?;
-        let saved = ctl
-            .op(&WorkerControl::Save {
-                path: state_path.clone(),
-            })
-            // Disks cloned while still paused = consistent with the state file.
-            .and_then(|()| {
-                for img in disk_images(&dir) {
-                    if dir.join(&img).is_file() {
-                        clone_file(&dir.join(&img), &sdir.join(&img))?;
-                    }
-                }
-                Ok(())
-            });
-        let resumed = ctl.op(&WorkerControl::Resume);
-        if let Err(e) = saved {
-            let _ = std::fs::remove_dir_all(&sdir);
-            return Err(e.context("memory snapshot failed (vessel resumed unharmed)"));
-        }
-        resumed?;
-        let state_mb = if is_vz {
-            physical_size_mb(&state_path)
-        } else {
-            // The guest RAM image dominates; it's written sparsely.
-            physical_size_mb(&state_path.join("memory.bin"))
-        };
-        println!(
-            "memory snapshot `{name}@{label}` taken in {:.2?} ({state_mb} MiB state, vessel never stopped)",
-            t0.elapsed()
-        );
-        return Ok(());
-    }
-
-    if running {
-        stop(name)?;
-    }
-    std::fs::create_dir_all(&sdir)?;
-    let t0 = Instant::now();
-    for img in disk_images(&dir) {
-        if dir.join(&img).is_file() {
-            clone_file(&dir.join(&img), &sdir.join(&img))?;
-        }
-    }
-    println!("snapshot `{name}@{label}` taken in {:.0?}", t0.elapsed());
-    if running {
-        start(name)?;
     }
     Ok(())
-}
-
-/// On-disk size of a snapshot state file in MiB (sparse-aware on unix —
-/// krun memory images are mostly holes).
-fn physical_size_mb(path: &std::path::Path) -> u64 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        std::fs::metadata(path)
-            .map(|m| m.blocks() * 512 / (1024 * 1024))
-            .unwrap_or(0)
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::metadata(path)
-            .map(|m| m.len() / (1024 * 1024))
-            .unwrap_or(0)
-    }
 }
 
 pub fn snapshots(name: &str) -> anyhow::Result<()> {
-    let dir = dir_of(name)?;
-    let root = dir.join("snapshots");
-    let mut labels: Vec<String> = match std::fs::read_dir(&root) {
-        Ok(rd) => rd
-            .flatten()
-            .filter(|e| e.path().is_dir())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect(),
-        Err(_) => vec![],
-    };
-    labels.sort();
-    if labels.is_empty() {
+    let list = core::snapshots(name)?;
+    if list.is_empty() {
         println!("no snapshots for `{name}` (create one: nebula vessels snapshot {name} <label>)");
         return Ok(());
     }
-    for l in labels {
-        if root.join(&l).join("memory.vzstate").is_file()
-            || root.join(&l).join("memory.krun").is_dir()
-        {
-            println!("{name}@{l}  (disks + memory state)");
+    for s in list {
+        if s.memory {
+            println!("{name}@{}  (disks + memory state)", s.label);
         } else {
-            println!("{name}@{l}");
+            println!("{name}@{}", s.label);
         }
     }
     Ok(())
 }
 
 pub fn snapshot_rm(name: &str, label: &str) -> anyhow::Result<()> {
-    validate_label(label)?;
-    let dir = dir_of(name)?;
-    let sdir = snap_dir(&dir, label);
-    anyhow::ensure!(sdir.exists(), "no snapshot `{name}@{label}`");
-    std::fs::remove_dir_all(&sdir)?;
+    core::snapshot_rm(name, label)?;
     println!("removed snapshot `{name}@{label}`");
     Ok(())
-}
-
-/// The memory-state artifact inside a snapshot dir, if the snapshot carries
-/// one: a vz state file or a krun snapshot directory.
-fn snapshot_memory_state(sdir: &std::path::Path) -> Option<PathBuf> {
-    let vz = sdir.join("memory.vzstate");
-    if vz.is_file() {
-        return Some(vz);
-    }
-    let krun = sdir.join("memory.krun");
-    if krun.is_dir() {
-        return Some(krun);
-    }
-    None
 }
 
 /// Roll a vessel back to a snapshot (its current disks are replaced). When
 /// the snapshot carries machine state, the vessel RESUMES mid-execution.
 pub fn restore(name: &str, label: &str) -> anyhow::Result<()> {
-    validate_label(label)?;
-    let dir = dir_of(name)?;
-    let sdir = snap_dir(&dir, label);
-    anyhow::ensure!(sdir.exists(), "no snapshot `{name}@{label}`");
-    let memory_state = snapshot_memory_state(&sdir);
-    let was_running = live_pid(&dir).is_some();
-    if was_running {
-        stop(name)?;
-    }
-    for img in disk_images(&sdir) {
-        if sdir.join(&img).is_file() {
-            let _ = std::fs::remove_file(dir.join(&img));
-            clone_file(&sdir.join(&img), &dir.join(&img))?;
+    match core::restore(name, label)? {
+        RestoreOutcome::LiveResume(s) => {
+            print_started(name, &StartOutcome::Started(s));
+            println!("`{name}` restored to @{label} (live resume — processes/RAM intact)");
         }
-    }
-    if let Some(memory_state) = memory_state {
-        match start_with(name, Some(&memory_state)) {
-            Ok(()) => {
-                println!("`{name}` restored to @{label} (live resume — processes/RAM intact)");
-                return Ok(());
-            }
-            Err(e) => {
-                // Disks were cloned while paused, so a cold boot of them is
-                // crash-consistent — degrade instead of leaving it dead.
-                eprintln!(
-                    "memory-state resume failed ({e}); cold-booting the restored disks instead"
-                );
-                return start(name);
-            }
+        RestoreOutcome::ColdBootFallback { resume_error } => {
+            eprintln!(
+                "memory-state resume failed ({resume_error}); cold-booted the restored disks instead"
+            );
+            println!("`{name}` restored to @{label}");
         }
-    }
-    println!("`{name}` restored to @{label}");
-    if was_running {
-        start(name)?;
+        RestoreOutcome::DiskRestore { .. } => println!("`{name}` restored to @{label}"),
     }
     Ok(())
 }
@@ -1085,90 +470,21 @@ pub fn restore(name: &str, label: &str) -> anyhow::Result<()> {
 /// label is given). With --count N this is the tree-search fan-out: N clones,
 /// each booted, each fully independent.
 pub fn branch(name: &str, new_name: &str, label: Option<&str>, count: u32) -> anyhow::Result<()> {
-    let dir = dir_of(name)?;
-    anyhow::ensure!(dir.exists(), "no vessel named `{name}`");
-    let spec = read_spec(&dir)?;
-
-    // Branch source: a snapshot, or a transient clone of the current state.
-    let (src_dir, _tmp_guard);
-    let mut src_state: Option<PathBuf> = None;
-    match label {
-        Some(l) => {
-            validate_label(l)?;
-            let sdir = snap_dir(&dir, l);
-            anyhow::ensure!(sdir.exists(), "no snapshot `{name}@{l}`");
-            // Memory snapshots fan out as LIVE resumes: every branch wakes
-            // mid-execution at the exact saved instant.
-            src_state = snapshot_memory_state(&sdir);
-            src_dir = sdir;
-            _tmp_guard = None::<tempdir::Guard>;
-        }
-        None => {
-            let was_running = live_pid(&dir).is_some();
-            if was_running {
-                stop(name)?;
-            }
-            let tmp = dir.join(".branch-src");
-            let _ = std::fs::remove_dir_all(&tmp);
-            std::fs::create_dir_all(&tmp)?;
-            for img in disk_images(&dir) {
-                if dir.join(&img).is_file() {
-                    clone_file(&dir.join(&img), &tmp.join(&img))?;
-                }
-            }
-            if was_running {
-                start(name)?;
-            }
-            src_dir = tmp.clone();
-            _tmp_guard = Some(tempdir::Guard(tmp));
-        }
-    }
-
-    let t0 = Instant::now();
-    let names: Vec<String> = if count <= 1 {
-        vec![new_name.to_string()]
-    } else {
-        (1..=count).map(|i| format!("{new_name}-{i}")).collect()
-    };
-    for n in &names {
-        validate_name(n)?;
-        let ndir = vessels_root()?.join(n);
-        anyhow::ensure!(!ndir.exists(), "vessel `{n}` already exists");
-        std::fs::create_dir_all(&ndir)?;
-        for img in disk_images(&src_dir) {
-            if src_dir.join(&img).is_file() {
-                clone_file(&src_dir.join(&img), &ndir.join(&img))?;
-            }
-        }
-        let mut nspec = spec.clone();
-        nspec.name = format!("vessel-{n}");
-        retarget_spec(&mut nspec, &ndir);
-        if src_state.is_none() && nspec.backend.as_deref() == Some("vz") {
-            // Cold-booted branches get their own identity. Memory resumes
-            // must keep the saved config (MAC + machine id) — those branches
-            // share the source's network identity (vsock control unaffected).
-            nspec.mac = Some(random_mac()?);
-            nspec.machine_id = vz_machine_id();
-        }
-        std::fs::write(ndir.join("spec.json"), serde_json::to_vec_pretty(&nspec)?)?;
-        match &src_state {
-            Some(state) => {
-                if let Err(e) = start_with(n, Some(state)) {
-                    eprintln!(
-                        "branch `{n}`: live resume failed ({e}); cold-booting its disks instead"
-                    );
-                    start(n)?;
-                }
-            }
-            None => start(n)?,
+    let out = core::branch(name, new_name, label, count)?;
+    for v in &out.vessels {
+        if let Some(err) = &v.fallback_error {
+            eprintln!(
+                "branch `{}`: live resume failed ({err}); cold-booted its disks instead",
+                v.name
+            );
         }
     }
     println!(
-        "branched {} vessel(s) from `{name}{}` in {:.2?}{}",
-        names.len(),
+        "branched {} vessel(s) from `{name}{}` in {:.2}s{}",
+        out.vessels.len(),
         label.map(|l| format!("@{l}")).unwrap_or_default(),
-        t0.elapsed(),
-        if src_state.is_some() {
+        out.ms as f64 / 1000.0,
+        if out.from_memory {
             " (live resume — each woke mid-execution)"
         } else {
             ""
@@ -1177,45 +493,8 @@ pub fn branch(name: &str, new_name: &str, label: Option<&str>, count: u32) -> an
     Ok(())
 }
 
-/// Point a cloned spec's paths (disks, console, vsock sockets) at its own dir.
-fn retarget_spec(spec: &mut VmSpec, dir: &std::path::Path) {
-    for d in &mut spec.disks {
-        if let Some(fname) = d.path.file_name() {
-            d.path = dir.join(fname);
-        }
-    }
-    if let nebula_core::ConsoleSpec::File(p) = &mut spec.console {
-        if let Some(fname) = p.file_name() {
-            *p = dir.join(fname);
-        }
-    }
-    for m in &mut spec.vsock_ports {
-        if let Some(fname) = m.host_path.file_name() {
-            m.host_path = dir.join(fname);
-        }
-    }
-}
-
-mod tempdir {
-    pub struct Guard(pub std::path::PathBuf);
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-}
-
 pub fn rm(name: &str, force: bool) -> anyhow::Result<()> {
-    let dir = dir_of(name)?;
-    anyhow::ensure!(dir.exists(), "no vessel named `{name}`");
-    if live_pid(&dir).is_some() {
-        anyhow::ensure!(
-            force,
-            "vessel `{name}` is running — stop it first or use --force"
-        );
-        stop(name)?;
-    }
-    std::fs::remove_dir_all(&dir)?;
+    core::rm(name, force)?;
     println!("removed vessel `{name}`");
     Ok(())
 }
@@ -1236,31 +515,15 @@ pub fn ls() -> anyhow::Result<()> {
         "vessel", engine, "-", "-", "-"
     );
 
-    let root = vessels_root()?;
-    if root.is_dir() {
-        let mut names: Vec<_> = std::fs::read_dir(&root)?
-            .flatten()
-            .filter(|e| e.path().is_dir())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        for name in names {
-            let dir = root.join(&name);
-            let Ok(spec) = read_spec(&dir) else { continue };
-            let state = if live_pid(&dir).is_some() {
-                "running"
-            } else {
-                "stopped"
-            };
-            println!(
-                "{:<14} {:<9} {:>5} {:>8}M {:>5}  ",
-                name,
-                state,
-                spec.cpus,
-                spec.mem_mib,
-                if spec.gpu { "yes" } else { "no" }
-            );
-        }
+    for v in core::list()? {
+        println!(
+            "{:<14} {:<9} {:>5} {:>8}M {:>5}  ",
+            v.name,
+            if v.running { "running" } else { "stopped" },
+            v.cpus,
+            v.mem_mib,
+            if v.gpu { "yes" } else { "no" }
+        );
     }
     Ok(())
 }
@@ -1375,18 +638,4 @@ pub fn shell(name: &str) -> anyhow::Result<()> {
     line.push('\n');
     writer.write_all(line.as_bytes())?;
     crate::commands::interactive_pump(BufReader::new(stream), writer)
-}
-
-fn agent_request(dir: &std::path::Path, req: &AgentRequest) -> anyhow::Result<AgentResponse> {
-    let stream = ipc::connect(&dir.join("agent.sock"))?;
-    stream.set_read_timeout(Some(Duration::from_secs(65)))?;
-    let mut writer = stream.try_clone()?;
-    let mut line = serde_json::to_string(req)?;
-    line.push('\n');
-    writer.write_all(line.as_bytes())?;
-    let mut reader = BufReader::new(stream);
-    let mut resp = String::new();
-    reader.read_line(&mut resp)?;
-    anyhow::ensure!(!resp.trim().is_empty(), "agent closed the connection");
-    Ok(serde_json::from_str(resp.trim())?)
 }
