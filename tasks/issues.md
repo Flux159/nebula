@@ -257,3 +257,24 @@ limitations; routine TODOs live in code.)
   bundle, `third_party/libkrun/target/release/` in the dev tree) before brew
   paths. Distribution note stands: the app/embed kit should ship the fork
   dylib in Frameworks for sandbox/GPU/krun-vessel features.
+
+- **(2026-06-10) WHV_REGISTER_VALUE alignment bug — upstream candidate.** The
+  Windows SDK declares `WHV_REGISTER_VALUE` as `DECLSPEC_ALIGN(16)`, but the
+  windows-sys 0.61 binding is plain `repr(C)` (8-aligned). WinHvPlatform
+  touches caller arrays with aligned vector loads, so any locally-built
+  register array works or access-violates depending on where the stack
+  landed: lstocchi's `setup_msrs_on_real_vcpu` unit test passes by luck while
+  the same call AV'd (0xC0000005) on the first
+  `WHvSetVirtualProcessorRegisters` of a real boot. Fixed in our fork with a
+  `#[repr(C, align(16))] AlignedRegisterValue` wrapper used by
+  `get_registers`/`set_registers`/`set_registers64` (commit in fork subtree).
+  **TODO**: report to lstocchi/upstream libkrun (their whp crate has the same
+  latent bug) and possibly to microsoft/windows-rs (binding misses the
+  alignment attribute).
+
+- **(2026-06-10) Windows epoll bridge: one spurious completion per re-arm.**
+  The IOCP wait-completion-packet epoll re-arms while a manual-reset event is
+  still signaled, so device workers wake once more after draining their queue
+  EventFd. Handled by treating `WouldBlock` queue-event reads as quiet no-ops
+  (block/vsock/console). If we ever see sustained spinning, the fix is to
+  re-arm only after the consumer resets the event.
