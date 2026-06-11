@@ -461,6 +461,7 @@ pub fn install_image(kernel: Option<PathBuf>, rootfs: Option<PathBuf>) -> anyhow
 }
 
 /// Decompress `src` to `dst` when it's gzip; otherwise return `src` as-is.
+/// Pure Rust (flate2): no `gzip` binary on stock Windows.
 pub fn maybe_gunzip(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<PathBuf> {
     let mut magic = [0u8; 2];
     use std::io::Read;
@@ -471,14 +472,50 @@ pub fn maybe_gunzip(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Res
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let out = std::fs::File::create(dst)?;
-    let status = std::process::Command::new("gzip")
-        .arg("-dc")
-        .stdin(std::fs::File::open(src)?)
-        .stdout(out)
-        .status()?;
-    anyhow::ensure!(status.success(), "decompress failed for {}", src.display());
+    gunzip(src, dst)?;
     Ok(dst.to_path_buf())
+}
+
+fn gunzip(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
+    let mut decoder =
+        flate2::read::GzDecoder::new(std::io::BufReader::new(std::fs::File::open(src)?));
+    let mut out = std::io::BufWriter::new(std::fs::File::create(dst)?);
+    std::io::copy(&mut decoder, &mut out)
+        .map_err(|e| anyhow::anyhow!("decompress {} failed: {e}", src.display()))?;
+    Ok(())
+}
+
+/// Verify `files` against a `shasum -a 256`-format checksum list.
+fn verify_sha256sums(dir: &std::path::Path, sums_file: &str) -> anyhow::Result<()> {
+    use sha2::Digest;
+    let sums = std::fs::read_to_string(dir.join(sums_file))?;
+    let mut checked = 0;
+    for line in sums.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(expected), Some(name)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let name = name.trim_start_matches('*');
+        let mut hasher = sha2::Sha256::new();
+        let mut f = std::fs::File::open(dir.join(name))?;
+        std::io::copy(&mut f, &mut hasher)?;
+        let actual = format!("{:x}", hasher.finalize());
+        anyhow::ensure!(
+            actual == expected,
+            "checksum mismatch for {name}: expected {expected}, got {actual}"
+        );
+        checked += 1;
+    }
+    anyhow::ensure!(checked > 0, "no entries in {sums_file}");
+    Ok(())
+}
+
+/// Guest-image artifact arch tag for this host (guest arch == host arch).
+fn images_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        _ => "x86_64",
+    }
 }
 
 /// Default release channel for guest images (override: NEBULA_IMAGES_URL).
@@ -489,12 +526,18 @@ const IMAGES_BASE_URL: &str = "https://github.com/Flux159/nebula/releases/latest
 /// images are built in CI (see .github/workflows/guest-images.yml).
 pub fn download_images() -> anyhow::Result<()> {
     let base = std::env::var("NEBULA_IMAGES_URL").unwrap_or_else(|_| IMAGES_BASE_URL.into());
+    let arch = images_arch();
     let home = client::nebula_home()?;
     let tmp = home.join("cache/image-download");
     std::fs::create_dir_all(&tmp)?;
 
-    println!("downloading guest images from {base} …");
-    for name in ["SHA256SUMS", "kernel-Image.gz", "rootfs.img.gz"] {
+    let sums = format!("SHA256SUMS-{arch}");
+    let kernel_gz = format!("kernel-Image-{arch}.gz");
+    let rootfs_gz = format!("rootfs-{arch}.img.gz");
+
+    println!("downloading {arch} guest images from {base} …");
+    for name in [sums.as_str(), kernel_gz.as_str(), rootfs_gz.as_str()] {
+        // curl ships on macOS, Linux distros we care about, and Windows 10+.
         let status = std::process::Command::new("curl")
             .args(["-fL", "--retry", "3", "--progress-bar", "-o"])
             .arg(tmp.join(name))
@@ -503,30 +546,13 @@ pub fn download_images() -> anyhow::Result<()> {
         anyhow::ensure!(status.success(), "download failed: {base}/{name}");
     }
 
-    // Verify before touching anything.
-    let status = std::process::Command::new("shasum")
-        .args(["-a", "256", "-c", "SHA256SUMS"])
-        .current_dir(&tmp)
-        .status()?;
-    anyhow::ensure!(
-        status.success(),
-        "checksum verification FAILED — refusing to install"
-    );
+    // Verify before touching anything (pure Rust: no shasum on Windows).
+    verify_sha256sums(&tmp, &sums)?;
 
-    let gunzip = |src: &std::path::Path, dst: &std::path::Path| -> anyhow::Result<()> {
-        let out = std::fs::File::create(dst)?;
-        let status = std::process::Command::new("gzip")
-            .arg("-dc")
-            .stdin(std::fs::File::open(src)?)
-            .stdout(out)
-            .status()?;
-        anyhow::ensure!(status.success(), "decompress failed for {}", src.display());
-        Ok(())
-    };
     let kernel = tmp.join("Image");
     let rootfs = tmp.join("rootfs.img");
-    gunzip(&tmp.join("kernel-Image.gz"), &kernel)?;
-    gunzip(&tmp.join("rootfs.img.gz"), &rootfs)?;
+    gunzip(&tmp.join(&kernel_gz), &kernel)?;
+    gunzip(&tmp.join(&rootfs_gz), &rootfs)?;
     install_image(Some(kernel), Some(rootfs))?;
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(())

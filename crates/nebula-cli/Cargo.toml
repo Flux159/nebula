@@ -20,4 +20,5 @@ tracing-subscriber.workspace = true
 libc.workspace = true
 serde = { workspace = true }
 sha2 = "0.10"
+flate2 = "1"
 serde_yaml = "0.9"
