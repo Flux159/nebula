@@ -1646,6 +1646,12 @@ impl Vcpu {
                     .send(VcpuResponse::Resumed)
                     .expect("failed to send resume status");
             }
+            // State capture is only valid while paused.
+            Ok(VcpuEvent::SaveState) => {
+                self.response_sender
+                    .send(VcpuResponse::SaveStateFailed)
+                    .expect("failed to send save status");
+            }
             // Unhandled exit of the other end.
             Err(TryRecvError::Disconnected) => {
                 // Move to 'exited' state.
