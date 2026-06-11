@@ -154,8 +154,7 @@ fn load_api() -> Result<&'static KrunApi> {
         #[cfg(unix)]
         let handle = {
             let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
-            let handle =
-                unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+            let handle = unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
             if handle.is_null() {
                 return Err(format!("dlopen({}) failed", path.display()));
             }
@@ -273,6 +272,13 @@ impl VmHandle for KrunVm {
             .or_else(|_| std::env::current_exe())?;
         let spec_json = serde_json::to_string(&self.spec)
             .map_err(|e| Error::backend(BACKEND, format!("spec serialize: {e}")))?;
+        // Debug aid: the worker's stderr is often lost to detached spawn
+        // chains; persist the spec so a failing worker can be re-run by hand.
+        if std::env::var_os("NEBULA_DEBUG").is_some() {
+            if let ConsoleSpec::File(path) = &self.spec.console {
+                let _ = std::fs::write(path.with_extension("spec.json"), &spec_json);
+            }
+        }
         // libkrun routes some guest console traffic to the worker's stdio, so
         // aim the worker's stdout at the console file as well.
         let stdout: std::process::Stdio = match &self.spec.console {
@@ -284,13 +290,22 @@ impl VmHandle for KrunVm {
             }
             ConsoleSpec::None => std::process::Stdio::null(),
         };
+        // Worker stderr to a file next to the console log: inherit chains
+        // get severed by detached daemon spawns (notably on Windows), and a
+        // silent worker death is undebuggable without this.
+        let stderr: std::process::Stdio = match &self.spec.console {
+            ConsoleSpec::File(path) => {
+                std::fs::File::create(path.with_extension("worker-stderr.log"))?.into()
+            }
+            ConsoleSpec::None => std::process::Stdio::inherit(),
+        };
         let child = Command::new(worker)
             .arg("krun-worker")
             .arg("--spec")
             .arg(spec_json)
             .stdin(std::process::Stdio::null())
             .stdout(stdout)
-            .stderr(std::process::Stdio::inherit())
+            .stderr(stderr)
             .spawn()?;
         *self.child.lock().unwrap() = Some(child);
         Ok(())
@@ -356,9 +371,12 @@ impl VmHandle for KrunVm {
                     format!("vsock:{port} bad port file {}", map.host_path.display()),
                 )
             })?;
-            std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, tcp_port)).map_err(
-                |e| Error::backend(BACKEND, format!("vsock:{port} via 127.0.0.1:{tcp_port}: {e}")),
-            )
+            std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, tcp_port)).map_err(|e| {
+                Error::backend(
+                    BACKEND,
+                    format!("vsock:{port} via 127.0.0.1:{tcp_port}: {e}"),
+                )
+            })
         }
     }
 
@@ -421,7 +439,11 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
     let api = load_api()?;
 
     let cstr = |s: &str| CString::new(s).expect("no NUL in spec strings");
-    let check = |what: &str, code: i32| -> Result<()> {
+    let debug = std::env::var_os("NEBULA_DEBUG").is_some();
+    let check = move |what: &str, code: i32| -> Result<()> {
+        if debug {
+            eprintln!("krun-worker: {what} -> {code}");
+        }
         if code < 0 {
             Err(Error::backend(BACKEND, format!("{what} failed: {code}")))
         } else {
@@ -429,12 +451,14 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
         }
     };
 
+    if debug {
+        eprintln!("krun-worker: api loaded, calling krun_set_log_level");
+    }
     unsafe {
-        (api.krun_set_log_level)(if std::env::var_os("NEBULA_DEBUG").is_some() {
-            3
-        } else {
-            0
-        });
+        (api.krun_set_log_level)(if debug { 3 } else { 0 });
+        if debug {
+            eprintln!("krun-worker: krun_set_log_level ok, creating ctx");
+        }
         let ctx = (api.krun_create_ctx)();
         check("krun_create_ctx", ctx)?;
         let ctx = ctx as u32;
@@ -626,8 +650,12 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
             )?;
         }
 
+        if debug {
+            eprintln!("krun-worker: configured, entering krun_start_enter");
+        }
         // Takes over the process; exits when the guest powers off.
         let rc = (api.krun_start_enter)(ctx);
+        eprintln!("krun-worker: krun_start_enter returned {rc}");
         // Normally unreachable — krun_start_enter exits the process itself.
         std::process::exit(if rc < 0 { 1 } else { 0 });
     }

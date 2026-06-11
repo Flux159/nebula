@@ -34,7 +34,10 @@ fn plist_path() -> anyhow::Result<PathBuf> {
 
 fn nebulad_path() -> anyhow::Result<PathBuf> {
     let exe = std::env::current_exe()?;
-    let candidate = exe.parent().context("exe has no parent")?.join(format!("nebulad{}", std::env::consts::EXE_SUFFIX));
+    let candidate = exe
+        .parent()
+        .context("exe has no parent")?
+        .join(format!("nebulad{}", std::env::consts::EXE_SUFFIX));
     anyhow::ensure!(
         candidate.is_file(),
         "nebulad not found next to nebula ({})",

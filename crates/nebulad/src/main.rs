@@ -30,11 +30,21 @@ fn main() -> anyhow::Result<()> {
         if args.next().as_deref() == Some("krun-worker") {
             let spec = match (args.next().as_deref(), args.next()) {
                 (Some("--spec"), Some(json)) => json,
+                (Some("--spec-file"), Some(path)) => match std::fs::read_to_string(&path) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        eprintln!("krun-worker: read {path}: {e}");
+                        std::process::exit(2);
+                    }
+                },
                 _ => {
-                    eprintln!("krun-worker: usage: nebulad krun-worker --spec <json>");
+                    eprintln!(
+                        "krun-worker: usage: nebulad krun-worker --spec <json>|--spec-file <path>"
+                    );
                     std::process::exit(2);
                 }
             };
+            eprintln!("krun-worker: starting (pid {})", std::process::id());
             match nebula_core::backend::krun::run_worker(&spec) {
                 Ok(never) => match never {},
                 Err(e) => {
