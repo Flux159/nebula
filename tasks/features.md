@@ -846,3 +846,32 @@ vessel-agent, symbolicate with `atos -o dist-debug/nebulad.dSYM/...` and
   in the image build; nebula init/agent installed last). docs/embedding.md.
 - Acceptance: `scripts/test-vessels.sh` (20 checks, both backends, memory
   snapshot round-trip incl. RAM-only witnesses).
+
+### Windows execution notes — update 2026-06-10 (fork port landed)
+
+- **The fork now builds natively on Windows**: `cargo build --release -p
+  libkrun --features blk` → `krun.dll` (4.2 MB) on the WHP scaffolding
+  (merged lstocchi `mmio_whpx` + console PR #709 as patches + our port of
+  the devices/vmm/libkrun crates — commit `5acae59a`).
+- **vsock on Windows = loopback TCP + port files** (matches `nebula-core`
+  `ipc` convention): listening vsock ports bind `127.0.0.1:0` and write the
+  port number to the mapped path; nebulad's `vsock_connect` reads the file
+  and connects. Implemented as `TcpProxy`/`TcpAcceptorProxy` in
+  `src/devices/src/virtio/vsock/windows.rs` riding the existing muxer state
+  machine via `WSAEventSelect` events on the IOCP epoll.
+- Gated out on Windows for now: balloon, rng, virtiofs, TSI hijacking, and
+  **usernet** (needs its socketpair transport ported to a loopback TCP
+  pair — engine runs with `NetSpec::None` until then, so no container
+  pulls yet; agent/exec/shell all work over vsock).
+- nebula/nebulad build and run with the krun backend on Windows
+  (`LoadLibraryW` + near-exe `krun.dll` candidates; worker re-exec same as
+  Linux). Console output goes to the same console.log via Windows handles.
+- init-blob quirk: the fork's build script compiles a Linux init.c
+  unconditionally; on Windows hosts set `KRUN_INIT_BINARY_PATH` to any file
+  (we never use the embedded init). TODO: make the build script skip it for
+  Windows targets upstream.
+- Local cross-iteration on macOS: `rustup target add x86_64-pc-windows-gnu`
+  + brew `mingw-w64`, then `KRUN_INIT_BINARY_PATH=/tmp/stub-init cargo check
+  --target x86_64-pc-windows-gnu -p libkrun --features blk` in the fork
+  (also `-p nebulad -p nebula-cli` at the workspace root). This catches
+  everything except linking/runtime.
