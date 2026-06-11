@@ -293,6 +293,9 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
         rng: true,
         rosetta: false,
         gpu: opts.gpu,
+        // krun workers serve pause/save/resume here (vz uses its own
+        // vmm.sock wired by the vz-worker itself).
+        control_path: Some(dir.join("vmm.sock")),
         vsock_ports: vec![
             VsockPortMap {
                 port: VSOCK_PORT_CONTROL,

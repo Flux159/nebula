@@ -134,6 +134,10 @@ pub enum Error {
     VcpuHandle(vstate::Error),
     /// vCPU resume failed.
     VcpuResume,
+    /// vCPU pause failed.
+    VcpuPause,
+    /// vCPU state capture failed.
+    VcpuSaveState,
     /// Cannot spawn a new Vcpu thread.
     VcpuSpawn(std::io::Error),
     /// Vm error.
@@ -172,6 +176,8 @@ impl Display for Error {
             VcpuEvent(e) => write!(f, "Cannot send event to vCPU. {e:?}"),
             VcpuHandle(e) => write!(f, "Cannot create a vCPU handle. {e}"),
             VcpuResume => write!(f, "vCPUs resume failed."),
+            VcpuPause => write!(f, "vCPUs pause failed."),
+            VcpuSaveState => write!(f, "vCPU state capture failed."),
             VcpuSpawn(e) => write!(f, "Cannot spawn Vcpu thread: {e}"),
             Vm(e) => write!(f, "Vm error: {e}"),
             #[cfg(unix)]
@@ -252,6 +258,45 @@ impl Vmm {
         self.resume_vcpus()?;
 
         Ok(())
+    }
+
+    /// Sends a pause command to the vcpus; returns once all are parked.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub fn pause_vcpus(&mut self) -> Result<()> {
+        for handle in self.vcpus_handles.iter() {
+            handle
+                .send_event(VcpuEvent::Pause)
+                .map_err(Error::VcpuEvent)?;
+        }
+        for handle in self.vcpus_handles.iter() {
+            match handle
+                .response_receiver()
+                .recv_timeout(Duration::from_millis(1000))
+            {
+                Ok(VcpuResponse::Paused) => (),
+                _ => return Err(Error::VcpuPause),
+            }
+        }
+        Ok(())
+    }
+
+    /// Capture the KVM state of every (paused) vcpu, in index order.
+    #[cfg(target_os = "linux")]
+    pub fn save_vcpu_states(&mut self) -> Result<Vec<crate::vstate::VcpuState>> {
+        let mut states = Vec::with_capacity(self.vcpus_handles.len());
+        for handle in self.vcpus_handles.iter() {
+            handle
+                .send_event(VcpuEvent::SaveState)
+                .map_err(Error::VcpuEvent)?;
+            match handle
+                .response_receiver()
+                .recv_timeout(Duration::from_millis(2000))
+            {
+                Ok(VcpuResponse::SavedState(state)) => states.push(*state),
+                _ => return Err(Error::VcpuSaveState),
+            }
+        }
+        Ok(states)
     }
 
     /// Sends a resume command to the vcpus.

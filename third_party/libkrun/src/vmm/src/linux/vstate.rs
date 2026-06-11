@@ -903,6 +903,26 @@ pub struct VmState {
     ioapic: kvm_irqchip,
 }
 
+impl VmState {
+    pub fn serialize_into<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        write_pod(w, &self.pitstate)?;
+        write_pod(w, &self.clock)?;
+        write_pod(w, &self.pic_master)?;
+        write_pod(w, &self.pic_slave)?;
+        write_pod(w, &self.ioapic)
+    }
+
+    pub fn deserialize_from<R: std::io::Read>(r: &mut R) -> std::io::Result<VmState> {
+        Ok(VmState {
+            pitstate: read_pod(r)?,
+            clock: read_pod(r)?,
+            pic_master: read_pod(r)?,
+            pic_slave: read_pod(r)?,
+            ioapic: read_pod(r)?,
+        })
+    }
+}
+
 /// Encapsulates configuration parameters for the guest vCPUS.
 #[derive(Debug, Eq, PartialEq)]
 pub struct VcpuConfig {
@@ -1373,7 +1393,7 @@ impl Vcpu {
 
     #[allow(unused)]
     #[cfg(target_arch = "x86_64")]
-    fn restore_state(&self, state: VcpuState) -> Result<()> {
+    pub(crate) fn restore_state(&self, state: VcpuState) -> Result<()> {
         /*
          * Ordering requirements:
          *
@@ -1650,6 +1670,21 @@ impl Vcpu {
                 // Move to 'running' state.
                 StateMachine::next(Self::running)
             }
+            // Snapshot: capture the full KVM state from the vcpu thread
+            // (the fd is bound to this thread once KVM_RUN has happened).
+            Ok(VcpuEvent::SaveState) => {
+                let resp = match self.save_state() {
+                    Ok(state) => VcpuResponse::SavedState(Box::new(state)),
+                    Err(e) => {
+                        error!("vcpu save_state failed: {e}");
+                        VcpuResponse::SaveStateFailed
+                    }
+                };
+                self.response_sender
+                    .send(resp)
+                    .expect("failed to send saved state");
+                StateMachine::next(Self::paused)
+            }
             // All other events have no effect on current 'paused' state.
             Ok(_) => StateMachine::next(Self::paused),
             // Unhandled exit of the other end.
@@ -1723,6 +1758,89 @@ pub struct VcpuState {
     xsave: kvm_xsave,
 }
 
+// --- snapshot serialization -------------------------------------------------
+//
+// Raw same-machine encoding: the kvm_bindings types are repr(C) POD, and a
+// snapshot is only ever restored on the host that took it (same kernel, same
+// KVM ABI), so fixed-size structs are written as raw bytes and the FAM
+// wrappers (cpuid/msrs) as a length-prefixed entry slice.
+
+fn write_pod<T: Copy, W: std::io::Write>(w: &mut W, v: &T) -> std::io::Result<()> {
+    // SAFETY: T is a repr(C) POD kvm_bindings struct; reading its bytes is sound.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(v as *const T as *const u8, std::mem::size_of::<T>())
+    };
+    w.write_all(bytes)
+}
+
+fn read_pod<T: Copy, R: std::io::Read>(r: &mut R) -> std::io::Result<T> {
+    let mut v = std::mem::MaybeUninit::<T>::zeroed();
+    // SAFETY: writing size_of::<T>() bytes fully initializes the POD value.
+    unsafe {
+        let bytes =
+            std::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut u8, std::mem::size_of::<T>());
+        r.read_exact(bytes)?;
+        Ok(v.assume_init())
+    }
+}
+
+fn write_entries<T: Copy, W: std::io::Write>(w: &mut W, entries: &[T]) -> std::io::Result<()> {
+    write_pod(w, &(entries.len() as u64))?;
+    for e in entries {
+        write_pod(w, e)?;
+    }
+    Ok(())
+}
+
+fn read_entries<T: Copy, R: std::io::Read>(r: &mut R) -> std::io::Result<Vec<T>> {
+    let n: u64 = read_pod(r)?;
+    let mut out = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        out.push(read_pod::<T, R>(r)?);
+    }
+    Ok(out)
+}
+
+impl VcpuState {
+    pub fn serialize_into<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        write_entries(w, self.cpuid.as_slice())?;
+        write_entries(w, self.msrs.as_slice())?;
+        write_pod(w, &self.debug_regs)?;
+        write_pod(w, &self.lapic)?;
+        write_pod(w, &self.mp_state)?;
+        write_pod(w, &self.regs)?;
+        write_pod(w, &self.sregs)?;
+        write_pod(w, &self.vcpu_events)?;
+        write_pod(w, &self.xcrs)?;
+        write_pod(w, &self.xsave)
+    }
+
+    pub fn deserialize_from<R: std::io::Read>(r: &mut R) -> std::io::Result<VcpuState> {
+        let inval = |what: &str| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("snapshot vcpu state: bad {what}"),
+            )
+        };
+        let cpuid_entries = read_entries(r)?;
+        let cpuid = CpuId::from_entries(&cpuid_entries).map_err(|_| inval("cpuid"))?;
+        let msr_entries = read_entries(r)?;
+        let msrs = Msrs::from_entries(&msr_entries).map_err(|_| inval("msrs"))?;
+        Ok(VcpuState {
+            cpuid,
+            msrs,
+            debug_regs: read_pod(r)?,
+            lapic: read_pod(r)?,
+            mp_state: read_pod(r)?,
+            regs: read_pod(r)?,
+            sregs: read_pod(r)?,
+            vcpu_events: read_pod(r)?,
+            xcrs: read_pod(r)?,
+            xsave: read_pod(r)?,
+        })
+    }
+}
+
 // Allow currently unused Pause and Exit events. These will be used by the vmm later on.
 #[allow(unused)]
 #[derive(Debug)]
@@ -1732,10 +1850,11 @@ pub enum VcpuEvent {
     Pause,
     /// Event that should resume the Vcpu.
     Resume,
-    // Serialize and Deserialize to follow after we get the support from kvm-ioctls.
+    /// Capture the full KVM vcpu state (valid only while Paused).
+    SaveState,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 /// List of responses that the Vcpu reports.
 pub enum VcpuResponse {
     /// Vcpu is paused.
@@ -1744,6 +1863,10 @@ pub enum VcpuResponse {
     Resumed,
     /// Vcpu is stopped.
     Exited(u8),
+    /// Full vcpu state captured while paused.
+    SavedState(Box<VcpuState>),
+    /// State capture failed.
+    SaveStateFailed,
 }
 
 /// Wrapper over Vcpu that hides the underlying interactions with the Vcpu thread.

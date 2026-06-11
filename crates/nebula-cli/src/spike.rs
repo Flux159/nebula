@@ -59,6 +59,7 @@ pub fn run(backend_name: &str, cpus: u32, mem: u64) -> anyhow::Result<()> {
         rng: true,
         rosetta: false,
         gpu: false,
+        control_path: None,
         vsock_ports: vec![],
         backend: None,
         mac: None,

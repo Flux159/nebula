@@ -347,7 +347,53 @@ pub struct Queue {
     num_added: Wrapping<u16>,
 }
 
+/// Plain-data image of a queue for snapshot/restore.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct QueueState {
+    pub max_size: u16,
+    pub size: u16,
+    pub ready: u8,
+    pub event_idx_enabled: u8,
+    pub desc_table: u64,
+    pub avail_ring: u64,
+    pub used_ring: u64,
+    pub next_avail: u16,
+    pub next_used: u16,
+    pub num_added: u16,
+}
+
 impl Queue {
+    /// Capture the queue's driver-visible state for a snapshot.
+    pub fn save_state(&self) -> QueueState {
+        QueueState {
+            max_size: self.max_size,
+            size: self.size,
+            ready: self.ready as u8,
+            event_idx_enabled: self.event_idx_enabled as u8,
+            desc_table: self.desc_table.0,
+            avail_ring: self.avail_ring.0,
+            used_ring: self.used_ring.0,
+            next_avail: self.next_avail.0,
+            next_used: self.next_used.0,
+            num_added: self.num_added.0,
+        }
+    }
+
+    /// Restore driver-visible state captured by [`save_state`](Self::save_state).
+    pub fn restore_state(&mut self, st: &QueueState) {
+        self.max_size = st.max_size;
+        self.size = st.size;
+        self.ready = st.ready != 0;
+        self.event_idx_enabled = st.event_idx_enabled != 0;
+        self.desc_table = GuestAddress(st.desc_table);
+        self.avail_ring = GuestAddress(st.avail_ring);
+        self.used_ring = GuestAddress(st.used_ring);
+        self.next_avail = Wrapping(st.next_avail);
+        self.next_used = Wrapping(st.next_used);
+        self.num_added = Wrapping(st.num_added);
+    }
+
     /// Constructs an empty virtio queue with the given `max_size`.
     pub fn new(max_size: u16) -> Queue {
         Queue {

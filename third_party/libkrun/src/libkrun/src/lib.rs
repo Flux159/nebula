@@ -3150,6 +3150,45 @@ pub unsafe extern "C" fn krun_set_kernel_console(ctx_id: u32, console_id: *const
     }
 }
 
+/// The live VMM, set once by krun_start_enter. Lets the pause/snapshot C
+/// APIs reach the machine from other threads in the embedder.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+static RUNNING_VMM: std::sync::OnceLock<std::sync::Arc<Mutex<vmm::Vmm>>> =
+    std::sync::OnceLock::new();
+
+/// Pause all guest vCPUs. Returns 0, or -EAGAIN if the VM isn't running
+/// yet. Thread-safe; call from any thread while krun_start_enter runs.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn krun_vm_pause(_ctx_id: u32) -> i32 {
+    let Some(vmm) = RUNNING_VMM.get() else {
+        return -libc::EAGAIN;
+    };
+    match vmm.lock().unwrap().pause_vcpus() {
+        Ok(()) => KRUN_SUCCESS,
+        Err(e) => {
+            error!("krun_vm_pause: {e}");
+            -libc::EIO
+        }
+    }
+}
+
+/// Resume previously paused guest vCPUs.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn krun_vm_resume(_ctx_id: u32) -> i32 {
+    let Some(vmm) = RUNNING_VMM.get() else {
+        return -libc::EAGAIN;
+    };
+    match vmm.lock().unwrap().resume_vcpus() {
+        Ok(()) => KRUN_SUCCESS,
+        Err(e) => {
+            error!("krun_vm_resume: {e}");
+            -libc::EIO
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 #[allow(unreachable_code)]
 pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
@@ -3335,6 +3374,12 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
             return -libc::EINVAL;
         }
     };
+
+    // Expose the running VMM to the pause/snapshot C APIs (krun_vm_pause &
+    // friends are called from another thread while this one runs the event
+    // loop forever).
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let _ = RUNNING_VMM.set(_vmm.clone());
 
     #[cfg(target_os = "macos")]
     if ctx_cfg.gpu_virgl_flags.is_some() {

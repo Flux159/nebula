@@ -93,6 +93,7 @@ impl Vessel {
             rng: true,
             rosetta: macos,
             gpu: false,
+            control_path: None,
             vsock_ports,
             backend: None,
             mac: None,

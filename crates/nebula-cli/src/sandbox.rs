@@ -110,6 +110,7 @@ pub fn run(opts: SandboxOpts) -> anyhow::Result<()> {
         rng: true,
         rosetta: false,
         gpu: opts.gpu,
+        control_path: None,
         vsock_ports: vec![],
         backend: None,
         mac: None,

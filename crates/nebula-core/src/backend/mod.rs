@@ -119,3 +119,27 @@ pub fn backend_by_name(name: &str) -> Result<Box<dyn VmmBackend>> {
         )),
     }
 }
+
+/// Control protocol served by VM worker processes (vz-worker on macOS,
+/// krun-worker elsewhere) over an ipc stream, one JSON line per message.
+/// Drives pause/save/resume for memory snapshots.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum WorkerControl {
+    Pause,
+    Resume,
+    /// Save machine state of a paused VM to `path` (host-side file or dir).
+    Save {
+        path: std::path::PathBuf,
+    },
+    State,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct WorkerReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}

@@ -95,6 +95,9 @@ struct KrunApi {
     /// Optional: our fork's in-process usermode NAT (no passt needed).
     krun_add_net_usernet: Option<unsafe extern "C" fn(u32, *const u8) -> i32>,
     krun_start_enter: unsafe extern "C" fn(u32) -> i32,
+    /// Optional: pause/resume all vCPUs (snapshot support; linux/windows fork).
+    krun_vm_pause: Option<unsafe extern "C" fn(u32) -> i32>,
+    krun_vm_resume: Option<unsafe extern "C" fn(u32) -> i32>,
 }
 
 #[cfg(windows)]
@@ -199,6 +202,8 @@ fn load_api() -> Result<&'static KrunApi> {
                 krun_add_net_unixstream: sym(handle, "krun_add_net_unixstream").ok(),
                 krun_add_net_usernet: sym(handle, "krun_add_net_usernet").ok(),
                 krun_start_enter: sym(handle, "krun_start_enter")?,
+                krun_vm_pause: sym(handle, "krun_vm_pause").ok(),
+                krun_vm_resume: sym(handle, "krun_vm_resume").ok(),
             })
         }
     });
@@ -650,6 +655,24 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
             )?;
         }
 
+        // Worker control channel: serves pause/save/resume for snapshots
+        // (same JSON protocol as the vz-worker). Runs for the process
+        // lifetime; krun_start_enter never returns.
+        if let Some(ctl_path) = spec.control_path.clone() {
+            let pause = api.krun_vm_pause;
+            let resume = api.krun_vm_resume;
+            let _ = std::fs::remove_file(&ctl_path);
+            match crate::ipc::listen(&ctl_path) {
+                Ok(listener) => {
+                    std::thread::Builder::new()
+                        .name("vmm-ctl".into())
+                        .spawn(move || serve_worker_control(listener, ctx, pause, resume))
+                        .ok();
+                }
+                Err(e) => eprintln!("krun-worker: control listener {}: {e}", ctl_path.display()),
+            }
+        }
+
         if debug {
             eprintln!("krun-worker: configured, entering krun_start_enter");
         }
@@ -658,5 +681,101 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
         eprintln!("krun-worker: krun_start_enter returned {rc}");
         // Normally unreachable — krun_start_enter exits the process itself.
         std::process::exit(if rc < 0 { 1 } else { 0 });
+    }
+}
+
+/// Serve the snapshot control protocol (one JSON line per message) until the
+/// process exits. Mirrors the vz-worker's control loop.
+fn serve_worker_control(
+    listener: crate::ipc::IpcListener,
+    ctx: u32,
+    pause: Option<unsafe extern "C" fn(u32) -> i32>,
+    resume: Option<unsafe extern "C" fn(u32) -> i32>,
+) {
+    use crate::backend::{WorkerControl, WorkerReply};
+    use std::io::{BufRead, Write};
+
+    let reply = |stream: &mut dyn Write, ok: bool, error: Option<String>, state: Option<String>| {
+        let r = WorkerReply { ok, error, state };
+        if let Ok(json) = serde_json::to_string(&r) {
+            let _ = writeln!(stream, "{json}");
+        }
+    };
+
+    for stream in listener.incoming() {
+        let Ok(stream) = stream else { continue };
+        let mut writer = match stream.try_clone() {
+            Ok(w) => w,
+            Err(_) => continue,
+        };
+        let reader = std::io::BufReader::new(stream);
+        let mut paused = false;
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            let ctl: WorkerControl = match serde_json::from_str(&line) {
+                Ok(c) => c,
+                Err(e) => {
+                    reply(
+                        &mut writer,
+                        false,
+                        Some(format!("bad control msg: {e}")),
+                        None,
+                    );
+                    continue;
+                }
+            };
+            match ctl {
+                WorkerControl::Pause => match pause {
+                    Some(f) => {
+                        let rc = unsafe { f(ctx) };
+                        paused = rc == 0;
+                        reply(
+                            &mut writer,
+                            rc == 0,
+                            (rc != 0).then(|| format!("krun_vm_pause failed: {rc}")),
+                            None,
+                        );
+                    }
+                    None => reply(
+                        &mut writer,
+                        false,
+                        Some("this libkrun build has no pause support".into()),
+                        None,
+                    ),
+                },
+                WorkerControl::Resume => match resume {
+                    Some(f) => {
+                        let rc = unsafe { f(ctx) };
+                        if rc == 0 {
+                            paused = false;
+                        }
+                        reply(
+                            &mut writer,
+                            rc == 0,
+                            (rc != 0).then(|| format!("krun_vm_resume failed: {rc}")),
+                            None,
+                        );
+                    }
+                    None => reply(
+                        &mut writer,
+                        false,
+                        Some("this libkrun build has no resume support".into()),
+                        None,
+                    ),
+                },
+                WorkerControl::Save { .. } => reply(
+                    &mut writer,
+                    false,
+                    Some("krun memory snapshots: save not implemented yet".into()),
+                    None,
+                ),
+                WorkerControl::State => reply(
+                    &mut writer,
+                    true,
+                    None,
+                    Some(if paused { "paused" } else { "running" }.into()),
+                ),
+            }
+        }
     }
 }

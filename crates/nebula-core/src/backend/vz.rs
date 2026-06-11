@@ -306,26 +306,7 @@ use serde::{Deserialize, Serialize};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum WorkerControl {
-    Pause,
-    Resume,
-    /// Save machine state of a paused VM to `path` (host-side file).
-    Save {
-        path: std::path::PathBuf,
-    },
-    State,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct WorkerReply {
-    pub ok: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<String>,
-}
+pub use super::{WorkerControl, WorkerReply};
 
 /// Host a VZ vessel until the guest powers off. `restore` boots from a saved
 /// machine state instead of a cold kernel boot.

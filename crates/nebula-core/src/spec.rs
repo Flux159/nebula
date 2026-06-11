@@ -35,6 +35,10 @@ pub struct VmSpec {
     /// Attach a virtio-gpu with Venus (Vulkan) support (libkrun only).
     #[serde(default)]
     pub gpu: bool,
+    /// Worker control socket path (pause/save/resume for snapshots). On
+    /// Windows this is a port file per the ipc convention.
+    #[serde(default)]
+    pub control_path: Option<std::path::PathBuf>,
     /// Host unix socket <-> guest vsock port maps (libkrun: native; VZ:
     /// proxied by the vz-worker): connecting to `host_path` reaches a guest
     /// listener on `port`.
