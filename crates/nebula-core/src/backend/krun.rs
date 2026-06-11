@@ -82,7 +82,8 @@ struct KrunApi {
     /// Optional: only exported when libkrun is built with BLK=1.
     krun_add_disk2:
         Option<unsafe extern "C" fn(u32, *const c_char, *const c_char, u32, bool) -> i32>,
-    krun_add_virtiofs: unsafe extern "C" fn(u32, *const c_char, *const c_char) -> i32,
+    /// Optional: virtiofs is unix-only in our fork (absent from krun.dll).
+    krun_add_virtiofs: Option<unsafe extern "C" fn(u32, *const c_char, *const c_char) -> i32>,
     /// Optional: only exported when libkrun is built with GPU=1.
     krun_set_gpu_options: Option<unsafe extern "C" fn(u32, u32) -> i32>,
     /// Map a host unix socket to a guest vsock port (listen=true: host-initiated).
@@ -193,7 +194,7 @@ fn load_api() -> Result<&'static KrunApi> {
                 krun_set_kernel: sym(handle, "krun_set_kernel")?,
                 krun_add_virtio_console_default: sym(handle, "krun_add_virtio_console_default")?,
                 krun_add_disk2: sym(handle, "krun_add_disk2").ok(),
-                krun_add_virtiofs: sym(handle, "krun_add_virtiofs")?,
+                krun_add_virtiofs: sym(handle, "krun_add_virtiofs").ok(),
                 krun_set_gpu_options: sym(handle, "krun_set_gpu_options").ok(),
                 krun_add_vsock_port2: sym(handle, "krun_add_vsock_port2")?,
                 krun_add_net_unixstream: sym(handle, "krun_add_net_unixstream").ok(),
@@ -585,11 +586,14 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
         }
 
         for s in &spec.shares {
+            let add_virtiofs = api.krun_add_virtiofs.ok_or_else(|| {
+                Error::backend(BACKEND, "this libkrun build lacks virtiofs (unix-only)")
+            })?;
             let tag = cstr(&s.tag);
             let path_c = cstr(&s.host_path.to_string_lossy());
             check(
                 "krun_add_virtiofs",
-                (api.krun_add_virtiofs)(ctx, tag.as_ptr(), path_c.as_ptr()),
+                add_virtiofs(ctx, tag.as_ptr(), path_c.as_ptr()),
             )?;
         }
 
