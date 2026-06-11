@@ -292,11 +292,17 @@ limitations; routine TODOs live in code.)
   driver read zeros and Linux fell back to 1999-11-30, breaking every TLS
   handshake (docker pulls failed before the first byte). KVM masked this via
   kvmclock; WHP has no paravirt clock. Fixed by serving live BCD time/date/
-  status RTC registers from the host clock. Long-running guests still have no
-  time sync (no NTP without... actually usernet provides outbound — guests
-  can NTP; the engine vessel doesn't run an NTP daemon). Watch for drift on
-  long-lived Windows vessels; candidate: Hyper-V reference-TSC time sync or a
-  periodic agent settimeofday.
+  status RTC registers from the host clock.
+  **RESOLVED 2026-06-10 (part 2 — drift):** even with a correct boot clock the
+  guest lost monotonic+wall time ~1:1 with idle time (clocksource fell back to
+  refined-jiffies; ticks dropped during HLT; "tsc: Marking TSC unstable due to
+  running on Hyper-V"). Root cause: the WHP partition advertises the Hyper-V
+  identity + reference counter/TSC (synthetic features 0xB8F) but the guest
+  kernel had no CONFIG_HYPERV/CONFIG_HYPERV_TIMER, so the hypervisor-served
+  clocksource didn't exist. Fragment now enables them; guest runs on
+  hyperv_clocksource_tsc_page with zero drift (uptime tracks wall time).
+  Remaining polish: ~15s constant boot offset (RTC read + boot duration) —
+  an agent settimeofday-from-host at first health check would zero it.
 
 - **(2026-06-10) Force-killing the Windows VM worker corrupts the data disk**
   (expected — dirty ext4, no journal replay survived repeated mid-write
