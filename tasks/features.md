@@ -898,3 +898,22 @@ release artifacts (zip with nebula.exe/nebulad.exe/krun.dll), balloon stays
 disabled. Debug crumbs that mattered: WHV_REGISTER_VALUE 16-byte alignment
 (see issues.md), stale-pid liveness via tasklist, PowerShell `>` corrupts
 binary redirects (use gzip -d in place).
+
+### Windows milestone #2 — 2026-06-10: CONTAINERS work end-to-end on WHP
+
+Full container lifecycle on the Windows box, all through our stack:
+
+```
+POST /images/create?fromImage=alpine   → "Status: Downloaded newer image"
+POST /containers/create + /start + /logs → CONTAINER-OK-ON-WINDOWS
+```
+
+Path proven: dockerd in the WHP guest → usernet smoltcp NAT (loopback TCP
+pair transport + WSAPoll) → host sockets, TLS valid thanks to the new CMOS
+RTC. Host clients reach dockerd via nebulad's docker proxy (port file at
+run/docker.sock — Windows has no docker CLI by default; `nebula docker`
+wrapping + a bundled docker client are follow-ups).
+
+Three more fork bugs found and fixed on the way (issues.md): winsock
+SD_RECEIVE RST eating exec output, CMOS lacking RTC time registers
+(1999 clock → all TLS dead), spurious IOCP epoll wakeups.
