@@ -79,6 +79,10 @@ pub struct MmioTransport {
     /// reconfiguration while active) — captured for snapshots, since the
     /// live queues move into the device/worker at activation.
     activated_queue_states: Option<Vec<QueueState>>,
+    /// Shadow copies for snapshot_state(): locking the inner device from
+    /// the snapshot thread deadlocks against device worker threads.
+    cached_device_type: u32,
+    shadow_acked_features: u64,
     // The register where feature bits are stored.
     pub(crate) features_select: u32,
     // The register where features page is selected.
@@ -197,12 +201,15 @@ impl MmioTransport {
         drop(locked);
 
         let queues = Self::create_queues(&queue_config);
+        let device_type = device.lock().unwrap().device_type();
         let queue_evts = Self::create_queue_evts(queue_config.len())?;
 
         Ok(MmioTransport {
             interrupt: InterruptTransport::new(intc, debug_log_target)?,
+            cached_device_type: device_type,
             device,
             activated_queue_states: None,
+            shadow_acked_features: 0,
             features_select: 0,
             acked_features_select: 0,
             queue_select: 0,
@@ -227,7 +234,7 @@ impl MmioTransport {
             (None, None) => Vec::new(),
         };
         MmioTransportState {
-            device_type: self.locked_device().device_type(),
+            device_type: self.cached_device_type,
             features_select: self.features_select,
             acked_features_select: self.acked_features_select,
             queue_select: self.queue_select,
@@ -235,7 +242,7 @@ impl MmioTransport {
             config_generation: self.config_generation,
             shm_region_select: self.shm_region_select,
             interrupt_status: self.interrupt.0.status.load(Ordering::SeqCst) as u64,
-            acked_features: self.locked_device().acked_features(),
+            acked_features: self.shadow_acked_features,
             queue_states,
         }
     }
@@ -254,6 +261,7 @@ impl MmioTransport {
             .0
             .status
             .store(st.interrupt_status as usize, Ordering::SeqCst);
+        self.shadow_acked_features = st.acked_features;
         self.locked_device().set_acked_features(st.acked_features);
 
         let mut queues = Self::create_queues(&self.queue_config);

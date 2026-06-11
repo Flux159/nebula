@@ -3062,7 +3062,6 @@ pub mod tests {
     }
 }
 
-
 // --- snapshot restore -------------------------------------------------------
 
 /// Loaded contents of a krun snapshot directory (linux/KVM).

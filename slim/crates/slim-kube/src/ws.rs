@@ -15,6 +15,7 @@ pub fn exec(
     socket: &Path,
     ns: &str,
     pod: &str,
+    container: &str,
     cmd: &[String],
     tty: bool,
     stdin: bool,
@@ -25,6 +26,10 @@ pub fn exec(
     for c in cmd {
         q.push_str("&command=");
         q.push_str(&urlenc(c));
+    }
+    if !container.is_empty() {
+        q.push_str("&container=");
+        q.push_str(&urlenc(container));
     }
     q.push_str("&stdout=true");
     if !tty {

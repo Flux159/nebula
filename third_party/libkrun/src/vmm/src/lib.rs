@@ -559,7 +559,8 @@ impl Vmm {
             }
         }
         // Holes at EOF need an explicit length.
-        let total: u64 = 8 + regions.len() as u64 * 16 + regions.iter().map(|r| r.len()).sum::<u64>();
+        let total: u64 =
+            8 + regions.len() as u64 * 16 + regions.iter().map(|r| r.len()).sum::<u64>();
         file.set_len(total)?;
         file.flush()
     }

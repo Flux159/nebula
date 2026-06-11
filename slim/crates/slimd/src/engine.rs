@@ -251,8 +251,13 @@ impl Engine {
                 slim_net::DEFAULT_NETWORK.to_string()
             }
             other if other.starts_with("container:") => {
-                eprintln!("slimd: container: networking unsupported; using bridge");
-                slim_net::DEFAULT_NETWORK.to_string()
+                // Share another container's network namespace (k8s pod sandbox).
+                // Resolve the target to its id; start_entry reads its live pid.
+                let target = other.trim_start_matches("container:");
+                match self.get_entry(target) {
+                    Ok(e) => format!("container:{}", e.c.lock().unwrap().id),
+                    Err(_) => other.to_string(), // unresolved → start_entry errors
+                }
             }
             other => other.to_string(),
         };
@@ -331,6 +336,23 @@ impl Engine {
         let etc = merged.join("etc");
         std::fs::create_dir_all(&etc)?;
 
+        // container:<id> network mode (pod sandbox): join the target's netns by
+        // pointing at /proc/<target-pid>/ns/net. The target (pod sandbox holder)
+        // must be running; we inherit its IP for status and skip our own veth.
+        let shared_netns: Option<(PathBuf, String)> = if let Some(tid) = c.network.strip_prefix("container:") {
+            let te = self.get_entry(tid)?;
+            let (tpid, tip) = {
+                let tc = te.c.lock().unwrap();
+                (tc.state.pid, tc.ip.clone())
+            };
+            if tpid <= 0 {
+                return Err(conflict(format!("network container {tid} is not running")));
+            }
+            Some((PathBuf::from(format!("/proc/{tpid}/ns/net")), tip))
+        } else {
+            None
+        };
+
         let spec = slim_runtime::ContainerSpec {
             id: c.id.clone(),
             rootfs: merged.clone(),
@@ -348,7 +370,7 @@ impl Engine {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
-            netns: None,
+            netns: shared_netns.as_ref().map(|(p, _)| p.clone()),
             readonly_rootfs: c.host_config.readonly_rootfs,
             shm_size: c.host_config.shm_size,
             memory: c.host_config.memory,
@@ -365,7 +387,11 @@ impl Engine {
         let pid = handle.pid;
 
         // Networking.
-        if c.network != "none" {
+        if let Some((_, tip)) = &shared_netns {
+            // Sharing the holder's netns: no veth/IP/ports of our own — we ARE
+            // the holder's network. Inherit its IP for status/DNS purposes.
+            c.ip = tip.clone();
+        } else if c.network != "none" {
             let aliases = self.aliases_for(&c);
             match self.net.connect(&c.network, &c.id, &c.name, pid, &aliases) {
                 Ok(ep) => {
@@ -388,19 +414,22 @@ impl Engine {
         }
 
         // Write hosts/resolv now that we know our IP (best-effort; the files
-        // live in the overlay upper, visible to the running container).
-        let gw = self
-            .net
-            .get(&c.network)
-            .map(|n| n.gateway())
-            .unwrap_or_default();
-        let extra = self.net.hosts_entries(&c.network);
-        let _ = std::fs::write(
-            etc.join("hosts"),
-            hosts_file(&c.hostname, &c.ip, &extra, &c.host_config.extra_hosts),
-        );
-        if c.network != "none" {
-            let _ = std::fs::write(etc.join("resolv.conf"), resolv_conf(&gw, &c.host_config.dns));
+        // live in the overlay upper, visible to the running container). Skipped
+        // for shared-netns joiners — the holder owns /etc/hosts in that netns.
+        if shared_netns.is_none() {
+            let gw = self
+                .net
+                .get(&c.network)
+                .map(|n| n.gateway())
+                .unwrap_or_default();
+            let extra = self.net.hosts_entries(&c.network);
+            let _ = std::fs::write(
+                etc.join("hosts"),
+                hosts_file(&c.hostname, &c.ip, &extra, &c.host_config.extra_hosts),
+            );
+            if c.network != "none" {
+                let _ = std::fs::write(etc.join("resolv.conf"), resolv_conf(&gw, &c.host_config.dns));
+            }
         }
 
         // Output plumbing: pump pty/pipes → log + subscribers.
@@ -587,9 +616,15 @@ impl Engine {
                     c.host_config.auto_remove,
                 )
             };
-            engine.net.unpublish(&id);
-            engine.net.disconnect_all(&id);
-            engine.dns.remove_ip(&entry.c.lock().unwrap().ip.clone());
+            // Shared-netns joiners never owned a veth/IP/ports (they borrow the
+            // holder's), so skip teardown — disconnecting would yank the holder's
+            // network and DNS out from under it.
+            let shared = entry.c.lock().unwrap().network.starts_with("container:");
+            if !shared {
+                engine.net.unpublish(&id);
+                engine.net.disconnect_all(&id);
+                engine.dns.remove_ip(&entry.c.lock().unwrap().ip.clone());
+            }
 
             let mut attrs = BTreeMap::new();
             attrs.insert("exitCode".to_string(), status.code.to_string());

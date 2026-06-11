@@ -18,8 +18,8 @@ use std::os::windows::io::AsRawSocket;
 
 use utils::windows::{RawFd, SendHandle};
 use windows_sys::Win32::Networking::WinSock::{
-    FD_CLOSE, FD_READ, SOCKET, WSACloseEvent, WSACreateEvent, WSAEnumNetworkEvents,
-    WSAEventSelect, WSANETWORKEVENTS,
+    FD_CLOSE, FD_READ, SOCKET, WSACloseEvent, WSACreateEvent, WSAEnumNetworkEvents, WSAEventSelect,
+    WSANETWORKEVENTS,
 };
 
 use super::backend::{ConnectError, NetBackend, ReadError, WriteError};

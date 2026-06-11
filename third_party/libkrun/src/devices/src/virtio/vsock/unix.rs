@@ -603,10 +603,7 @@ impl Proxy for UnixProxy {
                     // hijacked streams (docker run/exec attach) break if we
                     // RST here. Full teardown happens on HANG_UP or when the
                     // guest closes its side.
-                    debug!(
-                        "process_event: host read EOF, half-closing: id={}",
-                        self.id
-                    );
+                    debug!("process_event: host read EOF, half-closing: id={}", self.id);
                     self.status = ProxyStatus::Connected;
                     self.half_closed = true;
                     self.push_shutdown_send();

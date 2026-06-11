@@ -188,8 +188,9 @@ fn verb_logs(facade: &Facade, args: &[String]) -> Result<i32, String> {
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     let pod = positional.first().ok_or("logs requires a pod name")?;
     let follow = args.iter().any(|a| a == "-f" || a == "--follow");
+    let container = flag_value(args, &["-c", "--container"]).unwrap_or_default();
     let mut out = std::io::stdout();
-    facade.logs(pod, follow, &mut out).map_err(|e| e.to_string())?;
+    facade.logs(pod, &container, follow, &mut out).map_err(|e| e.to_string())?;
     Ok(0)
 }
 
@@ -200,14 +201,30 @@ fn verb_exec(facade: &Facade, args: &[String]) -> Result<i32, String> {
         Some(i) => (&args[..i], args[i + 1..].to_vec()),
         None => (args, vec![]),
     };
-    let positional: Vec<&String> = head.iter().filter(|a| !a.starts_with('-')).collect();
+    let container = flag_value(head, &["-c", "--container"]).unwrap_or_default();
+    // positional = non-flag tokens, skipping the -c/--container value.
+    let mut positional: Vec<&String> = Vec::new();
+    let mut i = 0;
+    while i < head.len() {
+        let a = &head[i];
+        if a == "-c" || a == "--container" {
+            i += 2;
+            continue;
+        }
+        if a.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        positional.push(a);
+        i += 1;
+    }
     let pod = positional.first().ok_or("exec requires a pod name")?;
     if cmd.is_empty() {
         return Err("exec requires a command after --".into());
     }
     let interactive = head.iter().any(|a| a == "-i" || a == "-it" || a == "-ti" || a == "--stdin");
     let tty = head.iter().any(|a| a == "-t" || a == "-it" || a == "-ti" || a == "--tty");
-    facade.exec(pod, &cmd, interactive, tty).map_err(|e| e.to_string())
+    facade.exec(pod, &container, &cmd, interactive, tty).map_err(|e| e.to_string())
 }
 
 fn verb_describe(facade: &Facade, args: &[String]) -> Result<i32, String> {

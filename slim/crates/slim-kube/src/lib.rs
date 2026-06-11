@@ -363,10 +363,11 @@ impl<'a> Facade<'a> {
         Err(ke(format!("pods \"{name}\" not found")))
     }
 
-    pub fn logs(&self, pod: &str, follow: bool, w: &mut dyn Write) -> KubeResult<()> {
+    pub fn logs(&self, pod: &str, container: &str, follow: bool, w: &mut dyn Write) -> KubeResult<()> {
         let ns = self.namespace.clone();
         let pod = self.resolve_pod(pod)?;
-        let path = format!("/api/v1/namespaces/{ns}/pods/{pod}/log?follow={follow}&timestamps=false");
+        let cq = if container.is_empty() { String::new() } else { format!("&container={container}") };
+        let path = format!("/api/v1/namespaces/{ns}/pods/{pod}/log?follow={follow}&timestamps=false{cq}");
         let mut resp = self.client.request("GET", &path, &[], None)?;
         if resp.status == 404 {
             return Err(ke(format!("pods \"{pod}\" not found")));
@@ -380,10 +381,10 @@ impl<'a> Facade<'a> {
 
     /// Exec into a pod through the apiserver's WebSocket exec subresource.
     /// Returns the command's exit code.
-    pub fn exec(&self, pod: &str, cmd: &[String], interactive: bool, tty: bool) -> KubeResult<i32> {
+    pub fn exec(&self, pod: &str, container: &str, cmd: &[String], interactive: bool, tty: bool) -> KubeResult<i32> {
         let ns = self.namespace.clone();
         let pod = self.resolve_pod(pod)?;
-        ws::exec(&self.client.socket, &ns, &pod, cmd, tty, interactive).map_err(|e| ke(e.to_string()))
+        ws::exec(&self.client.socket, &ns, &pod, container, cmd, tty, interactive).map_err(|e| ke(e.to_string()))
     }
 }
 

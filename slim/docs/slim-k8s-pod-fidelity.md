@@ -59,7 +59,7 @@ health and hung-but-alive containers get restarted.
 probe shows `0/1` and `Ready=False`; a liveness-failing container restarts
 (RESTARTS climbs). New test/kube-probes.sh.
 
-## Phase 3 — multi-container pods / sidecars  ⬜
+## Phase 3 — multi-container pods / sidecars  ✅ DONE
 
 **Goal:** run all `spec.containers[]`, not just `[0]`, sharing one network
 namespace (and emptyDir volumes) — the sidecar pattern.
@@ -112,5 +112,12 @@ pod `Pending`. Extend test/kube-sidecar.sh.
   snapshot Arc<Entry> under the map lock, release, then lock containers.
   Liberties: exec probe output >64KB or a hung probe command stalls the prober
   tick; named ports unresolved.
-- Phase 3 — multi-container/sidecars: ⬜
+- Phase 3 — multi-container/sidecars: ✅ DONE. Pod = N engine containers;
+  container 0 is the sandbox/netns holder (`<ns>_<pod>`), the rest
+  (`<ns>_<pod>.<name>`) join its netns via `container:<holder>` (engine wired to
+  setns `/proc/<pid>/ns/net`). Shared emptyDir volumes; aggregated pod
+  status/phase; exec/logs gain `-c`. kube-sidecar.sh 8/8 (shared localhost +
+  shared volume). Liberties: emptyDir only (no configMap/secret/hostPath
+  volumes); if the holder restarts, sidecars keep the stale netns until they
+  exit and the level reconcile recreates them.
 - Phase 4 — init containers: ⬜

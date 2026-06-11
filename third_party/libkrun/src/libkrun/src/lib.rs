@@ -1095,12 +1095,7 @@ pub unsafe extern "C" fn krun_add_net_usernet(ctx_id: u32, c_mac: *const u8) -> 
         match CTX_MAP.lock().unwrap().entry(ctx_id) {
             Entry::Occupied(mut ctx_cfg) => {
                 let cfg = ctx_cfg.get_mut();
-                create_virtio_net(
-                    cfg,
-                    VirtioNetBackend::UnixstreamFd(device_end),
-                    mac,
-                    0,
-                );
+                create_virtio_net(cfg, VirtioNetBackend::UnixstreamFd(device_end), mac, 0);
             }
             Entry::Vacant(_) => return -libc::ENOENT,
         }
@@ -2515,7 +2510,11 @@ pub extern "C" fn krun_setgid(ctx_id: u32, gid: libc::gid_t) -> i32 {
     KRUN_SUCCESS
 }
 
-#[cfg(all(unix, feature = "blk", not(any(feature = "tee", feature = "aws-nitro"))))]
+#[cfg(all(
+    unix,
+    feature = "blk",
+    not(any(feature = "tee", feature = "aws-nitro"))
+))]
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn krun_set_root_disk_remount(

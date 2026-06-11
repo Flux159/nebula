@@ -17,13 +17,9 @@ use super::tsi_stream::TsiStreamProxy;
 use crate::virtio::InterruptTransport;
 use crate::virtio::vsock::defs;
 #[cfg(unix)]
-use crate::virtio::vsock::unix::{
-    UnixAcceptorProxy as HostAcceptorProxy, UnixProxy as HostProxy,
-};
+use crate::virtio::vsock::unix::{UnixAcceptorProxy as HostAcceptorProxy, UnixProxy as HostProxy};
 #[cfg(windows)]
-use crate::virtio::vsock::windows::{
-    TcpAcceptorProxy as HostAcceptorProxy, TcpProxy as HostProxy,
-};
+use crate::virtio::vsock::windows::{TcpAcceptorProxy as HostAcceptorProxy, TcpProxy as HostProxy};
 use crossbeam_channel::Sender;
 use rand::{Rng, rng, rngs::ThreadRng};
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};

@@ -1774,9 +1774,8 @@ pub struct VcpuState {
 
 fn write_pod<T, W: std::io::Write>(w: &mut W, v: &T) -> std::io::Result<()> {
     // SAFETY: T is a repr(C) POD kvm_bindings struct; reading its bytes is sound.
-    let bytes = unsafe {
-        std::slice::from_raw_parts(v as *const T as *const u8, std::mem::size_of::<T>())
-    };
+    let bytes =
+        unsafe { std::slice::from_raw_parts(v as *const T as *const u8, std::mem::size_of::<T>()) };
     w.write_all(bytes)
 }
 

@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 const OWNER: &str = "io.nebula.kube.owner"; // "<kind>/<ns>/<name>"
 const POD_OF: &str = "io.nebula.kube.pod"; // "<ns>/<podname>"
 const MANAGED: &str = "io.nebula.kube.bridge"; // "true"
+const POD_HOLDER: &str = "io.nebula.kube.holder"; // holder cname (pod netns owner)
+const CNAME: &str = "io.nebula.kube.container"; // k8s container name
 
 /// In-cluster context the bridge projects into pods so client-go operators
 /// reach the apiserver (KUBERNETES_SERVICE_HOST/PORT + the ServiceAccount dir).
@@ -33,6 +35,8 @@ struct BridgeCtx {
     /// Per-container readiness from the prober (cname → ready). Absent = no
     /// readiness probe (ready == running); present = gated on the probe.
     readiness: Arc<Mutex<HashMap<String, bool>>>,
+    /// Host dir root for pod emptyDir volumes (<data>/kube-vol).
+    vol_root: PathBuf,
 }
 
 /// Start the apiserver-lite (TLS) + the reconcile loop. Spawns background
@@ -110,6 +114,7 @@ pub fn start(engine: &EngineRef, api_addr: &str) -> SharedStore {
         kube_host: gw,
         kube_port: port,
         readiness: Arc::new(Mutex::new(HashMap::new())),
+        vol_root: engine.paths.data.join("kube-vol"),
     };
     register_kubernetes_service(&store, engine, &ctx);
 
@@ -146,15 +151,34 @@ fn register_kubernetes_service(store: &SharedStore, engine: &EngineRef, ctx: &Br
     }
 }
 
-/// Serves pod log/exec subresources from the engine. A pod named `<pod>` in
-/// namespace `<ns>` maps to the engine container `<ns>_<pod>`.
+/// Serves pod log/exec subresources from the engine. Pod `<pod>`/ns `<ns>` maps
+/// to engine container `<ns>_<pod>` (holder); a named sidecar `<c>` maps to
+/// `<ns>_<pod>.<c>`.
 struct EngineProxy {
     engine: EngineRef,
 }
 
+impl EngineProxy {
+    /// Resolve (ns, pod, container) → engine container name. Empty container =
+    /// the holder; otherwise prefer the sidecar `<ns>_<pod>.<c>`, falling back to
+    /// the holder when `<c>` is the first container (same name as the pod).
+    fn cname_for(&self, ns: &str, pod: &str, container: &str) -> String {
+        let holder = format!("{ns}_{pod}");
+        if container.is_empty() {
+            return holder;
+        }
+        let side = format!("{holder}.{container}");
+        if self.engine.get_entry(&side).is_ok() {
+            side
+        } else {
+            holder
+        }
+    }
+}
+
 impl PodProxy for EngineProxy {
-    fn logs(&self, ns: &str, pod: &str, opts: &LogOpts, w: &mut dyn Write) -> std::io::Result<()> {
-        let cname = format!("{ns}_{pod}");
+    fn logs(&self, ns: &str, pod: &str, container: &str, opts: &LogOpts, w: &mut dyn Write) -> std::io::Result<()> {
+        let cname = self.cname_for(ns, pod, container);
         let entry = self.engine.get_entry(&cname)?;
         let log_path = entry.c.lock().unwrap().log_path.clone();
         let ropts = slim_runtime::jsonlog::LogReadOpts {
@@ -190,8 +214,8 @@ impl PodProxy for EngineProxy {
         Ok(())
     }
 
-    fn exec_start(&self, ns: &str, pod: &str, cmd: &[String], tty: bool, stdin: bool) -> std::io::Result<ExecHandle> {
-        let cname = format!("{ns}_{pod}");
+    fn exec_start(&self, ns: &str, pod: &str, container: &str, cmd: &[String], tty: bool, stdin: bool) -> std::io::Result<ExecHandle> {
+        let cname = self.cname_for(ns, pod, container);
         let entry = self.engine.get_entry(&cname)?;
         let pid = {
             let c = entry.c.lock().unwrap();
@@ -260,14 +284,34 @@ fn reconcile_loop(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx) {
     }
 }
 
+/// A desired pod: its full container list (container 0 is the pod sandbox /
+/// netns holder; the rest join its netns). Keyed in the reconcile map by the
+/// holder cname (`<ns>_<pod>`).
 struct Desired {
-    cname: String,     // engine container name
     pod_ns: String,
     pod_name: String,
-    owner: String,     // "<kind>/<ns>/<name>" or "Pod/<ns>/<name>"
-    template: Value,   // pod spec
-    labels: Value,     // pod labels
+    holder_cname: String, // <ns>_<pod>
+    owner: String,        // "<kind>/<ns>/<name>" or "Pod/<ns>/<name>"
+    template: Value,      // full pod spec
+    labels: Value,        // pod labels
     restart: &'static str,
+    containers: Vec<Value>, // spec.containers, ordered
+}
+
+impl Desired {
+    /// Engine container name for container index `i`: the holder keeps the bare
+    /// `<ns>_<pod>` name; sidecars get `<ns>_<pod>.<container-name>`.
+    fn cname(&self, i: usize) -> String {
+        if i == 0 {
+            self.holder_cname.clone()
+        } else {
+            format!("{}.{}", self.holder_cname, cspec_name(&self.containers[i]))
+        }
+    }
+}
+
+fn cspec_name(c: &Value) -> String {
+    c.get("name").and_then(|v| v.as_str()).unwrap_or("main").to_string()
 }
 
 fn reconcile_once(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx) -> std::io::Result<()> {
@@ -298,23 +342,31 @@ fn reconcile_once(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx) -> s
         }
     }
 
-    // Ensure desired containers exist + sync Pod objects.
+    // Ensure each pod's containers exist (holder first) + sync one Pod object.
     for d in desired.values() {
-        ensure_container(engine, store, ctx, d);
+        ensure_pod(engine, store, ctx, d);
     }
 
-    // Remove orphan containers we own that are no longer desired.
-    let desired_cnames: std::collections::BTreeSet<&String> = desired.keys().collect();
+    // Remove orphan containers we own that are no longer desired; when a pod's
+    // holder goes away, drop its Pod object too.
+    let mut desired_cnames: std::collections::BTreeSet<String> = Default::default();
+    for d in desired.values() {
+        for i in 0..d.containers.len() {
+            desired_cnames.insert(d.cname(i));
+        }
+    }
     for c in engine.list(true) {
         if c.config.labels.get(MANAGED).map(|v| v == "true").unwrap_or(false)
             && !desired_cnames.contains(&c.name)
         {
+            let is_holder = c.config.labels.get(POD_HOLDER).map(|h| *h == c.name).unwrap_or(false);
             let _ = engine.remove(&c.name, true, false);
-            // drop its Pod object
-            if let Some(pod) = c.config.labels.get(POD_OF) {
-                if let Some((ns, name)) = pod.split_once('/') {
-                    if let Some(info) = store.lookup("", "pods") {
-                        store.delete(&info, ns, name);
+            if is_holder {
+                if let Some(pod) = c.config.labels.get(POD_OF) {
+                    if let Some((ns, name)) = pod.split_once('/') {
+                        if let Some(info) = store.lookup("", "pods") {
+                            store.delete(&info, ns, name);
+                        }
                     }
                 }
             }
@@ -339,19 +391,24 @@ fn collect_workload(obj: &Value, out: &mut BTreeMap<String, Desired>, restart: &
     let labels = obj.pointer("/spec/template/metadata/labels").cloned()
         .or_else(|| obj.pointer("/spec/selector/matchLabels").cloned())
         .unwrap_or(json!({}));
+    let containers = template.get("containers").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+    if containers.is_empty() {
+        return;
+    }
     for i in 0..replicas {
         let pod_name = format!("{name}-{i}");
-        let cname = format!("{ns}_{pod_name}");
+        let holder_cname = format!("{ns}_{pod_name}");
         out.insert(
-            cname.clone(),
+            holder_cname.clone(),
             Desired {
-                cname,
                 pod_ns: ns.clone(),
                 pod_name,
+                holder_cname,
                 owner: format!("{kind}/{ns}/{name}"),
                 template: template.clone(),
                 labels: labels.clone(),
                 restart,
+                containers: containers.clone(),
             },
         );
     }
@@ -363,79 +420,96 @@ fn collect_bare_pod(obj: &Value, out: &mut BTreeMap<String, Desired>) {
     if name.is_empty() {
         return;
     }
-    let cname = format!("{ns}_{name}");
+    let template = obj.pointer("/spec").cloned().unwrap_or(Value::Null);
+    let containers = template.get("containers").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+    if containers.is_empty() {
+        return;
+    }
+    let holder_cname = format!("{ns}_{name}");
+    let restart = obj.pointer("/spec/restartPolicy").and_then(|v| v.as_str())
+        .map(|p| if p == "Never" || p == "OnFailure" { "no" } else { "always" })
+        .unwrap_or("always");
     out.insert(
-        cname.clone(),
+        holder_cname.clone(),
         Desired {
-            cname,
             pod_ns: ns.clone(),
             pod_name: name.clone(),
+            holder_cname,
             owner: format!("Pod/{ns}/{name}"),
-            template: obj.pointer("/spec").cloned().unwrap_or(Value::Null),
+            template,
             labels: obj.pointer("/metadata/labels").cloned().unwrap_or(json!({})),
-            restart: obj.pointer("/spec/restartPolicy").and_then(|v| v.as_str())
-                .map(|p| if p == "Never" || p == "OnFailure" { "no" } else { "always" })
-                .unwrap_or("always"),
+            restart,
+            containers,
         },
     );
 }
 
-fn ensure_container(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: &Desired) {
-    let exists = engine.get_entry(&d.cname).is_ok();
-    if !exists {
-        let Some(req) = build_create_req(store, ctx, d) else { return };
-        // Pull image if needed, then create+start.
+/// Ensure all of a pod's containers exist (holder/container-0 first so sidecars
+/// can join its netns), then sync one aggregated Pod object.
+fn ensure_pod(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: &Desired) {
+    for (i, cspec) in d.containers.iter().enumerate() {
+        let cname = d.cname(i);
+        if engine.get_entry(&cname).is_ok() {
+            continue;
+        }
+        let Some(req) = build_create_req(store, ctx, d, i, cspec) else { continue };
         let image = req.config.image.clone();
         if engine.store.resolve(&image).is_none() {
             let _ = engine.ensure_image(&image);
         }
-        match engine.create(&req, Some(&d.cname)) {
+        match engine.create(&req, Some(&cname)) {
             Ok(_) => {
-                if let Err(e) = engine.start(&d.cname) {
-                    eprintln!("slimd: bridge start {} failed: {e}", d.cname);
+                if let Err(e) = engine.start(&cname) {
+                    eprintln!("slimd: bridge start {cname} failed: {e}");
                 }
             }
-            Err(e) => {
-                eprintln!("slimd: bridge create {} failed: {e}", d.cname);
-                let (cn, img) = pod_container0(&d.template);
-                let cs = vec![waiting_status(&cn, &img, "CreateContainerError")];
-                sync_pod(store, d, "Pending", "", &format!("create failed: {e}"), &cs);
-                return;
-            }
+            // A sidecar can fail to create if the holder isn't running yet; the
+            // next reconcile tick retries (level-based).
+            Err(e) => eprintln!("slimd: bridge create {cname} failed: {e}"),
         }
     }
-    // Sync Pod status + containerStatuses from the live container.
-    let (cname_k8s, image) = pod_container0(&d.template);
-    let (phase, ip, msg, cstatuses) = match engine.get_entry(&d.cname) {
-        Ok(entry) => {
-            let c = entry.c.lock().unwrap();
-            let phase = match c.state.status.as_str() {
-                "running" => "Running",
-                "created" => "Pending",
-                "exited" if c.state.exit_code == 0 => "Succeeded",
-                "exited" => "Failed",
-                _ => "Unknown",
-            };
-            let ready_override = ctx.readiness.lock().unwrap().get(&d.cname).copied();
-            let cs = container_status(&cname_k8s, &image, &c.id, &c.state, ready_override);
-            (phase, c.ip.clone(), String::new(), vec![cs])
-        }
-        Err(_) => (
-            "Pending",
-            String::new(),
-            String::new(),
-            vec![waiting_status(&cname_k8s, &image, "ContainerCreating")],
-        ),
-    };
-    sync_pod(store, d, phase, &ip, &msg, &cstatuses);
+    sync_pod_status(engine, store, ctx, d);
 }
 
-/// The pod's first container's k8s name + image, from the template.
-fn pod_container0(template: &Value) -> (String, String) {
-    let c0 = template.get("containers").and_then(|a| a.as_array()).and_then(|a| a.first());
-    let name = c0.and_then(|c| c.get("name")).and_then(|v| v.as_str()).unwrap_or("main").to_string();
-    let image = c0.and_then(|c| c.get("image")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    (name, image)
+/// Build aggregated Pod status — one containerStatus per spec container — and
+/// store it. Pod phase is derived from the set of container states.
+fn sync_pod_status(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: &Desired) {
+    let mut cstatuses = Vec::with_capacity(d.containers.len());
+    let (mut running, mut term_ok, mut term_bad, mut total) = (0usize, 0usize, 0usize, 0usize);
+    for (i, cspec) in d.containers.iter().enumerate() {
+        total += 1;
+        let cname = d.cname(i);
+        let name = cspec_name(cspec);
+        let image = cspec.get("image").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        match engine.get_entry(&cname) {
+            Ok(entry) => {
+                let c = entry.c.lock().unwrap();
+                match c.state.status.as_str() {
+                    "running" => running += 1,
+                    "exited" | "dead" if c.state.exit_code == 0 => term_ok += 1,
+                    "exited" | "dead" => term_bad += 1,
+                    _ => {}
+                }
+                let ready_override = ctx.readiness.lock().unwrap().get(&cname).copied();
+                cstatuses.push(container_status(&name, &image, &c.id, &c.state, ready_override));
+            }
+            Err(_) => cstatuses.push(waiting_status(&name, &image, "ContainerCreating")),
+        }
+    }
+    let phase = if total > 0 && running == total {
+        "Running"
+    } else if term_bad > 0 && d.restart == "no" {
+        "Failed"
+    } else if total > 0 && term_ok == total {
+        "Succeeded"
+    } else {
+        "Pending"
+    };
+    let ip = engine
+        .get_entry(&d.holder_cname)
+        .map(|e| e.c.lock().unwrap().ip.clone())
+        .unwrap_or_default();
+    sync_pod(store, d, phase, &ip, "", &cstatuses);
 }
 
 /// Build a k8s containerStatus from a live engine container State. `ready_override`
@@ -473,12 +547,18 @@ fn waiting_status(name: &str, image: &str, reason: &str) -> Value {
     })
 }
 
-/// Translate a pod template into a docker-style create request, resolving env
-/// from ConfigMaps/Secrets in the store.
-fn build_create_req(store: &SharedStore, ctx: &BridgeCtx, d: &Desired) -> Option<slim_api::container::ContainerCreateRequest> {
-    let containers = d.template.get("containers").and_then(|c| c.as_array())?;
-    let c0 = containers.first()?;
-    let image = c0.get("image").and_then(|v| v.as_str())?.to_string();
+/// Translate one pod container (`cspec`, index `idx`) into a docker-style create
+/// request, resolving env from ConfigMaps/Secrets and emptyDir mounts. Container
+/// 0 is the pod sandbox (bridge net + DNS); the rest join its netns.
+fn build_create_req(
+    store: &SharedStore,
+    ctx: &BridgeCtx,
+    d: &Desired,
+    idx: usize,
+    cspec: &Value,
+) -> Option<slim_api::container::ContainerCreateRequest> {
+    let image = cspec.get("image").and_then(|v| v.as_str())?.to_string();
+    let is_holder = idx == 0;
 
     let mut env = Vec::new();
     // In-cluster config for operators (client-go reads these env vars).
@@ -486,8 +566,7 @@ fn build_create_req(store: &SharedStore, ctx: &BridgeCtx, d: &Desired) -> Option
     env.push(format!("KUBERNETES_SERVICE_PORT={}", ctx.kube_port));
     env.push(format!("KUBERNETES_SERVICE_PORT_HTTPS={}", ctx.kube_port));
     env.push(format!("KUBERNETES_PORT=tcp://{}:{}", ctx.kube_host, ctx.kube_port));
-    // envFrom
-    for ef in c0.get("envFrom").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+    for ef in cspec.get("envFrom").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
         if let Some(n) = ef.pointer("/configMapRef/name").and_then(|v| v.as_str()) {
             for (k, v) in config_data(store, "configmaps", &d.pod_ns, n) {
                 env.push(format!("{k}={v}"));
@@ -499,8 +578,7 @@ fn build_create_req(store: &SharedStore, ctx: &BridgeCtx, d: &Desired) -> Option
             }
         }
     }
-    // env
-    for e in c0.get("env").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+    for e in cspec.get("env").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
         let name = e.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
         if name.is_empty() {
             continue;
@@ -520,13 +598,15 @@ fn build_create_req(store: &SharedStore, ctx: &BridgeCtx, d: &Desired) -> Option
         }
     }
 
-    let cmd = strs(c0.get("args"));
-    let entrypoint = strs(c0.get("command"));
+    let cmd = strs(cspec.get("args"));
+    let entrypoint = strs(cspec.get("command"));
 
     let mut labels = std::collections::BTreeMap::new();
     labels.insert(MANAGED.to_string(), "true".to_string());
     labels.insert(OWNER.to_string(), d.owner.clone());
     labels.insert(POD_OF.to_string(), format!("{}/{}", d.pod_ns, d.pod_name));
+    labels.insert(POD_HOLDER.to_string(), d.holder_cname.clone());
+    labels.insert(CNAME.to_string(), cspec_name(cspec));
     if let Some(obj) = d.labels.as_object() {
         for (k, v) in obj {
             if let Some(s) = v.as_str() {
@@ -535,47 +615,81 @@ fn build_create_req(store: &SharedStore, ctx: &BridgeCtx, d: &Desired) -> Option
         }
     }
 
-    let mut config = slim_api::container::ContainerConfig {
-        image,
-        cmd,
-        env,
-        labels,
-        ..Default::default()
-    };
+    let mut config = slim_api::container::ContainerConfig { image, cmd, env, labels, ..Default::default() };
     if !entrypoint.is_empty() {
         config.entrypoint = Some(entrypoint);
     }
-    // Project the ServiceAccount dir (ca.crt + token + namespace) so in-cluster
-    // clients authenticate/verify TLS the standard way.
+
+    // Binds: ServiceAccount projection (every container) + emptyDir mounts.
     let mut binds = Vec::new();
     if let Some(sa_dir) = ensure_sa(ctx, &d.pod_ns) {
         binds.push(format!("{}:/var/run/secrets/kubernetes.io/serviceaccount:ro", sa_dir.display()));
     }
+    binds.extend(empty_dir_binds(ctx, d, cspec));
+
+    // Holder owns the pod sandbox (bridge net + ports + DNS); sidecars join its
+    // netns via container:<holder> (engine resolves to /proc/<pid>/ns/net).
+    let network_mode = if is_holder {
+        "bridge".to_string()
+    } else {
+        format!("container:{}", d.holder_cname)
+    };
     let host_config = slim_api::container::HostConfig {
-        restart_policy: slim_api::container::RestartPolicy {
-            name: d.restart.to_string(),
-            maximum_retry_count: 0,
-        },
-        network_mode: "bridge".to_string(),
+        restart_policy: slim_api::container::RestartPolicy { name: d.restart.to_string(), maximum_retry_count: 0 },
+        network_mode,
         binds,
         ..Default::default()
     };
-    // Endpoint alias = the pod's app label + pod name, for in-cluster DNS.
+    // DNS aliases (pod name + app label) belong to the holder, which owns the IP.
     let mut endpoints = std::collections::BTreeMap::new();
-    let mut aliases = vec![d.pod_name.clone()];
-    if let Some(app) = d.labels.get("app").and_then(|v| v.as_str()) {
-        aliases.push(app.to_string());
+    if is_holder {
+        let mut aliases = vec![d.pod_name.clone()];
+        if let Some(app) = d.labels.get("app").and_then(|v| v.as_str()) {
+            aliases.push(app.to_string());
+        }
+        endpoints.insert("bridge".to_string(), slim_api::container::EndpointSettings { aliases, ..Default::default() });
     }
-    endpoints.insert(
-        "bridge".to_string(),
-        slim_api::container::EndpointSettings { aliases, ..Default::default() },
-    );
 
     Some(slim_api::container::ContainerCreateRequest {
         config,
         host_config,
         networking_config: slim_api::container::NetworkingConfig { endpoints_config: endpoints },
     })
+}
+
+/// emptyDir volume mounts for `cspec`: resolve its volumeMounts against the pod's
+/// emptyDir volumes, backing each with a shared host dir so the pod's containers
+/// share the data. Non-emptyDir volume types are skipped (a slim liberty).
+fn empty_dir_binds(ctx: &BridgeCtx, d: &Desired, cspec: &Value) -> Vec<String> {
+    let mut empty: std::collections::BTreeSet<String> = Default::default();
+    for v in d.template.get("volumes").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+        if v.get("emptyDir").is_some() {
+            if let Some(n) = v.get("name").and_then(|x| x.as_str()) {
+                empty.insert(n.to_string());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for m in cspec.get("volumeMounts").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+        let (Some(name), Some(mount_path)) = (
+            m.get("name").and_then(|v| v.as_str()),
+            m.get("mountPath").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        if !empty.contains(name) {
+            continue;
+        }
+        let mut host = ctx.vol_root.join(&d.holder_cname).join(name);
+        if let Some(sub) = m.get("subPath").and_then(|v| v.as_str()) {
+            host = host.join(sub);
+        }
+        if std::fs::create_dir_all(&host).is_err() {
+            continue;
+        }
+        out.push(format!("{}:{}", host.display(), mount_path));
+    }
+    out
 }
 
 /// Write (idempotently) the ServiceAccount dir for a namespace: ca.crt, a

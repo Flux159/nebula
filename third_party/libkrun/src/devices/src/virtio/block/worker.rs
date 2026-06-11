@@ -7,12 +7,12 @@ use crate::virtio::InterruptTransport;
 use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-#[cfg(windows)]
-use utils::windows::AsRawFd;
 use std::result;
 use std::thread;
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 use utils::eventfd::EventFd;
+#[cfg(windows)]
+use utils::windows::AsRawFd;
 use virtio_bindings::virtio_blk::*;
 use vm_memory::{ByteValued, GuestMemoryMmap};
 

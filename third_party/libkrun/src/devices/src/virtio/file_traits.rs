@@ -432,16 +432,14 @@ volatile_impl!(File);
 impl FileReadWriteVolatile for File {
     fn read_volatile(&mut self, slice: VolatileSlice) -> Result<usize> {
         use std::io::Read;
-        let buf = unsafe {
-            std::slice::from_raw_parts_mut(slice.ptr_guard_mut().as_ptr(), slice.len())
-        };
+        let buf =
+            unsafe { std::slice::from_raw_parts_mut(slice.ptr_guard_mut().as_ptr(), slice.len()) };
         self.read(buf)
     }
 
     fn write_volatile(&mut self, slice: VolatileSlice) -> Result<usize> {
         use std::io::Write;
-        let buf =
-            unsafe { std::slice::from_raw_parts(slice.ptr_guard().as_ptr(), slice.len()) };
+        let buf = unsafe { std::slice::from_raw_parts(slice.ptr_guard().as_ptr(), slice.len()) };
         self.write(buf)
     }
 }
@@ -450,16 +448,14 @@ impl FileReadWriteVolatile for File {
 impl FileReadWriteAtVolatile for File {
     fn read_at_volatile(&self, slice: VolatileSlice, offset: u64) -> Result<usize> {
         use std::os::windows::fs::FileExt;
-        let buf = unsafe {
-            std::slice::from_raw_parts_mut(slice.ptr_guard_mut().as_ptr(), slice.len())
-        };
+        let buf =
+            unsafe { std::slice::from_raw_parts_mut(slice.ptr_guard_mut().as_ptr(), slice.len()) };
         self.seek_read(buf, offset)
     }
 
     fn write_at_volatile(&self, slice: VolatileSlice, offset: u64) -> Result<usize> {
         use std::os::windows::fs::FileExt;
-        let buf =
-            unsafe { std::slice::from_raw_parts(slice.ptr_guard().as_ptr(), slice.len()) };
+        let buf = unsafe { std::slice::from_raw_parts(slice.ptr_guard().as_ptr(), slice.len()) };
         self.seek_write(buf, offset)
     }
 }

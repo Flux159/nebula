@@ -377,8 +377,14 @@ fn prescan(
             let key = (dst_ip, udp_pkt.dst_port());
             udp_guest_socks.entry(key).or_insert_with(|| {
                 let mut s = udp::Socket::new(
-                    udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 64], vec![0; 256 * 1024]),
-                    udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 64], vec![0; 256 * 1024]),
+                    udp::PacketBuffer::new(
+                        vec![udp::PacketMetadata::EMPTY; 64],
+                        vec![0; 256 * 1024],
+                    ),
+                    udp::PacketBuffer::new(
+                        vec![udp::PacketMetadata::EMPTY; 64],
+                        vec![0; 256 * 1024],
+                    ),
                 );
                 let _ = s.bind((IpAddress::Ipv4(dst_ip), udp_pkt.dst_port()));
                 sockets.add(s)
@@ -398,7 +404,9 @@ fn prescan(
                         tcp::SocketBuffer::new(vec![0; TCP_BUF]),
                     );
                     s.set_nagle_enabled(false);
-                    if s.listen((IpAddress::Ipv4(dst_ip), tcp_pkt.dst_port())).is_ok() {
+                    if s.listen((IpAddress::Ipv4(dst_ip), tcp_pkt.dst_port()))
+                        .is_ok()
+                    {
                         tcp_listeners.insert(key, sockets.add(s));
                     }
                 }
@@ -626,10 +634,7 @@ fn pump_udp(
     }
     // host -> guest
     for ((_guest_ep, dst_ep), flow) in flows.iter_mut() {
-        let key = (
-            Ipv4Address::from(dst_ep.ip().octets()),
-            dst_ep.port(),
-        );
+        let key = (Ipv4Address::from(dst_ep.ip().octets()), dst_ep.port());
         let Some(handle) = guest_socks.get(&key) else {
             continue;
         };
@@ -681,11 +686,7 @@ fn wait_readable(
         });
     }
     unsafe {
-        libc::poll(
-            fds.as_mut_ptr(),
-            fds.len() as _,
-            timeout.as_millis() as i32,
-        );
+        libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout.as_millis() as i32);
     }
     Ok(())
 }
@@ -699,7 +700,7 @@ fn wait_readable(
     udp_flows: &HashMap<(SocketAddrV4, SocketAddrV4), UdpFlow>,
     timeout: Duration,
 ) -> std::io::Result<()> {
-    use windows_sys::Win32::Networking::WinSock::{POLLIN, POLLOUT, SOCKET, WSAPOLLFD, WSAPoll};
+    use windows_sys::Win32::Networking::WinSock::{WSAPoll, POLLIN, POLLOUT, SOCKET, WSAPOLLFD};
 
     let mut fds: Vec<WSAPOLLFD> = Vec::with_capacity(1 + tcp_flows.len() + udp_flows.len());
     let mut events = POLLIN;

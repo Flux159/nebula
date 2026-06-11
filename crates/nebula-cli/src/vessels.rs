@@ -377,13 +377,15 @@ fn start_with(name: &str, restore: Option<&std::path::Path>) -> anyhow::Result<(
         cmd.spawn()?
     } else {
         let console = std::fs::File::create(dir.join("console.log"))?;
+        // stderr catches worker panics + fork log/trace output.
+        let log = std::fs::File::create(dir.join("worker.log"))?;
         std::process::Command::new(&exe)
             .arg("krun-worker")
             .arg("--spec")
             .arg(spec_json)
             .stdin(std::process::Stdio::null())
             .stdout(console)
-            .stderr(std::process::Stdio::null())
+            .stderr(log)
             .spawn()?
     };
     std::fs::write(dir.join("pid"), child.id().to_string())?;

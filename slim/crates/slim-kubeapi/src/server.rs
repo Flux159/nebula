@@ -367,6 +367,7 @@ impl ApiServer {
         let cmd: Vec<String> = req.query.iter().filter(|(k, _)| k == "command").map(|(_, v)| v.clone()).collect();
         let tty = req.query.iter().any(|(k, v)| k == "tty" && (v == "true" || v == "1"));
         let want_stdin = req.query.iter().any(|(k, v)| k == "stdin" && (v == "true" || v == "1"));
+        let container = req.query.iter().find(|(k, _)| k == "container").map(|(_, v)| v.as_str()).unwrap_or("");
         if cmd.is_empty() || pod.is_empty() {
             return write_to(stream, 400, "exec requires a pod and command");
         }
@@ -380,7 +381,7 @@ impl ApiServer {
         stream.write_all(handshake.as_bytes())?;
         stream.flush()?;
 
-        let mut h = match proxy.exec_start(ns, pod, &cmd, tty, want_stdin) {
+        let mut h = match proxy.exec_start(ns, pod, container, &cmd, tty, want_stdin) {
             Ok(h) => h,
             Err(e) => {
                 let _ = ws_send(stream, 3, exec_status(1, &format!("exec failed: {e}")).as_bytes());
@@ -467,6 +468,7 @@ impl ApiServer {
             return write_json(w, 501, &status_obj(501, "logs not available (no engine bound)", "NotImplemented"));
         };
         let nsv = ns.clone().unwrap_or_else(|| "default".into());
+        let container = query_str(&req.query, "container").unwrap_or("");
         let opts = LogOpts {
             follow: query_bool(&req.query, "follow"),
             tail: query_str(&req.query, "tailLines").and_then(|s| s.parse().ok()),
@@ -476,7 +478,7 @@ impl ApiServer {
         w.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")?;
         w.flush()?;
         let mut cw = ChunkWriter { inner: w };
-        match proxy.logs(&nsv, pod, &opts, &mut cw) {
+        match proxy.logs(&nsv, pod, container, &opts, &mut cw) {
             Ok(_) => {}
             Err(e) => {
                 let _ = cw.write_all(format!("error: {e}\n").as_bytes());

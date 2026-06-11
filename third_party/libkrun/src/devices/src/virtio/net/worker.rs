@@ -18,11 +18,11 @@ use super::device::{FrontendError, RxError, TxError, VirtioNetBackend};
 use std::os::fd::RawFd;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-#[cfg(windows)]
-use utils::windows::AsRawFd;
 use std::thread;
 use std::{cmp, result};
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
+#[cfg(windows)]
+use utils::windows::AsRawFd;
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
 pub struct NetWorker {
