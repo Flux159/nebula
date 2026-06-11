@@ -281,7 +281,7 @@ impl Vmm {
     }
 
     /// Capture the hypervisor state of every (paused) vcpu, in index order.
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(all(any(target_os = "linux", target_os = "windows"), target_arch = "x86_64"))]
     pub fn save_vcpu_states(&mut self) -> Result<Vec<crate::vstate::VcpuState>> {
         let mut states = Vec::with_capacity(self.vcpus_handles.len());
         for handle in self.vcpus_handles.iter() {
@@ -424,7 +424,7 @@ impl Vmm {
     /// vcpus.state (count-prefixed per-vcpu KVM state), format.txt.
     /// The vcpus must already be paused. Device state is not captured yet —
     /// restore support tracks that work (format.txt records completeness).
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     pub fn save_snapshot(&mut self, dir: &std::path::Path) -> std::result::Result<(), String> {
         use std::io::Write;
 
@@ -527,7 +527,7 @@ impl Vmm {
 
     /// Serialize every virtio MMIO transport's state in bus-address order.
     /// Devices must be quiesced (vcpus paused, workers drained).
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(all(any(target_os = "linux", target_os = "windows"), target_arch = "x86_64"))]
     fn save_devices(&self, path: &std::path::Path) -> std::io::Result<()> {
         use devices::virtio::MmioTransport;
         use std::io::Write;
@@ -576,7 +576,7 @@ impl Vmm {
     /// Format: u64 region count, then per region (u64 guest_addr, u64 len)
     /// headers, then the raw region bytes back to back. Call only while the
     /// vcpus are paused.
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(all(any(target_os = "linux", target_os = "windows"), target_arch = "x86_64"))]
     pub fn save_memory(&self, path: &std::path::Path) -> std::io::Result<()> {
         use std::io::{Seek, Write};
         use vm_memory::{Address, GuestMemory, GuestMemoryRegion};

@@ -49,5 +49,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build (host stack compiles natively; WHP backend in progress)
+      - name: Build (host stack + WHP backend, native Windows)
         run: cargo build --workspace

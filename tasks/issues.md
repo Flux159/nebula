@@ -400,3 +400,11 @@ limitations; routine TODOs live in code.)
   Perf note: Windows snapshots are full-size on disk (no sparse files / no
   reflink on NTFS — 2GiB memory.bin, 7s save vs 1.2s/100MiB on Linux);
   FSCTL_SET_SPARSE is the follow-up.
+
+- 2026-06-11 — arm64 Linux release lane added (native ubuntu-24.04-arm
+  runners; no cross toolchain). The krun snapshot machinery is x86_64-only
+  (KVM state structs differ per arch), so SaveState/save_snapshot/
+  krun_vm_save are now arch-gated; aarch64 builds get boot + pause/resume
+  but not memory snapshots until an aarch64 VcpuState is written (kvm_vcpu
+  aarch64 regs via GET_ONE_REG list — follow-up). Verified: fork + workspace
+  cargo check on aarch64-unknown-linux-gnu both clean.

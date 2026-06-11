@@ -3174,7 +3174,10 @@ pub extern "C" fn krun_vm_pause(_ctx_id: u32) -> i32 {
 
 /// Snapshot the paused VM's full state into the directory at `c_dir`
 /// (created if needed). Pause first; resume after.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    target_arch = "x86_64"
+))]
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn krun_vm_save(_ctx_id: u32, c_dir: *const c_char) -> i32 {

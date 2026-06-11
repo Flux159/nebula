@@ -903,6 +903,7 @@ pub struct VmState {
     ioapic: kvm_irqchip,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl VmState {
     pub fn serialize_into<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         write_pod(w, &self.pitstate)?;
@@ -1647,6 +1648,7 @@ impl Vcpu {
                     .expect("failed to send resume status");
             }
             // State capture is only valid while paused.
+            #[cfg(target_arch = "x86_64")]
             Ok(VcpuEvent::SaveState) => {
                 self.response_sender
                     .send(VcpuResponse::SaveStateFailed)
@@ -1678,6 +1680,7 @@ impl Vcpu {
             }
             // Snapshot: capture the full KVM state from the vcpu thread
             // (the fd is bound to this thread once KVM_RUN has happened).
+            #[cfg(target_arch = "x86_64")]
             Ok(VcpuEvent::SaveState) => {
                 let resp = match self.save_state() {
                     Ok(state) => VcpuResponse::SavedState(Box::new(state)),
@@ -1807,12 +1810,14 @@ fn read_entries<T, R: std::io::Read>(r: &mut R) -> std::io::Result<Vec<T>> {
     Ok(out)
 }
 
+#[cfg(target_arch = "x86_64")]
 impl std::fmt::Debug for VcpuState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "VcpuState {{ .. }}")
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 impl VcpuState {
     pub fn serialize_into<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         write_entries(w, self.cpuid.as_slice())?;
@@ -1863,6 +1868,7 @@ pub enum VcpuEvent {
     /// Event that should resume the Vcpu.
     Resume,
     /// Capture the full KVM vcpu state (valid only while Paused).
+    #[cfg(target_arch = "x86_64")]
     SaveState,
 }
 
@@ -1876,8 +1882,10 @@ pub enum VcpuResponse {
     /// Vcpu is stopped.
     Exited(u8),
     /// Full vcpu state captured while paused.
+    #[cfg(target_arch = "x86_64")]
     SavedState(Box<VcpuState>),
     /// State capture failed.
+    #[cfg(target_arch = "x86_64")]
     SaveStateFailed,
 }
 

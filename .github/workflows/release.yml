@@ -89,7 +89,17 @@ jobs:
           files: dist/Nebula_*_aarch64.dmg
 
   linux-release:
-    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          # Native runners for both arches — no cross toolchain needed.
+          # arm64 covers the Apple-Silicon-class SoCs (NVIDIA/Qualcomm)
+          # increasingly used for local AI workloads.
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -107,7 +117,7 @@ jobs:
       - name: Package tarball
         run: |
           ver=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          stage="nebula-${ver}-linux-x86_64"
+          stage="nebula-${ver}-linux-${{ matrix.arch }}"
           mkdir -p "dist/$stage/lib"
           cp target/release/nebula target/release/nebulad "dist/$stage/"
           # the krun backend looks for lib/libkrun.so.1 next to the binaries
@@ -122,15 +132,15 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: nebula-linux-x86_64
-          path: dist/nebula-*-linux-x86_64.tar.gz*
+          name: nebula-linux-${{ matrix.arch }}
+          path: dist/nebula-*-linux-${{ matrix.arch }}.tar.gz*
           if-no-files-found: error
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/nebula-*-linux-x86_64.tar.gz*
+          files: dist/nebula-*-linux-${{ matrix.arch }}.tar.gz*
 
   windows-release:
     runs-on: windows-latest

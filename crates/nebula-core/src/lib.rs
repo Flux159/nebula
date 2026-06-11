@@ -9,6 +9,7 @@
 pub mod backend;
 pub mod dns;
 pub mod error;
+pub mod home;
 pub mod initramfs;
 pub mod ipc;
 pub mod proto;
