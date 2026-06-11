@@ -311,8 +311,10 @@ impl Vcpu {
         exit_evt: EventFd,
     ) -> Result<Self> {
         let whp_vcpu = WhpVcpu::new(vm, id as u32).map_err(Error::VcpuRun)?;
+        debug!("vcpu {id}: creating instruction emulator");
         let emulator =
             WhpEmulator::new(build_emulator_callbacks()).map_err(Error::CreateEmulator)?;
+        debug!("vcpu {id}: emulator created");
         
         let (event_sender, event_receiver) = unbounded();
         let (response_sender, response_receiver) = unbounded();
@@ -338,14 +340,18 @@ impl Vcpu {
         kernel_boot: bool,
     ) -> Result<()> {
         if kernel_boot {
+            debug!("vcpu configure: setup_regs entry=0x{:x}", kernel_start_addr.raw_value());
             arch::x86_64::regs::setup_regs(&self.whp_vcpu, kernel_start_addr.raw_value())
                 .map_err(Error::REGSConfiguration)?;
+            debug!("vcpu configure: setup_sregs");
             arch::x86_64::regs::setup_sregs(guest_mem, &self.whp_vcpu)
                 .map_err(Error::SREGSConfiguration)?;
             if self.cpu_index() == 0 {
+                debug!("vcpu configure: setup_msrs");
                 arch::x86_64::msr::setup_msrs(&self.whp_vcpu)
                     .map_err(Error::MSRSConfiguration)?;
             }
+            debug!("vcpu configure: done");
         }
 
         Ok(())

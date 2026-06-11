@@ -36,6 +36,20 @@ use windows_sys::Win32::System::Hypervisor::{
 };
 use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
+/// `WHV_REGISTER_VALUE` is `DECLSPEC_ALIGN(16)` in the SDK, but the
+/// windows-sys binding is only 8-aligned. WinHvPlatform reads the array with
+/// aligned vector loads, so an 8-mod-16 stack array access-violates.
+/// All locally-built register arrays must use this wrapper.
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+struct AlignedRegisterValue(WHV_REGISTER_VALUE);
+
+impl AlignedRegisterValue {
+    fn zeroed() -> Self {
+        unsafe { mem::zeroed() }
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
     CheckCapability(i32),
@@ -936,8 +950,8 @@ impl WhpVcpu {
         &self,
         names: [WHV_REGISTER_NAME; N],
     ) -> Result<[WHV_REGISTER_VALUE; N], Error> {
-        // Create a zeroed array on the stack to hold the results
-        let mut values: [WHV_REGISTER_VALUE; N] = unsafe { mem::zeroed() };
+        // 16-aligned scratch: see AlignedRegisterValue.
+        let mut values: [AlignedRegisterValue; N] = [AlignedRegisterValue::zeroed(); N];
 
         let hr = unsafe {
             WHvGetVirtualProcessorRegisters(
@@ -945,15 +959,14 @@ impl WhpVcpu {
                 self.index,
                 names.as_ptr(),
                 N as u32,
-                values.as_mut_ptr(),
+                values.as_mut_ptr() as *mut WHV_REGISTER_VALUE,
             )
         };
 
         if hr != S_OK {
             Err(Error::GetRegisters(hr))
         } else {
-            // Return the array directly!
-            Ok(values)
+            Ok(values.map(|v| v.0))
         }
     }
 
@@ -968,7 +981,7 @@ impl WhpVcpu {
     fn set_whp_registers(
         &self,
         names: &[WHV_REGISTER_NAME],
-        values: &[WHV_REGISTER_VALUE],
+        values: &[AlignedRegisterValue],
     ) -> Result<(), Error> {
         assert_eq!(names.len(), values.len());
         let count = names.len() as u32;
@@ -979,7 +992,7 @@ impl WhpVcpu {
                 self.index,
                 names.as_ptr(),
                 count,
-                values.as_ptr(),
+                values.as_ptr() as *const WHV_REGISTER_VALUE,
             )
         };
         if hr != S_OK {
@@ -994,11 +1007,11 @@ impl WhpVcpu {
         pairs: [(WHV_REGISTER_NAME, WHV_REGISTER_VALUE); N],
     ) -> Result<(), Error> {
         let mut names: [WHV_REGISTER_NAME; N] = unsafe { mem::zeroed() };
-        let mut values: [WHV_REGISTER_VALUE; N] = unsafe { mem::zeroed() };
+        let mut values: [AlignedRegisterValue; N] = [AlignedRegisterValue::zeroed(); N];
 
         for i in 0..N {
             names[i] = pairs[i].0;
-            values[i] = pairs[i].1;
+            values[i] = AlignedRegisterValue(pairs[i].1);
         }
 
         self.set_whp_registers(&names, &values)
@@ -1009,11 +1022,11 @@ impl WhpVcpu {
         pairs: [(WHV_REGISTER_NAME, u64); N],
     ) -> Result<(), Error> {
         let mut names: [WHV_REGISTER_NAME; N] = unsafe { mem::zeroed() };
-        let mut values: [WHV_REGISTER_VALUE; N] = unsafe { mem::zeroed() };
+        let mut values: [AlignedRegisterValue; N] = [AlignedRegisterValue::zeroed(); N];
 
         for i in 0..N {
             names[i] = pairs[i].0;
-            values[i].Reg64 = pairs[i].1;
+            values[i].0.Reg64 = pairs[i].1;
         }
 
         self.set_whp_registers(&names, &values)
