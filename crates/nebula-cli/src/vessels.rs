@@ -352,10 +352,14 @@ fn start_with(name: &str, restore: Option<&std::path::Path>) -> anyhow::Result<(
         return Ok(());
     }
     let backend = spec.backend.clone().unwrap_or_else(|| "krun".into());
-    let krun_restore_ok = cfg!(all(target_os = "linux", target_arch = "x86_64"));
+    let krun_restore_ok = cfg!(all(
+        any(target_os = "linux", target_os = "windows"),
+        target_arch = "x86_64"
+    ));
     anyhow::ensure!(
         restore.is_none() || backend == "vz" || krun_restore_ok,
-        "memory-state restore for krun vessels is Linux x86_64 only (use vz on macOS)"
+        "memory-state restore for krun vessels needs an x86_64 Linux or Windows host \
+         (use vz on macOS)"
     );
     if backend != "vz" {
         // Transient: the worker reads it from its spec argument; the vessel's
@@ -835,7 +839,11 @@ pub fn snapshot(name: &str, label: &str, mode: SnapMode) -> anyhow::Result<()> {
     // Live memory capture: vz on macOS, krun on Linux x86_64 (Windows/WHP
     // parity is in progress).
     let memory_capable = (is_vz && cfg!(target_os = "macos"))
-        || (!is_vz && cfg!(all(target_os = "linux", target_arch = "x86_64")));
+        || (!is_vz
+            && cfg!(all(
+                any(target_os = "linux", target_os = "windows"),
+                target_arch = "x86_64"
+            )));
     let running = live_pid(&dir).is_some();
     let memory = match mode {
         SnapMode::DiskOnly => false,

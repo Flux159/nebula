@@ -3159,7 +3159,10 @@ pub fn load_snapshot(dir: &std::path::Path) -> std::result::Result<LoadedSnapsho
     })
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    target_arch = "x86_64"
+))]
 fn load_device_states(
     path: &std::path::Path,
 ) -> std::result::Result<Vec<devices::virtio::MmioTransportState>, String> {
@@ -3487,6 +3490,351 @@ pub fn build_microvm_from_snapshot(
 
     // Push the saved virtio state into the freshly-created transports.
     // Bus order is address order, the same order save_devices used.
+    let device_states = snapshot.device_states;
+    let mut idx = 0usize;
+    for (_addr, dev) in vmm.mmio_device_manager.bus.iter_devices() {
+        let mut locked = dev.lock().unwrap();
+        if let Some(t) = locked.as_mut_any().downcast_mut::<MmioTransport>() {
+            let st = device_states.get(idx).ok_or_else(|| {
+                StartMicrovmError::RestoreSnapshot(format!(
+                    "snapshot has {} virtio devices but the configuration created more",
+                    device_states.len()
+                ))
+            })?;
+            let created_type = t.snapshot_state().device_type;
+            if st.device_type != created_type {
+                return Err(err(format!(
+                    "virtio device order mismatch at index {idx}: snapshot type {} \
+                     vs created type {created_type}",
+                    st.device_type
+                )));
+            }
+            t.restore_from_state(st);
+            idx += 1;
+        }
+    }
+    if idx != device_states.len() {
+        return Err(err(format!(
+            "snapshot has {} virtio devices but the configuration created {idx}",
+            device_states.len()
+        )));
+    }
+
+    vmm.start_vcpus(vcpus)
+        .map_err(StartMicrovmError::Internal)?;
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    let vmm = Arc::new(Mutex::new(vmm));
+    event_manager
+        .add_subscriber(vmm.clone())
+        .map_err(StartMicrovmError::RegisterEvent)?;
+
+    Ok(vmm)
+}
+
+/// Loaded contents of a krun snapshot directory (Windows/WHP). Unlike the
+/// Linux loader, guest memory isn't mapped from the file (no MAP_PRIVATE
+/// equivalent through vm-memory on Windows yet) — the caller allocates the
+/// normal anonymous guest memory and fills it via [`read_snapshot_memory`].
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+pub struct LoadedSnapshot {
+    pub ioapic_state: Vec<u8>,
+    pub vcpu_states: Vec<crate::vstate::VcpuState>,
+    pub device_states: Vec<devices::virtio::MmioTransportState>,
+    pub mem_layout: Vec<(u64, u64)>,
+    mem_file: File,
+    mem_data_start: u64,
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+pub fn load_snapshot(dir: &std::path::Path) -> std::result::Result<LoadedSnapshot, String> {
+    let format = std::fs::read_to_string(dir.join("format.txt"))
+        .map_err(|e| format!("read format.txt: {e}"))?;
+    if format.trim() != "krun-snapshot-v1" {
+        return Err(format!("unsupported snapshot format: {}", format.trim()));
+    }
+
+    let mut u64buf = [0u8; 8];
+    let mut read_u64 = |rd: &mut dyn Read| -> std::result::Result<u64, String> {
+        rd.read_exact(&mut u64buf).map_err(|e| e.to_string())?;
+        Ok(u64::from_le_bytes(u64buf))
+    };
+
+    let mut f = std::io::BufReader::new(
+        std::fs::File::open(dir.join("vm.state")).map_err(|e| format!("vm.state: {e}"))?,
+    );
+    let ioapic_len = read_u64(&mut f)? as usize;
+    let mut ioapic_state = vec![0u8; ioapic_len];
+    f.read_exact(&mut ioapic_state)
+        .map_err(|e| format!("vm.state: {e}"))?;
+
+    let mut f = std::io::BufReader::new(
+        std::fs::File::open(dir.join("vcpus.state")).map_err(|e| format!("vcpus.state: {e}"))?,
+    );
+    let n_vcpus = read_u64(&mut f)? as usize;
+    let mut vcpu_states = Vec::with_capacity(n_vcpus);
+    for _ in 0..n_vcpus {
+        vcpu_states.push(
+            crate::vstate::VcpuState::deserialize_from(&mut f)
+                .map_err(|e| format!("vcpu state: {e}"))?,
+        );
+    }
+
+    let device_states = load_device_states(&dir.join("devices.state"))?;
+
+    let mem_file =
+        std::fs::File::open(dir.join("memory.bin")).map_err(|e| format!("memory.bin: {e}"))?;
+    let mut rd = std::io::BufReader::new(&mem_file);
+    let n_regions = read_u64(&mut rd)? as usize;
+    let mut mem_layout = Vec::with_capacity(n_regions);
+    for _ in 0..n_regions {
+        let addr = read_u64(&mut rd)?;
+        let len = read_u64(&mut rd)?;
+        mem_layout.push((addr, len));
+    }
+    let mem_data_start = (8 + n_regions as u64 * 16).next_multiple_of(4096);
+
+    Ok(LoadedSnapshot {
+        ioapic_state,
+        vcpu_states,
+        device_states,
+        mem_layout,
+        mem_file,
+        mem_data_start,
+    })
+}
+
+/// Fill freshly-allocated guest memory with the snapshot's RAM image.
+/// Sparse file holes read back as zeros, matching the anonymous mapping's
+/// initial state, so this is a plain sequential copy.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn read_snapshot_memory(
+    snap: &LoadedSnapshot,
+    guest_memory: &GuestMemoryMmap,
+) -> std::result::Result<(), String> {
+    use std::io::{Seek, SeekFrom};
+    use vm_memory::Address;
+
+    let mut f = std::io::BufReader::with_capacity(1 << 20, &snap.mem_file);
+    f.seek(SeekFrom::Start(snap.mem_data_start))
+        .map_err(|e| e.to_string())?;
+    for (addr, len) in &snap.mem_layout {
+        let host = guest_memory
+            .get_host_address(GuestAddress(*addr))
+            .map_err(|e| format!("host addr for region @{addr:#x}: {e}"))?;
+        // SAFETY: the region is a live anonymous mapping of `len` bytes that
+        // no vcpu can touch yet (they haven't been created).
+        let slice = unsafe { std::slice::from_raw_parts_mut(host, *len as usize) };
+        f.read_exact(slice)
+            .map_err(|e| format!("read region @{addr:#x}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Builds and starts a microVM from a krun snapshot directory (Windows/WHP).
+/// Mirrors the Windows boot path of `build_microvm`: same device creation
+/// order, no boot-time configuration, saved state applied on top.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+pub fn build_microvm_from_snapshot(
+    vm_resources: &super::resources::VmResources,
+    event_manager: &mut EventManager,
+    restore_dir: &std::path::Path,
+    _shutdown_efd: Option<EventFd>,
+    _sender: Sender<WorkerMessage>,
+) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
+    use vm_memory::Address;
+    use vm_memory::GuestMemoryRegion;
+
+    let err = StartMicrovmError::RestoreSnapshot;
+
+    let snapshot = load_snapshot(restore_dir).map_err(err)?;
+
+    let mem_size = vm_resources
+        .vm_config()
+        .mem_size_mib
+        .ok_or(StartMicrovmError::MissingMemSizeConfig)?
+        << 20;
+
+    let payload = choose_payload(vm_resources)?;
+    let (arch_memory_info, arch_mem_regions) = match &payload {
+        Payload::ExternalKernel(external_kernel) => {
+            arch::arch_memory_regions(mem_size, None, 0, external_kernel.initramfs_size, None)
+        }
+        _ => {
+            return Err(err(
+                "snapshot restore requires an external kernel configuration".to_string(),
+            ));
+        }
+    };
+    let want: Vec<(u64, u64)> = arch_mem_regions
+        .iter()
+        .map(|(a, l)| (a.raw_value(), *l as u64))
+        .collect();
+    if want != snapshot.mem_layout {
+        return Err(err(format!(
+            "snapshot memory layout {:x?} does not match configuration {want:x?}",
+            snapshot.mem_layout
+        )));
+    }
+
+    let vcpu_config = vm_resources.vcpu_config();
+    if snapshot.vcpu_states.len() != vcpu_config.vcpu_count as usize {
+        return Err(err(format!(
+            "snapshot has {} vcpus but the configuration wants {}",
+            snapshot.vcpu_states.len(),
+            vcpu_config.vcpu_count
+        )));
+    }
+
+    let guest_memory = GuestMemoryMmap::from_ranges(&arch_mem_regions)
+        .map_err(|e| StartMicrovmError::GuestMemoryMmap(format!("{e:?}")))?;
+    read_snapshot_memory(&snapshot, &guest_memory).map_err(err)?;
+
+    let mut kernel_cmdline = Cmdline::new(arch::CMDLINE_MAX_SIZE);
+    kernel_cmdline.insert_str(DEFAULT_KERNEL_CMDLINE).unwrap();
+
+    let vm = setup_vm(&guest_memory, vcpu_config.vcpu_count)?;
+
+    let mut serial_devices = Vec::new();
+    let mut serial_ttys = Vec::new();
+    for s in &vm_resources.serial_consoles {
+        let input: Option<Box<dyn devices::legacy::ReadableFd + Send>> =
+            if is_valid_handle(s.input_handle.as_raw_handle()) {
+                if unsafe {
+                    BorrowedHandle::borrow_raw(s.input_handle.as_raw_handle()).is_terminal()
+                } {
+                    serial_ttys.push(s.input_handle);
+                }
+                Some(Box::new(unsafe {
+                    File::from_raw_handle(s.input_handle.as_raw_handle())
+                }))
+            } else {
+                None
+            };
+        let output: Option<Box<dyn io::Write + Send>> =
+            if is_valid_handle(s.output_handle.as_raw_handle()) {
+                Some(Box::new(unsafe {
+                    File::from_raw_handle(s.output_handle.as_raw_handle())
+                }))
+            } else {
+                None
+            };
+        serial_devices.push(setup_serial_device(event_manager, input, output)?);
+    }
+
+    let exit_evt = EventFd::new(utils::eventfd::EFD_NONBLOCK)
+        .map_err(Error::EventFd)
+        .map_err(StartMicrovmError::Internal)?;
+
+    let mut pio_device_manager = PortIODeviceManager::new(
+        Arc::new(Mutex::new(Cmos::new(
+            arch_memory_info.ram_below_gap,
+            arch_memory_info.ram_above_gap,
+        ))),
+        serial_devices,
+        exit_evt
+            .try_clone()
+            .map_err(Error::EventFd)
+            .map_err(StartMicrovmError::Internal)?,
+    )
+    .map_err(Error::CreateLegacyDevice)
+    .map_err(StartMicrovmError::Internal)?;
+
+    let mut mmio_device_manager = MMIODeviceManager::new(
+        &mut (arch::MMIO_MEM_START.clone()),
+        (arch::IRQ_BASE, arch::IRQ_MAX),
+    );
+
+    let ioapic: Box<dyn IrqChipT> =
+        Box::new(devices::legacy::WhpIoapic::new(vm.whp_vm().clone()));
+    let intc: IrqChip = Arc::new(Mutex::new(IrqChipDevice::new(ioapic)));
+
+    attach_legacy_devices(
+        &vm,
+        &mut pio_device_manager,
+        &mut mmio_device_manager,
+        Some(intc.clone()),
+    )?;
+
+    // Userspace ioapic registers (the LAPIC travels with each vcpu's state).
+    intc.lock().unwrap().restore_state(&snapshot.ioapic_state);
+
+    let mut vcpus = Vec::with_capacity(vcpu_config.vcpu_count as usize);
+    for (i, state) in snapshot.vcpu_states.iter().enumerate() {
+        let vcpu = Vcpu::new_x86_64(
+            i as u8,
+            vm.whp_vm().clone(),
+            guest_memory.clone(),
+            pio_device_manager.io_bus.clone(),
+            exit_evt
+                .try_clone()
+                .map_err(Error::EventFd)
+                .map_err(StartMicrovmError::Internal)?,
+        )
+        .map_err(Error::Vcpu)
+        .map_err(StartMicrovmError::Internal)?;
+        // No boot configure — the saved WHP state carries everything.
+        vcpu.restore_state(state)
+            .map_err(Error::Vcpu)
+            .map_err(StartMicrovmError::Internal)?;
+        vcpus.push(vcpu);
+    }
+
+    let exit_code = Arc::new(AtomicI32::new(i32::MAX));
+    let mut vmm = Vmm {
+        guest_memory,
+        arch_memory_info,
+        kernel_cmdline,
+        vcpus_handles: Vec::new(),
+        exit_evt,
+        exit_observers: Vec::new(),
+        exit_code,
+        vm,
+        mmio_device_manager,
+        pio_device_manager,
+    };
+
+    for serial_tty in serial_ttys {
+        setup_terminal_raw_mode(&mut vmm, Some(serial_tty), false);
+    }
+
+    // Device creation mirrors build_microvm's Windows order exactly:
+    // console(s), block, vsock, net.
+    let mut console_id = 0;
+    if !vm_resources.disable_implicit_console {
+        attach_console_devices(
+            &mut vmm,
+            event_manager,
+            intc.clone(),
+            vm_resources,
+            None,
+            console_id,
+        )?;
+        console_id += 1;
+    }
+    for console_cfg in vm_resources.virtio_consoles.iter() {
+        attach_console_devices(
+            &mut vmm,
+            event_manager,
+            intc.clone(),
+            vm_resources,
+            Some(console_cfg),
+            console_id,
+        )?;
+        console_id += 1;
+    }
+
+    #[cfg(feature = "blk")]
+    attach_block_devices(&mut vmm, &vm_resources.block, intc.clone())?;
+
+    if let Some(vsock) = vm_resources.vsock.get() {
+        attach_unixsock_vsock_device(&mut vmm, vsock, event_manager, intc.clone())?;
+    }
+
+    #[cfg(feature = "net")]
+    attach_net_devices(&mut vmm, &vm_resources.net, intc.clone())?;
+
+    // Push the saved virtio state into the freshly-created transports.
     let device_states = snapshot.device_states;
     let mut idx = 0usize;
     for (_addr, dev) in vmm.mmio_device_manager.bus.iter_devices() {

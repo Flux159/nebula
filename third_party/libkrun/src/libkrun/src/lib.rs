@@ -3173,9 +3173,8 @@ pub extern "C" fn krun_vm_pause(_ctx_id: u32) -> i32 {
 }
 
 /// Snapshot the paused VM's full state into the directory at `c_dir`
-/// (created if needed). Pause first; resume after. Restore support is
-/// still in progress — the snapshot records its completeness level.
-#[cfg(target_os = "linux")]
+/// (created if needed). Pause first; resume after.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn krun_vm_save(_ctx_id: u32, c_dir: *const c_char) -> i32 {
@@ -3200,7 +3199,10 @@ pub unsafe extern "C" fn krun_vm_save(_ctx_id: u32, c_dir: *const c_char) -> i32
 /// network) must match what the VM was originally started with — devices are
 /// re-created from it before their saved state is applied. Call before
 /// krun_start_enter.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    target_arch = "x86_64"
+))]
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn krun_set_restore(ctx_id: u32, c_dir: *const c_char) -> i32 {
@@ -3407,7 +3409,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
     let (sender, _receiver) = unbounded();
 
     #[cfg(all(
-        target_os = "linux",
+        any(target_os = "linux", target_os = "windows"),
         target_arch = "x86_64",
         not(any(feature = "tee", feature = "aws-nitro"))
     ))]
@@ -3427,7 +3429,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         ),
     };
     #[cfg(not(all(
-        target_os = "linux",
+        any(target_os = "linux", target_os = "windows"),
         target_arch = "x86_64",
         not(any(feature = "tee", feature = "aws-nitro"))
     )))]

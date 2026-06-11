@@ -35,6 +35,18 @@ impl IrqChipDevice {
     ) -> Result<(), DeviceError> {
         self.inner.set_irq(irq_line, interrupt_evt)
     }
+
+    /// Snapshot of userspace irqchip register state (None for in-kernel
+    /// chips, whose state is saved through the hypervisor instead).
+    #[cfg(target_arch = "x86_64")]
+    pub fn snapshot_state(&self) -> Option<Vec<u8>> {
+        self.inner.snapshot_state()
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn restore_state(&self, state: &[u8]) {
+        self.inner.restore_state(state)
+    }
 }
 
 impl BusDevice for IrqChipDevice {
@@ -121,6 +133,15 @@ pub trait IrqChipT: BusDevice {
         irq_line: Option<u32>,
         interrupt_evt: Option<&EventFd>,
     ) -> Result<(), DeviceError>;
+
+    /// Userspace register snapshot for VM save/restore. In-kernel chips
+    /// (KVM ioapic) keep the default None — their state travels with the
+    /// hypervisor's VM state instead.
+    fn snapshot_state(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn restore_state(&self, _state: &[u8]) {}
 }
 
 #[cfg(target_arch = "aarch64")]

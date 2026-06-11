@@ -34,6 +34,24 @@ use windows_sys::Win32::System::Hypervisor::{
     WHvX64RegisterDeliverabilityNotifications, WHvX64RegisterRax, WHvX64RegisterRbx,
     WHvX64RegisterRcx, WHvX64RegisterRdx, WHvX64RegisterRip,
 };
+use windows_sys::Win32::System::Hypervisor::{
+    WHvGetVirtualProcessorInterruptControllerState2, WHvGetVirtualProcessorXsaveState,
+    WHvRegisterInterruptState, WHvRegisterPendingInterruption,
+    WHvSetVirtualProcessorInterruptControllerState2, WHvSetVirtualProcessorXsaveState,
+    WHvX64RegisterApicBase, WHvX64RegisterCr0, WHvX64RegisterCr2, WHvX64RegisterCr3,
+    WHvX64RegisterCr4, WHvX64RegisterCr8, WHvX64RegisterCs, WHvX64RegisterCstar,
+    WHvX64RegisterDr0, WHvX64RegisterDr1, WHvX64RegisterDr2, WHvX64RegisterDr3,
+    WHvX64RegisterDr6, WHvX64RegisterDr7, WHvX64RegisterDs, WHvX64RegisterEfer,
+    WHvX64RegisterEs, WHvX64RegisterFs, WHvX64RegisterGdtr, WHvX64RegisterGs,
+    WHvX64RegisterIdtr, WHvX64RegisterKernelGsBase, WHvX64RegisterLdtr, WHvX64RegisterLstar,
+    WHvX64RegisterPat, WHvX64RegisterR8, WHvX64RegisterR9, WHvX64RegisterR10,
+    WHvX64RegisterR11, WHvX64RegisterR12, WHvX64RegisterR13, WHvX64RegisterR14,
+    WHvX64RegisterR15, WHvX64RegisterRbp, WHvX64RegisterRdi, WHvX64RegisterRflags,
+    WHvX64RegisterRsi, WHvX64RegisterRsp, WHvX64RegisterSfmask, WHvX64RegisterSs,
+    WHvX64RegisterStar, WHvX64RegisterSysenterCs, WHvX64RegisterSysenterEip,
+    WHvX64RegisterSysenterEsp, WHvX64RegisterTr, WHvX64RegisterTsc, WHvX64RegisterTscAux,
+    WHvX64RegisterXCr0,
+};
 use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
 /// Host wall-progressing reference time in 100ns units (the Hyper-V TLFS
@@ -93,6 +111,10 @@ pub enum Error {
     IoEmulation(i32),
     MmioEmulation(i32),
     EmulationFailed(u32),
+    GetXsave(i32),
+    SetXsave(i32),
+    GetInterruptController(i32),
+    SetInterruptController(i32),
 }
 
 impl Display for Error {
@@ -159,6 +181,30 @@ impl Display for Error {
                 write!(
                     f,
                     "Instruction emulation failed: {reason} (status 0x{status:08x})"
+                )
+            }
+            GetXsave(hr) => {
+                write!(
+                    f,
+                    "WHvGetVirtualProcessorXsaveState failed: HRESULT 0x{hr:08x}"
+                )
+            }
+            SetXsave(hr) => {
+                write!(
+                    f,
+                    "WHvSetVirtualProcessorXsaveState failed: HRESULT 0x{hr:08x}"
+                )
+            }
+            GetInterruptController(hr) => {
+                write!(
+                    f,
+                    "WHvGetVirtualProcessorInterruptControllerState2 failed: HRESULT 0x{hr:08x}"
+                )
+            }
+            SetInterruptController(hr) => {
+                write!(
+                    f,
+                    "WHvSetVirtualProcessorInterruptControllerState2 failed: HRESULT 0x{hr:08x}"
                 )
             }
         }
@@ -1125,5 +1171,192 @@ impl Drop for WhpVcpu {
                 self.index
             );
         }
+    }
+}
+
+// --- vcpu snapshot state ----------------------------------------------------
+
+/// Every register a snapshot carries: GPRs, RIP/RFLAGS, segments, descriptor
+/// tables, control + debug registers, the MSRs WHP models as registers, and
+/// the pending-interrupt/deliverability state. Captured and reapplied as one
+/// positional batch.
+const SNAPSHOT_REGS: [WHV_REGISTER_NAME; 56] = [
+    WHvX64RegisterRax,
+    WHvX64RegisterRcx,
+    WHvX64RegisterRdx,
+    WHvX64RegisterRbx,
+    WHvX64RegisterRsp,
+    WHvX64RegisterRbp,
+    WHvX64RegisterRsi,
+    WHvX64RegisterRdi,
+    WHvX64RegisterR8,
+    WHvX64RegisterR9,
+    WHvX64RegisterR10,
+    WHvX64RegisterR11,
+    WHvX64RegisterR12,
+    WHvX64RegisterR13,
+    WHvX64RegisterR14,
+    WHvX64RegisterR15,
+    WHvX64RegisterRip,
+    WHvX64RegisterRflags,
+    WHvX64RegisterEs,
+    WHvX64RegisterCs,
+    WHvX64RegisterSs,
+    WHvX64RegisterDs,
+    WHvX64RegisterFs,
+    WHvX64RegisterGs,
+    WHvX64RegisterLdtr,
+    WHvX64RegisterTr,
+    WHvX64RegisterIdtr,
+    WHvX64RegisterGdtr,
+    WHvX64RegisterCr0,
+    WHvX64RegisterCr2,
+    WHvX64RegisterCr3,
+    WHvX64RegisterCr4,
+    WHvX64RegisterCr8,
+    WHvX64RegisterDr0,
+    WHvX64RegisterDr1,
+    WHvX64RegisterDr2,
+    WHvX64RegisterDr3,
+    WHvX64RegisterDr6,
+    WHvX64RegisterDr7,
+    WHvX64RegisterXCr0,
+    WHvX64RegisterEfer,
+    WHvX64RegisterKernelGsBase,
+    WHvX64RegisterApicBase,
+    WHvX64RegisterPat,
+    WHvX64RegisterSysenterCs,
+    WHvX64RegisterSysenterEip,
+    WHvX64RegisterSysenterEsp,
+    WHvX64RegisterStar,
+    WHvX64RegisterLstar,
+    WHvX64RegisterCstar,
+    WHvX64RegisterSfmask,
+    WHvX64RegisterTsc,
+    WHvX64RegisterTscAux,
+    WHvRegisterPendingInterruption,
+    WHvRegisterInterruptState,
+    WHvX64RegisterDeliverabilityNotifications,
+];
+
+/// Full per-VP machine state for snapshots. Same-machine only — raw WHP
+/// register values, an XSAVE area, and the LAPIC state blob.
+pub struct VcpuSavedState {
+    /// (register name, raw 16-byte register value) pairs.
+    pub regs: Vec<(WHV_REGISTER_NAME, [u8; 16])>,
+    /// XSAVE area (`WHvGet/SetVirtualProcessorXsaveState`).
+    pub xsave: Vec<u8>,
+    /// Local APIC state (`InterruptControllerState2`); valid because the
+    /// partition runs with XApic emulation mode.
+    pub lapic: Vec<u8>,
+}
+
+impl WhpVcpu {
+    /// Capture the VP's full state. The VP must be outside
+    /// `WHvRunVirtualProcessor` (paused).
+    pub fn save_state(&self) -> Result<VcpuSavedState, Error> {
+        let values = self.get_registers(SNAPSHOT_REGS)?;
+        let regs = SNAPSHOT_REGS
+            .iter()
+            .zip(values.iter())
+            .map(|(n, v)| (*n, unsafe { mem::transmute_copy::<WHV_REGISTER_VALUE, [u8; 16]>(v) }))
+            .collect();
+
+        // 16K covers every XSAVE layout current hardware reports.
+        let mut xsave = vec![0u8; 16384];
+        let mut written = 0u32;
+        let hr = unsafe {
+            WHvGetVirtualProcessorXsaveState(
+                self.vm.partition_handle(),
+                self.index,
+                xsave.as_mut_ptr() as *mut c_void,
+                xsave.len() as u32,
+                &mut written,
+            )
+        };
+        if hr != S_OK {
+            return Err(Error::GetXsave(hr));
+        }
+        xsave.truncate(written as usize);
+
+        let mut lapic = vec![0u8; 4096];
+        let mut written = 0u32;
+        let hr = unsafe {
+            WHvGetVirtualProcessorInterruptControllerState2(
+                self.vm.partition_handle(),
+                self.index,
+                lapic.as_mut_ptr() as *mut c_void,
+                lapic.len() as u32,
+                &mut written,
+            )
+        };
+        if hr != S_OK {
+            return Err(Error::GetInterruptController(hr));
+        }
+        lapic.truncate(written as usize);
+
+        Ok(VcpuSavedState { regs, xsave, lapic })
+    }
+
+    /// Reapply state captured by [`save_state`](Self::save_state) onto a
+    /// freshly created VP (before it ever runs).
+    pub fn restore_state(&self, st: &VcpuSavedState) -> Result<(), Error> {
+        let names: Vec<WHV_REGISTER_NAME> = st.regs.iter().map(|(n, _)| *n).collect();
+        let values: Vec<AlignedRegisterValue> = st
+            .regs
+            .iter()
+            .map(|(_, b)| {
+                AlignedRegisterValue(unsafe {
+                    mem::transmute_copy::<[u8; 16], WHV_REGISTER_VALUE>(b)
+                })
+            })
+            .collect();
+
+        if let Err(batch_err) = self.set_whp_registers(&names, &values) {
+            // One rejected register fails the whole batch. Retry singly so an
+            // optional straggler (e.g. XCr0 on hosts without XSAVE feature
+            // config) doesn't kill the restore; real failures still surface
+            // in the log.
+            log::warn!("vcpu {} restore: batch set failed ({batch_err}); retrying singly", self.index);
+            for i in 0..names.len() {
+                if let Err(e) = self.set_whp_registers(&names[i..=i], &values[i..=i]) {
+                    log::warn!(
+                        "vcpu {} restore: register {} not restored: {e}",
+                        self.index,
+                        names[i]
+                    );
+                }
+            }
+        }
+
+        if !st.xsave.is_empty() {
+            let hr = unsafe {
+                WHvSetVirtualProcessorXsaveState(
+                    self.vm.partition_handle(),
+                    self.index,
+                    st.xsave.as_ptr() as *const c_void,
+                    st.xsave.len() as u32,
+                )
+            };
+            if hr != S_OK {
+                return Err(Error::SetXsave(hr));
+            }
+        }
+
+        if !st.lapic.is_empty() {
+            let hr = unsafe {
+                WHvSetVirtualProcessorInterruptControllerState2(
+                    self.vm.partition_handle(),
+                    self.index,
+                    st.lapic.as_ptr() as *const c_void,
+                    st.lapic.len() as u32,
+                )
+            };
+            if hr != S_OK {
+                return Err(Error::SetInterruptController(hr));
+            }
+        }
+
+        Ok(())
     }
 }

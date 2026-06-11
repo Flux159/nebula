@@ -287,13 +287,16 @@ fn reconcile_loop(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx) {
     }
 }
 
-/// A desired pod: its full container list (container 0 is the pod sandbox /
-/// netns holder; the rest join its netns). Keyed in the reconcile map by the
-/// holder cname (`<ns>_<pod>`).
+/// A desired pod. A dedicated **pause/sandbox** container owns the pod's network
+/// namespace + IP + DNS for the pod's whole life; every init and main container
+/// joins it via `container:<sandbox>`. This is the kubelet model — it gives init
+/// containers the pod netns, keeps the pod IP stable across main-container
+/// restarts, and stops a container-0 restart from stranding sidecars.
+/// Keyed in the reconcile map by `holder_cname` (`<ns>_<pod>`).
 struct Desired {
     pod_ns: String,
     pod_name: String,
-    holder_cname: String, // <ns>_<pod>
+    holder_cname: String, // <ns>_<pod> (main container 0 / default exec+logs target)
     owner: String,        // "<kind>/<ns>/<name>" or "Pod/<ns>/<name>"
     template: Value,      // full pod spec
     labels: Value,        // pod labels
@@ -303,8 +306,13 @@ struct Desired {
 }
 
 impl Desired {
-    /// Engine container name for main container index `i`: the holder keeps the
-    /// bare `<ns>_<pod>` name; sidecars get `<ns>_<pod>.<container-name>`.
+    /// The pause/sandbox container that owns the pod netns/IP/DNS.
+    fn sandbox_cname(&self) -> String {
+        format!("{}.pause", self.holder_cname)
+    }
+    /// Engine container name for main container index `i`: container 0 keeps the
+    /// bare `<ns>_<pod>` name (default exec/logs target); the rest get
+    /// `<ns>_<pod>.<container-name>`.
     fn cname(&self, i: usize) -> String {
         if i == 0 {
             self.holder_cname.clone()
@@ -359,6 +367,7 @@ fn reconcile_once(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx) -> s
     // holder goes away, drop its Pod object too.
     let mut desired_cnames: std::collections::BTreeSet<String> = Default::default();
     for d in desired.values() {
+        desired_cnames.insert(d.sandbox_cname());
         for i in 0..d.init_containers.len() {
             desired_cnames.insert(d.init_cname(i));
         }
@@ -459,14 +468,39 @@ fn collect_bare_pod(obj: &Value, out: &mut BTreeMap<String, Desired>) {
     );
 }
 
-/// Ensure a pod's containers. Init containers run first, in order, each to
-/// exit-0 before the next; main containers (holder first, then sidecars) start
-/// only once all init containers have succeeded. Then sync one Pod object.
+/// Ensure a pod's containers. The pause/sandbox container comes up first and
+/// owns the pod netns; then init containers run sequentially (joined to the
+/// sandbox) to exit-0; then the main containers start (also joined). Then sync
+/// one Pod object.
 fn ensure_pod(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: &Desired) {
-    // Init containers run with their own bridge netns (the pod sandbox holder
-    // isn't up yet) + the pod's emptyDir volumes — the canonical "populate a
-    // shared volume before the app starts" use. Restart-on-failure so a flaky
-    // init retries (Never pods don't retry).
+    let sandbox = d.sandbox_cname();
+    let net = format!("container:{sandbox}");
+
+    // 1. Pod sandbox: owns the netns/IP/DNS for the pod's whole life.
+    if engine.get_entry(&sandbox).is_err() {
+        if let Some(req) = build_sandbox_req(ctx, d) {
+            let image = req.config.image.clone();
+            if engine.store.resolve(&image).is_none() {
+                let _ = engine.ensure_image(&image);
+            }
+            match engine.create(&req, Some(&sandbox)) {
+                Ok(_) => {
+                    if let Err(e) = engine.start(&sandbox) {
+                        eprintln!("slimd: bridge sandbox start {sandbox} failed: {e}");
+                    }
+                }
+                Err(e) => eprintln!("slimd: bridge sandbox create {sandbox} failed: {e}"),
+            }
+        }
+    }
+    // Everything below joins the sandbox netns, so it must be running first.
+    let sandbox_up = engine.get_entry(&sandbox).map(|e| e.c.lock().unwrap().running()).unwrap_or(false);
+    if !sandbox_up {
+        sync_pod_status(engine, store, ctx, d, 0);
+        return;
+    }
+
+    // 2. Init containers (joined to the sandbox netns), sequential to exit-0.
     let init_restart = if d.restart == "no" { "no" } else { "on-failure" };
     let mut init_done = 0usize;
     let mut initializing = false;
@@ -477,13 +511,13 @@ fn ensure_pod(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: &Desi
                 let st = entry.c.lock().unwrap().state.clone();
                 if (st.status == "exited" || st.status == "dead") && st.exit_code == 0 {
                     init_done += 1;
-                    continue; // this init finished; move to the next
+                    continue;
                 }
-                initializing = true; // running, created, or retrying-on-failure
+                initializing = true;
                 break;
             }
             Err(_) => {
-                if let Some(req) = build_create_req(store, ctx, d, ispec, "bridge", init_restart, false) {
+                if let Some(req) = build_create_req(store, ctx, d, ispec, &net, init_restart, false) {
                     let image = req.config.image.clone();
                     if engine.store.resolve(&image).is_none() {
                         let _ = engine.ensure_image(&image);
@@ -503,19 +537,14 @@ fn ensure_pod(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: &Desi
         }
     }
 
+    // 3. Main containers (joined to the sandbox netns) once init is done.
     if !initializing {
-        // All init containers done → bring up the main containers.
         for (i, cspec) in d.containers.iter().enumerate() {
             let cname = d.cname(i);
             if engine.get_entry(&cname).is_ok() {
                 continue;
             }
-            let (net, dns) = if i == 0 {
-                ("bridge".to_string(), true)
-            } else {
-                (format!("container:{}", d.holder_cname), false)
-            };
-            let Some(req) = build_create_req(store, ctx, d, cspec, &net, d.restart, dns) else { continue };
+            let Some(req) = build_create_req(store, ctx, d, cspec, &net, d.restart, false) else { continue };
             let image = req.config.image.clone();
             if engine.store.resolve(&image).is_none() {
                 let _ = engine.ensure_image(&image);
@@ -590,8 +619,10 @@ fn sync_pod_status(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: 
     } else {
         "Pending"
     };
+    // The pod IP belongs to the sandbox (which owns the netns), stable across
+    // main-container restarts.
     let ip = engine
-        .get_entry(&d.holder_cname)
+        .get_entry(&d.sandbox_cname())
         .map(|e| e.c.lock().unwrap().ip.clone())
         .unwrap_or_default();
     sync_pod(store, d, phase, &ip, "", &cstatuses, &init_statuses);
@@ -692,7 +723,7 @@ fn build_create_req(
     labels.insert(MANAGED.to_string(), "true".to_string());
     labels.insert(OWNER.to_string(), d.owner.clone());
     labels.insert(POD_OF.to_string(), format!("{}/{}", d.pod_ns, d.pod_name));
-    labels.insert(POD_HOLDER.to_string(), d.holder_cname.clone());
+    labels.insert(POD_HOLDER.to_string(), d.sandbox_cname());
     labels.insert(CNAME.to_string(), cspec_name(cspec));
     if let Some(obj) = d.labels.as_object() {
         for (k, v) in obj {
@@ -730,6 +761,44 @@ fn build_create_req(
         endpoints.insert("bridge".to_string(), slim_api::container::EndpointSettings { aliases, ..Default::default() });
     }
 
+    Some(slim_api::container::ContainerCreateRequest {
+        config,
+        host_config,
+        networking_config: slim_api::container::NetworkingConfig { endpoints_config: endpoints },
+    })
+}
+
+/// Build the pod sandbox (pause) container: it owns the netns/IP/DNS for the
+/// pod's whole life. Reuses container-0's image (already pulled) running a long
+/// sleep, so there's no extra pull. Liberty: an image without `sleep`
+/// (distroless/scratch) can't serve as the sandbox.
+fn build_sandbox_req(_ctx: &BridgeCtx, d: &Desired) -> Option<slim_api::container::ContainerCreateRequest> {
+    let image = d.containers.first()?.get("image").and_then(|v| v.as_str())?.to_string();
+    let mut labels = std::collections::BTreeMap::new();
+    labels.insert(MANAGED.to_string(), "true".to_string());
+    labels.insert(OWNER.to_string(), d.owner.clone());
+    labels.insert(POD_OF.to_string(), format!("{}/{}", d.pod_ns, d.pod_name));
+    labels.insert(POD_HOLDER.to_string(), d.sandbox_cname());
+    labels.insert(CNAME.to_string(), "pause".to_string());
+    let config = slim_api::container::ContainerConfig {
+        image,
+        entrypoint: Some(vec!["sleep".to_string(), "2147483647".to_string()]),
+        labels,
+        ..Default::default()
+    };
+    let host_config = slim_api::container::HostConfig {
+        // The sandbox must persist for the pod's whole life.
+        restart_policy: slim_api::container::RestartPolicy { name: "always".to_string(), maximum_retry_count: 0 },
+        network_mode: "bridge".to_string(),
+        ..Default::default()
+    };
+    // The pod's DNS names resolve to the sandbox IP (== the pod IP).
+    let mut aliases = vec![d.pod_name.clone()];
+    if let Some(app) = d.labels.get("app").and_then(|v| v.as_str()) {
+        aliases.push(app.to_string());
+    }
+    let mut endpoints = std::collections::BTreeMap::new();
+    endpoints.insert("bridge".to_string(), slim_api::container::EndpointSettings { aliases, ..Default::default() });
     Some(slim_api::container::ContainerCreateRequest {
         config,
         host_config,

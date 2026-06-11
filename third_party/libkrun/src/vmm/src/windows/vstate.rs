@@ -54,6 +54,8 @@ pub enum Error {
     VcpuCountNotInitialized,
     /// Cannot run the VCPUs.
     VcpuRun(whp::Error),
+    /// Cannot save or restore vCPU state.
+    VcpuState(whp::Error),
     /// Cannot spawn a new vCPU thread.
     VcpuSpawn(io::Error),
     /// Unexpected VM exit reason.
@@ -82,6 +84,7 @@ impl Display for Error {
             SignalVcpu(e) => write!(f, "Failed to signal vCPU: {e}"),
             VcpuCountNotInitialized => write!(f, "vCPU count is not initialized"),
             VcpuRun(e) => write!(f, "Cannot run vCPU: {e}"),
+            VcpuState(e) => write!(f, "Cannot save/restore vCPU state: {e}"),
             VcpuSpawn(e) => write!(f, "Cannot spawn vCPU thread: {e}"),
             VcpuUnhandledExit => write!(f, "Unexpected VM exit reason"),
             VmSetup(e) => write!(f, "Cannot configure the VM: {e}"),
@@ -367,6 +370,13 @@ impl Vcpu {
         self.whp_vcpu.index() as u8
     }
 
+    /// Reapply snapshot state onto this (freshly created, never-run) vcpu.
+    pub fn restore_state(&self, state: &VcpuState) -> Result<()> {
+        self.whp_vcpu
+            .restore_state(&state.0)
+            .map_err(Error::VcpuState)
+    }
+
     pub fn set_mmio_bus(&mut self, mmio_bus: devices::Bus) {
         self.mmio_bus = Some(mmio_bus);
     }
@@ -411,6 +421,12 @@ impl Vcpu {
                         .expect("failed to send Paused");
                     self.wait_for_resume();
                 }
+                // State capture is only coherent while paused.
+                Ok(VcpuEvent::SaveState) => {
+                    self.response_sender
+                        .send(VcpuResponse::SaveStateFailed)
+                        .expect("failed to send SaveStateFailed");
+                }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => break,
             }
@@ -440,6 +456,20 @@ impl Vcpu {
                     return;
                 }
                 Ok(VcpuEvent::Pause) => continue,
+                Ok(VcpuEvent::SaveState) => {
+                    // Captured on the vcpu thread while parked outside
+                    // WHvRunVirtualProcessor — the state is coherent.
+                    let resp = match self.whp_vcpu.save_state() {
+                        Ok(st) => VcpuResponse::SavedState(Box::new(VcpuState(st))),
+                        Err(e) => {
+                            error!("vcpu {} save_state: {e}", self.cpu_index());
+                            VcpuResponse::SaveStateFailed
+                        }
+                    };
+                    self.response_sender
+                        .send(resp)
+                        .expect("failed to send SavedState");
+                }
                 Err(_) => return,
             }
         }
@@ -577,6 +607,62 @@ impl Vcpu {
     }
 }
 
+/// Full per-vcpu machine state for snapshots: the raw WHP register batch,
+/// XSAVE area, and LAPIC blob. Same-machine binary format.
+pub struct VcpuState(pub whp::VcpuSavedState);
+
+impl std::fmt::Debug for VcpuState {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "VcpuState({} regs, {}B xsave, {}B lapic)",
+            self.0.regs.len(),
+            self.0.xsave.len(),
+            self.0.lapic.len()
+        )
+    }
+}
+
+impl VcpuState {
+    pub fn serialize_into<W: std::io::Write>(&self, w: &mut W) -> io::Result<()> {
+        let wu64 = |w: &mut W, v: u64| w.write_all(&v.to_le_bytes());
+        wu64(w, self.0.regs.len() as u64)?;
+        for (name, value) in &self.0.regs {
+            w.write_all(&(*name as u32).to_le_bytes())?;
+            w.write_all(value)?;
+        }
+        wu64(w, self.0.xsave.len() as u64)?;
+        w.write_all(&self.0.xsave)?;
+        wu64(w, self.0.lapic.len() as u64)?;
+        w.write_all(&self.0.lapic)
+    }
+
+    pub fn deserialize_from<R: std::io::Read>(r: &mut R) -> io::Result<VcpuState> {
+        let mut b8 = [0u8; 8];
+        let mut b4 = [0u8; 4];
+        let mut ru64 = |r: &mut R| -> io::Result<u64> {
+            r.read_exact(&mut b8)?;
+            Ok(u64::from_le_bytes(b8))
+        };
+        let n_regs = ru64(r)? as usize;
+        let mut regs = Vec::with_capacity(n_regs);
+        for _ in 0..n_regs {
+            r.read_exact(&mut b4)?;
+            let name = u32::from_le_bytes(b4) as i32;
+            let mut value = [0u8; 16];
+            r.read_exact(&mut value)?;
+            regs.push((name, value));
+        }
+        let xsave_len = ru64(r)? as usize;
+        let mut xsave = vec![0u8; xsave_len];
+        r.read_exact(&mut xsave)?;
+        let lapic_len = ru64(r)? as usize;
+        let mut lapic = vec![0u8; lapic_len];
+        r.read_exact(&mut lapic)?;
+        Ok(VcpuState(whp::VcpuSavedState { regs, xsave, lapic }))
+    }
+}
+
 // Allow currently unused Pause and Exit events. These will be used by the vmm later on.
 #[allow(unused)]
 #[derive(Debug)]
@@ -586,9 +672,11 @@ pub enum VcpuEvent {
     Pause,
     /// Event that should resume the Vcpu.
     Resume,
+    /// Capture the full vcpu state (only valid while paused).
+    SaveState,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 /// List of responses that the Vcpu reports.
 pub enum VcpuResponse {
     /// Vcpu is paused.
@@ -597,7 +685,26 @@ pub enum VcpuResponse {
     Resumed,
     /// Vcpu is stopped.
     Exited(u8),
+    /// Full vcpu state captured while paused.
+    SavedState(Box<VcpuState>),
+    /// State capture failed (or was requested while running).
+    SaveStateFailed,
 }
+
+// Manual PartialEq: SavedState payloads aren't comparable (raw register
+// blobs); responses compare by variant, Exited by code.
+impl PartialEq for VcpuResponse {
+    fn eq(&self, other: &Self) -> bool {
+        use VcpuResponse::*;
+        match (self, other) {
+            (Paused, Paused) | (Resumed, Resumed) | (SaveStateFailed, SaveStateFailed) => true,
+            (Exited(a), Exited(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for VcpuResponse {}
 
 /// Wrapper over Vcpu that hides the underlying interactions with the Vcpu thread.
 pub struct VcpuHandle {

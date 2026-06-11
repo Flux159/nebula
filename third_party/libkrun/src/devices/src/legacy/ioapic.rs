@@ -130,6 +130,38 @@ impl<B: IoApicBackend> IrqChipT for Ioapic<B> {
         let IoapicInner { regs, backend } = &mut *inner;
         backend.set_irq(irq_line, interrupt_evt, regs)
     }
+
+    // Userspace ioapic: register state lives here, so snapshots carry it.
+    // Layout: [id, ioregsel, version, pad] + irr(le32) + 24x ioredtbl(le64).
+    fn snapshot_state(&self) -> Option<Vec<u8>> {
+        let inner = self.inner.lock().unwrap();
+        let r = &inner.regs;
+        let mut out = Vec::with_capacity(8 + IOAPIC_NUM_PINS * 8);
+        out.extend_from_slice(&[r.id, r.ioregsel, r.version, 0]);
+        out.extend_from_slice(&r.irr.to_le_bytes());
+        for e in &r.ioredtbl {
+            out.extend_from_slice(&e.to_le_bytes());
+        }
+        Some(out)
+    }
+
+    fn restore_state(&self, state: &[u8]) {
+        if state.len() < 8 + IOAPIC_NUM_PINS * 8 {
+            error!("ioapic: snapshot state too short ({}B)", state.len());
+            return;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        inner.regs.id = state[0];
+        inner.regs.ioregsel = state[1];
+        inner.regs.version = state[2];
+        inner.regs.irr = u32::from_le_bytes(state[4..8].try_into().unwrap());
+        for (i, chunk) in state[8..8 + IOAPIC_NUM_PINS * 8]
+            .chunks_exact(8)
+            .enumerate()
+        {
+            inner.regs.ioredtbl[i] = u64::from_le_bytes(chunk.try_into().unwrap());
+        }
+    }
 }
 
 impl<B: IoApicBackend> BusDevice for Ioapic<B> {

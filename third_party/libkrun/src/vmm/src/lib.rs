@@ -280,8 +280,8 @@ impl Vmm {
         Ok(())
     }
 
-    /// Capture the KVM state of every (paused) vcpu, in index order.
-    #[cfg(target_os = "linux")]
+    /// Capture the hypervisor state of every (paused) vcpu, in index order.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub fn save_vcpu_states(&mut self) -> Result<Vec<crate::vstate::VcpuState>> {
         let mut states = Vec::with_capacity(self.vcpus_handles.len());
         for handle in self.vcpus_handles.iter() {
@@ -464,9 +464,70 @@ impl Vmm {
         Ok(())
     }
 
+    /// Capture a full machine snapshot into `dir` (Windows/WHP).
+    ///
+    /// Same layout as the Linux snapshot, but vm.state holds the userspace
+    /// WHP ioapic registers (the LAPIC travels inside each vcpu's state) and
+    /// vcpus.state holds raw WHP register/XSAVE/APIC blobs.
+    #[cfg(target_os = "windows")]
+    pub fn save_snapshot(&mut self, dir: &std::path::Path) -> std::result::Result<(), String> {
+        use std::io::Write;
+
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+
+        let ioapic = self
+            .snapshot_ioapic()
+            .ok_or_else(|| "no userspace ioapic on the mmio bus".to_string())?;
+        let vcpu_states = self
+            .save_vcpu_states()
+            .map_err(|e| format!("vcpu states: {e}"))?;
+
+        let mut f = std::io::BufWriter::new(
+            std::fs::File::create(dir.join("vm.state")).map_err(|e| e.to_string())?,
+        );
+        write_u64(&mut f, ioapic.len() as u64).map_err(|e| e.to_string())?;
+        f.write_all(&ioapic)
+            .and_then(|()| f.flush())
+            .map_err(|e| format!("write vm.state: {e}"))?;
+
+        let mut f = std::io::BufWriter::new(
+            std::fs::File::create(dir.join("vcpus.state")).map_err(|e| e.to_string())?,
+        );
+        write_u64(&mut f, vcpu_states.len() as u64).map_err(|e| e.to_string())?;
+        for st in &vcpu_states {
+            st.serialize_into(&mut f)
+                .map_err(|e| format!("write vcpu state: {e}"))?;
+        }
+        f.flush().map_err(|e| e.to_string())?;
+
+        self.save_devices(&dir.join("devices.state"))
+            .map_err(|e| format!("write devices.state: {e}"))?;
+
+        self.save_memory(&dir.join("memory.bin"))
+            .map_err(|e| format!("write memory.bin: {e}"))?;
+
+        std::fs::write(dir.join("format.txt"), "krun-snapshot-v1\n").map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// The userspace WHP ioapic's register snapshot, found on the mmio bus.
+    #[cfg(target_os = "windows")]
+    fn snapshot_ioapic(&self) -> Option<Vec<u8>> {
+        for (_addr, dev) in self.mmio_device_manager.bus.iter_devices() {
+            let locked = dev.lock().unwrap();
+            if let Some(chip) = locked
+                .as_any()
+                .downcast_ref::<devices::legacy::IrqChipDevice>()
+            {
+                return chip.snapshot_state();
+            }
+        }
+        None
+    }
+
     /// Serialize every virtio MMIO transport's state in bus-address order.
     /// Devices must be quiesced (vcpus paused, workers drained).
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn save_devices(&self, path: &std::path::Path) -> std::io::Result<()> {
         use devices::virtio::MmioTransport;
         use std::io::Write;

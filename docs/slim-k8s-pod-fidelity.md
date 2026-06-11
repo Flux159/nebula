@@ -112,20 +112,27 @@ pod `Pending`. Extend test/kube-sidecar.sh.
   snapshot Arc<Entry> under the map lock, release, then lock containers.
   Liberties: exec probe output >64KB or a hung probe command stalls the prober
   tick; named ports unresolved.
-- Phase 3 — multi-container/sidecars: ✅ DONE. Pod = N engine containers;
-  container 0 is the sandbox/netns holder (`<ns>_<pod>`), the rest
-  (`<ns>_<pod>.<name>`) join its netns via `container:<holder>` (engine wired to
-  setns `/proc/<pid>/ns/net`). Shared emptyDir volumes; aggregated pod
-  status/phase; exec/logs gain `-c`. kube-sidecar.sh 8/8 (shared localhost +
-  shared volume). Liberties: emptyDir only (no configMap/secret/hostPath
-  volumes); if the holder restarts, sidecars keep the stale netns until they
-  exit and the level reconcile recreates them.
+- Phase 3 — multi-container/sidecars: ✅ DONE. Pod = N engine containers joined
+  to a per-pod **pause/sandbox** netns (see below). Shared emptyDir; aggregated
+  pod status/phase; exec/logs gain `-c`. kube-sidecar.sh 8/8 (shared localhost +
+  shared volume).
 - Phase 4 — init containers: ✅ DONE. `spec.initContainers` run sequentially
-  (`<ns>_<pod>.init.<name>`, restart-on-failure) to exit-0 before main containers
-  start; pod stays `Pending` with `Init:done/total` (server-side Table) and main
-  containers report `PodInitializing`; `initContainerStatuses[]` + the
-  `Initialized` condition reflect progress. kube-init.sh 6/6. Liberty: init
-  containers get their own bridge netns (the sandbox holder isn't up yet), not
-  the pod's — fine for the populate-a-volume/setup use; they do share emptyDir.
+  (`<ns>_<pod>.init.<name>`, restart-on-failure) to exit-0 before main containers;
+  pod stays `Pending` with `Init:done/total` (server-side Table), main containers
+  report `PodInitializing`; `initContainerStatuses[]` + the `Initialized`
+  condition track progress. kube-init.sh 6/6.
+- Volume types: ✅ DONE — configMap/secret/hostPath + subPath/readOnly
+  (kube-volumes.sh 5/5). Liberty: configMap/secret snapshot at create.
+- **Pause/sandbox model: ✅ DONE.** A dedicated `<ns>_<pod>.pause` container
+  (reuses container-0's image running `sleep`, bridge net + DNS, restart=always)
+  owns the pod netns/IP/DNS for the pod's whole life; **every init and main
+  container joins it** via `container:<sandbox>`. This is the kubelet model and
+  it fixes three things at once: init containers now run in the pod netns; the
+  pod IP is stable across main-container restarts; and a container-0 restart no
+  longer strands sidecars. Liberty: an image without `sleep` (distroless/scratch)
+  can't be a sandbox; if the sandbox itself is force-killed (near-never — it's a
+  `sleep`), running joiners hold a stale netns until they exit and reconcile
+  recreates them.
 
-**All four phases complete. Full suite: 94/94.**
+**All phases + volume types + pause sandbox complete. Full suite: 99/99 on macOS
+and Linux (x86_64); host CLIs build + run on Windows (TCP transport).**
