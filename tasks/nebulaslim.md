@@ -133,13 +133,26 @@ Rust 2021, same toolchain pins as the root workspace. Release profile:
 CLIs 32/32. `docker build` via the real CLI needs `DOCKER_BUILDKIT=0` (slim is
 classic-builder only). Details: docs/slim-size-and-status.md.
 
-**Status: S0–S9 code complete. Validated 32/32 end-to-end in the nebula
-microVM on macOS** (slimd in a privileged container = real Linux
-namespaces/overlayfs/cgroup2): docker-slim 18/18 (pull/run/logs/exec/stop/rm/
-inspect -f/volumes/build), kubectl-slim+helm-slim 14/14 (apply/get/scale/
-delete/ConfigMap-env, helm template/install/list/uninstall). Run
-`scripts/test-slim.sh`. Measured total embed ≈ 16 (kernel) + 8.9 (slim
-rootfs) + 1.35 (CLIs) ≈ **26 MB gz — roughly half the 50 MB target.**
+**Status: S0–S9 code complete + k8s apiserver-lite (Tiers A/B) + client
+unification. Validated 69/69 end-to-end in the nebula microVM on macOS**
+(slimd in a privileged container = real Linux namespaces/overlayfs/cgroup2):
+docker-slim 18/18 (pull/run/logs/exec/stop/rm/inspect -f/volumes/build),
+kubectl-slim+helm-slim 15/15 (apply/get/scale/delete/ConfigMap-env, helm
+template/install/list/uninstall), apiserver-lite 12/12 (discovery/CRUD/CRD/
+watch vs real kubectl), controller bridge 9/9 (real kubectl apply→containers),
+in-pod TLS+ServiceAccount 10/10, apiserver logs/exec subresources 5/5 (stock
+`kubectl logs`/`kubectl exec`). Run `scripts/test-slim.sh`. Measured total
+embed ≈ 16 (kernel) + 8.9 (slim rootfs) + 1.35 (CLIs) ≈ **26 MB gz — roughly
+half the 50 MB target.**
+
+**k8s architecture (one source of truth):** slimd hosts the apiserver-lite on
+`:6443` (TLS, for in-pod operators) **and** a unix socket next to docker.sock
+(plain HTTP, for host clients via nebula's socket proxy). `kubectl-slim` and
+`helm-slim` are now **thin k8s REST clients** over that socket — not the old
+docker-facade — so they gain CRDs, custom resources, watch, and apiserver-served
+logs/exec. The controller bridge reconciles stored workloads into engine
+containers; pod log/exec subresources are served by the apiserver from the
+in-process engine (real WebSocket exec with stdin/resize).
 | **total embed** | **~140 MB+** | **≤ 50 MB, aiming ~35** | — |
 
 ---

@@ -59,6 +59,29 @@ impl Client {
         Client { socket: PathBuf::from("/var/run/docker.sock") }
     }
 
+    /// Discover the slim apiserver-lite unix socket (kubectl-slim/helm-slim).
+    /// slimd serves it next to docker.sock; nebula's socket proxy mirrors it on
+    /// the host. SLIM_KUBE_SOCKET overrides.
+    pub fn discover_kube() -> Client {
+        if let Ok(p) = std::env::var("SLIM_KUBE_SOCKET") {
+            return Client { socket: PathBuf::from(p) };
+        }
+        let candidates = [
+            std::env::var("NEBULA_HOME").ok().map(|h| format!("{h}/run/slim-kube.sock")),
+            Some(format!(
+                "{}/.nebula/run/slim-kube.sock",
+                std::env::var("HOME").unwrap_or_default()
+            )),
+            Some("/var/run/slim-kube.sock".into()),
+        ];
+        for c in candidates.into_iter().flatten() {
+            if std::path::Path::new(&c).exists() {
+                return Client { socket: PathBuf::from(c) };
+            }
+        }
+        Client { socket: PathBuf::from("/var/run/slim-kube.sock") }
+    }
+
     fn connect(&self) -> io::Result<UnixStream> {
         UnixStream::connect(&self.socket).map_err(|e| {
             io::Error::new(

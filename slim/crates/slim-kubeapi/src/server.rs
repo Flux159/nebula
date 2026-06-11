@@ -9,7 +9,29 @@ use crate::store::{Gone, ResourceInfo, SharedStore, WatchEvent};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
+
+/// A served connection. WebSocket exec needs a second, independent reader to
+/// carry stdin/resize frames while the main thread writes output frames;
+/// `dup_reader` provides one where the transport supports it (unix/tcp). TLS
+/// streams can't be cloned, so they return None and exec runs output-only.
+pub trait Conn: Read + Write + Send {
+    fn dup_reader(&self) -> Option<Box<dyn Read + Send>> {
+        None
+    }
+}
+impl Conn for std::net::TcpStream {
+    fn dup_reader(&self) -> Option<Box<dyn Read + Send>> {
+        self.try_clone().ok().map(|s| Box::new(s) as Box<dyn Read + Send>)
+    }
+}
+impl Conn for std::os::unix::net::UnixStream {
+    fn dup_reader(&self) -> Option<Box<dyn Read + Send>> {
+        self.try_clone().ok().map(|s| Box::new(s) as Box<dyn Read + Send>)
+    }
+}
+impl Conn for rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream> {}
 
 pub struct ApiServer {
     pub store: SharedStore,
@@ -57,10 +79,29 @@ impl ApiServer {
         Ok(())
     }
 
+    /// Serve the API over a unix socket (plain HTTP) — for host clients reached
+    /// through nebula's socket proxy, mirroring docker.sock. No TLS/kubeconfig.
+    pub fn serve_unix(self: &Arc<Self>, path: &str) -> std::io::Result<()> {
+        use std::os::unix::net::UnixListener;
+        let _ = std::fs::remove_file(path);
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let listener = UnixListener::bind(path)?;
+        for conn in listener.incoming() {
+            let Ok(conn) = conn else { continue };
+            let me = self.clone();
+            std::thread::spawn(move || {
+                let _ = me.handle_conn(conn);
+            });
+        }
+        Ok(())
+    }
+
     /// Generic over the stream so the same handlers serve plain TCP and TLS
     /// (rustls StreamOwned). The full request is read up front, then handlers
     /// write to the stream as `&mut dyn Write`.
-    pub fn handle_conn<S: Read + Write>(&self, mut stream: S) -> std::io::Result<()> {
+    pub fn handle_conn<S: Conn>(&self, mut stream: S) -> std::io::Result<()> {
         let req = {
             let mut reader = BufReader::new(&mut stream);
             match read_request(&mut reader)? {
@@ -304,7 +345,7 @@ impl ApiServer {
     /// channel frames, then a Status on the error channel. (Interactive -it
     /// needs concurrent stdin over the same TLS stream — see kubectl-slim's
     /// engine-socket path for that.)
-    fn handle_exec_ws<S: Read + Write>(&self, req: &Req, stream: &mut S) -> std::io::Result<()> {
+    fn handle_exec_ws<S: Conn>(&self, req: &Req, stream: &mut S) -> std::io::Result<()> {
         let Some(proxy) = self.proxy.clone() else {
             return write_to(stream, 501, "exec not available (no engine bound)");
         };
@@ -314,6 +355,7 @@ impl ApiServer {
         let pod = seg_after(&segs, "pods").unwrap_or("");
         let cmd: Vec<String> = req.query.iter().filter(|(k, _)| k == "command").map(|(_, v)| v.clone()).collect();
         let tty = req.query.iter().any(|(k, v)| k == "tty" && (v == "true" || v == "1"));
+        let want_stdin = req.query.iter().any(|(k, v)| k == "stdin" && (v == "true" || v == "1"));
         if cmd.is_empty() || pod.is_empty() {
             return write_to(stream, 400, "exec requires a pod and command");
         }
@@ -327,13 +369,39 @@ impl ApiServer {
         stream.write_all(handshake.as_bytes())?;
         stream.flush()?;
 
-        let h = match proxy.exec_start(ns, pod, &cmd, tty, false) {
+        let mut h = match proxy.exec_start(ns, pod, &cmd, tty, want_stdin) {
             Ok(h) => h,
             Err(e) => {
                 let _ = ws_send(stream, 3, exec_status(1, &format!("exec failed: {e}")).as_bytes());
                 return ws_close(stream);
             }
         };
+
+        // Interactive stdin/resize: when the client asked for stdin and the
+        // transport can be split (unix/tcp, not TLS), spawn a reader that maps
+        // the client's channel-0 frames to the exec stdin and channel-4 frames
+        // to a pty resize. Closing the channel drops stdin → EOF to the process.
+        let resize_fd: Option<RawFd> = h.pty.as_ref().map(|f| f.as_raw_fd());
+        let stdin_file: Option<std::fs::File> = if want_stdin {
+            if let Some(pty) = &h.pty {
+                pty.try_clone().ok()
+            } else {
+                h.stdin.take()
+            }
+        } else {
+            None
+        };
+        if want_stdin {
+            match stream.dup_reader() {
+                Some(mut rd) => {
+                    let proxy2 = proxy.clone();
+                    std::thread::spawn(move || {
+                        read_client_frames(&mut rd, stdin_file, resize_fd, proxy2.as_ref());
+                    });
+                }
+                None => drop(stdin_file),
+            }
+        }
 
         // Output readers → mpsc → single frame writer (this thread).
         let (tx, rx) = std::sync::mpsc::channel::<(u8, Vec<u8>)>();
@@ -664,6 +732,100 @@ fn ws_send<S: Write>(stream: &mut S, channel: u8, data: &[u8]) -> std::io::Resul
     frame.extend_from_slice(&payload);
     stream.write_all(&frame)?;
     stream.flush()
+}
+
+/// Read one (possibly masked) WebSocket frame: returns (opcode, payload).
+/// Returns None on EOF. Control-frame fragmentation is not handled (clients
+/// don't fragment the small stdin/control frames we expect).
+fn read_ws_frame<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Option<(u8, Vec<u8>)>> {
+    let mut hdr = [0u8; 2];
+    if !read_full(r, &mut hdr)? {
+        return Ok(None);
+    }
+    let opcode = hdr[0] & 0x0f;
+    let masked = hdr[1] & 0x80 != 0;
+    let mut len = (hdr[1] & 0x7f) as usize;
+    if len == 126 {
+        let mut b = [0u8; 2];
+        r.read_exact(&mut b)?;
+        len = u16::from_be_bytes(b) as usize;
+    } else if len == 127 {
+        let mut b = [0u8; 8];
+        r.read_exact(&mut b)?;
+        len = u64::from_be_bytes(b) as usize;
+    }
+    let mut mask = [0u8; 4];
+    if masked {
+        r.read_exact(&mut mask)?;
+    }
+    let mut payload = vec![0u8; len];
+    r.read_exact(&mut payload)?;
+    if masked {
+        for (i, b) in payload.iter_mut().enumerate() {
+            *b ^= mask[i & 3];
+        }
+    }
+    Ok(Some((opcode, payload)))
+}
+
+fn read_full<R: Read + ?Sized>(r: &mut R, buf: &mut [u8]) -> std::io::Result<bool> {
+    let mut read = 0;
+    while read < buf.len() {
+        match r.read(&mut buf[read..]) {
+            Ok(0) => return Ok(false),
+            Ok(n) => read += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
+}
+
+/// Pump client → exec: channel 0 → stdin, channel 4 → pty resize. Ends on a
+/// close frame or EOF, dropping stdin so the process sees EOF.
+fn read_client_frames(
+    rd: &mut dyn Read,
+    mut stdin: Option<std::fs::File>,
+    resize_fd: Option<RawFd>,
+    proxy: &dyn PodProxy,
+) {
+    loop {
+        match read_ws_frame(rd) {
+            Ok(Some((op, payload))) => {
+                if op == 0x8 {
+                    break; // close
+                }
+                if payload.is_empty() {
+                    continue;
+                }
+                let (channel, data) = (payload[0], &payload[1..]);
+                match channel {
+                    0 => {
+                        if let Some(f) = stdin.as_mut() {
+                            if f.write_all(data).is_err() {
+                                break;
+                            }
+                            let _ = f.flush();
+                        }
+                    }
+                    4 => {
+                        if let Some(fd) = resize_fd {
+                            if let Ok(v) = serde_json::from_slice::<Value>(data) {
+                                let w = v.get("Width").and_then(|x| x.as_u64()).unwrap_or(0) as u16;
+                                let h = v.get("Height").and_then(|x| x.as_u64()).unwrap_or(0) as u16;
+                                if w > 0 && h > 0 {
+                                    proxy.exec_resize(fd, w, h);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => break,
+        }
+    }
+    drop(stdin);
 }
 
 fn ws_close<S: Write>(stream: &mut S) -> std::io::Result<()> {

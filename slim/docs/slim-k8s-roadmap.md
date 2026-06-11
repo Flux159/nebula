@@ -15,13 +15,21 @@
 >   (ca.crt/token/namespace) + `KUBERNETES_SERVICE_*` env + a `kubernetes`
 >   Service, so a client-go in-cluster client connects over CA-verified TLS.
 >   (test/kube-incluster.sh, 10/10 — real in-pod curl lists pods)
+> - **Pod log + exec subresources** served *by the apiserver* from the
+>   in-process engine: `pods/{}/log` streams container logs;
+>   `pods/{}/exec` is a real WebSocket (v4.channel.k8s.io) with stdin/resize, so
+>   stock `kubectl logs`/`kubectl exec [-it]` work against `:6443`.
+>   (test/kube-exec.sh, 5/5)
+> - **kubectl-slim + helm-slim are now thin apiserver clients** — they speak the
+>   real k8s REST API over slimd's apiserver unix socket (served next to
+>   docker.sock), not the docker-facade. One source of truth: they get CRDs,
+>   custom resources, watch, scale, and apiserver-served logs/exec for free.
+>   (test/kube.sh, 15/15)
 >
 > Still genuinely out of scope (the hard tail below): real RBAC enforcement,
-> admission/conversion webhooks, multi-version CRD conversion, kubelet
-> exec/log/port-forward *proxying through the apiserver* (slim does exec/logs
-> via the engine, not the apiserver subresource), and the full operator
-> ecosystem. The pieces below describe what an operator needs; most of the
-> "passive" half is now done.
+> admission/conversion webhooks, multi-version CRD conversion, port-forward, and
+> the full operator ecosystem. The pieces below describe what an operator needs;
+> the "passive" half plus a working controller bridge and logs/exec are now done.
 
 
 

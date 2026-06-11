@@ -180,3 +180,15 @@ CONFIG_MODULE_COMPRESS_NONE=y
 CONFIG_EXPERT=y
 # keep serial early console available for debugging under libkrun later
 CONFIG_LEGACY_PTYS=n
+
+# --- Hyper-V enlightened time (Windows/WHP host) ---
+# The WHP partition advertises the Hyper-V identity + reference counter /
+# reference TSC (synthetic features 0xB8F). Without these configs the guest
+# can't use that clocksource, marks the raw TSC unstable ("running on
+# Hyper-V"), falls back to jiffies, and loses time while idle (observed
+# 30 min drift in 30 min — ticks are lost during HLT). x86-only options;
+# the arm64 merge simply drops them.
+CONFIG_HYPERVISOR_GUEST=y
+CONFIG_PARAVIRT=y
+CONFIG_HYPERV=y
+CONFIG_HYPERV_TIMER=y

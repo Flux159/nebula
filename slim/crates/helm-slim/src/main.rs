@@ -134,7 +134,7 @@ fn cmd_install(ns: &str, args: &[String], upgrade: bool) -> Result<i32, String> 
         return Ok(0);
     }
 
-    let client = Client::discover();
+    let client = Client::discover_kube();
     let helm = Helm::new(&client, namespace);
     let mut out = |s: &str| print!("{s}");
     let skipped = helm.install(&ia.release, &chart, &values, &mut out).map_err(|e| e.to_string())?;
@@ -161,7 +161,7 @@ fn cmd_template(ns: &str, args: &[String]) -> Result<i32, String> {
 
 fn cmd_uninstall(ns: &str, args: &[String]) -> Result<i32, String> {
     let release = args.first().ok_or("uninstall requires a release name")?;
-    let client = Client::discover();
+    let client = Client::discover_kube();
     let helm = Helm::new(&client, ns);
     let mut out = |s: &str| print!("{s}");
     helm.uninstall(release, &mut out).map_err(|e| e.to_string())?;

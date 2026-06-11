@@ -1,5 +1,7 @@
-//! kubectl-slim — a standalone kubectl-compatible client that maps verbs onto
-//! the slim engine via the slim-kube facade. No k3s, no k8s API server.
+//! kubectl-slim — a standalone kubectl-compatible client that talks the real
+//! Kubernetes REST API to the slim apiserver-lite (served by slimd over a unix
+//! socket). CRUD/CRDs/scale/logs/exec all go through the apiserver, which
+//! reconciles workloads into engine containers.
 //!
 //! Nebula's `nebula kubectl` wrapper execs this when the engine is slim.
 //! HOST binary. Supported verbs: apply/delete/get/logs/scale/exec/describe.
@@ -46,7 +48,7 @@ fn run(argv: &[String]) -> i32 {
         usage();
         return 0;
     }
-    let client = Client::discover();
+    let client = Client::discover_kube();
     let facade = Facade::new(&client, &namespace);
     let verb = rest[0].as_str();
     let args = &rest[1..];
@@ -57,8 +59,8 @@ fn run(argv: &[String]) -> i32 {
         "delete" => verb_delete(&facade, args, &mut out),
         "get" => verb_get(&facade, args),
         "scale" => verb_scale(&facade, args, &mut out),
-        "logs" => verb_logs(&client, &facade, args),
-        "exec" => verb_exec(&client, &facade, args),
+        "logs" => verb_logs(&facade, args),
+        "exec" => verb_exec(&facade, args),
         "describe" => verb_describe(&facade, args),
         other => {
             eprintln!("error: unknown command \"{other}\" for kubectl-slim");
@@ -171,31 +173,27 @@ fn verb_scale(facade: &Facade, args: &[String], out: &mut dyn FnMut(&str)) -> Re
         .ok_or("scale requires --replicas")?
         .parse()
         .map_err(|_| "invalid --replicas")?;
-    // accept "deployment/web" or "deployment web"
+    // accept "deployment/web" or "deployment web" (kind defaults to deployment)
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     let target = positional.last().ok_or("scale requires a target")?;
-    let name = target.rsplit('/').next().unwrap_or(target);
-    facade.scale(name, replicas, out).map_err(|e| e.to_string())?;
+    let (kind, name) = match target.split_once('/') {
+        Some((k, n)) => (k, n),
+        None => ("deployments", target.as_str()),
+    };
+    facade.scale(kind, name, replicas, out).map_err(|e| e.to_string())?;
     Ok(0)
 }
 
-fn verb_logs(client: &Client, facade: &Facade, args: &[String]) -> Result<i32, String> {
+fn verb_logs(facade: &Facade, args: &[String]) -> Result<i32, String> {
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     let pod = positional.first().ok_or("logs requires a pod name")?;
-    let container = facade.resolve_container(pod).map_err(|e| e.to_string())?;
-    let mut fwd = vec![container];
-    if args.iter().any(|a| a == "-f" || a == "--follow") {
-        fwd.insert(0, "-f".to_string());
-    }
-    // Reuse the docker-slim logs path against the resolved container.
-    match slim_client::cmds::logs(client, &fwd) {
-        Ok(()) => Ok(0),
-        Err(slim_client::cmds::CmdError::Handled(c)) => Ok(c),
-        Err(slim_client::cmds::CmdError::Msg(m)) => Err(m),
-    }
+    let follow = args.iter().any(|a| a == "-f" || a == "--follow");
+    let mut out = std::io::stdout();
+    facade.logs(pod, follow, &mut out).map_err(|e| e.to_string())?;
+    Ok(0)
 }
 
-fn verb_exec(client: &Client, facade: &Facade, args: &[String]) -> Result<i32, String> {
+fn verb_exec(facade: &Facade, args: &[String]) -> Result<i32, String> {
     // kubectl exec [-it] POD [-c container] -- cmd...
     let sep = args.iter().position(|a| a == "--");
     let (head, cmd): (&[String], Vec<String>) = match sep {
@@ -204,23 +202,12 @@ fn verb_exec(client: &Client, facade: &Facade, args: &[String]) -> Result<i32, S
     };
     let positional: Vec<&String> = head.iter().filter(|a| !a.starts_with('-')).collect();
     let pod = positional.first().ok_or("exec requires a pod name")?;
-    let container = facade.resolve_container(pod).map_err(|e| e.to_string())?;
+    if cmd.is_empty() {
+        return Err("exec requires a command after --".into());
+    }
     let interactive = head.iter().any(|a| a == "-i" || a == "-it" || a == "-ti" || a == "--stdin");
     let tty = head.iter().any(|a| a == "-t" || a == "-it" || a == "-ti" || a == "--tty");
-    let mut fwd = Vec::new();
-    if interactive {
-        fwd.push("-i".to_string());
-    }
-    if tty {
-        fwd.push("-t".to_string());
-    }
-    fwd.push(container);
-    fwd.extend(cmd);
-    match slim_client::cmds::exec(client, &fwd) {
-        Ok(()) => Ok(0),
-        Err(slim_client::cmds::CmdError::Handled(c)) => Ok(c),
-        Err(slim_client::cmds::CmdError::Msg(m)) => Err(m),
-    }
+    facade.exec(pod, &cmd, interactive, tty).map_err(|e| e.to_string())
 }
 
 fn verb_describe(facade: &Facade, args: &[String]) -> Result<i32, String> {
@@ -270,6 +257,8 @@ fn usage() {
         \x20 logs [-f] POD         Stream a pod's logs\n\
         \x20 exec [-it] POD -- CMD Run a command in a pod\n\
         \x20 describe KIND [NAME]  Lite describe\n\n\
-        Unsupported (use the full k3s tier): CRDs, operators, RBAC, the k8s API.\n"
+        Talks the real k8s REST API to the slim apiserver-lite: CRDs, custom\n\
+        resources, operators (watch), and any registered kind work. RBAC is not\n\
+        enforced (the VM is the boundary).\n"
     );
 }

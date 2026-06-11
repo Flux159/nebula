@@ -14,6 +14,9 @@ H=/slim/helm-slim
 /slim/slimd >/tmp/slimd.log 2>&1 &
 for i in $(seq 1 50); do [ -S /var/run/docker.sock ] && break; sleep 0.1; done
 [ -S /var/run/docker.sock ] && ok "slimd up" || { bad "slimd up"; cat /tmp/slimd.log; exit 1; }
+# kubectl-slim/helm-slim talk the k8s REST API over the apiserver unix socket.
+for i in $(seq 1 50); do [ -S /var/run/slim-kube.sock ] && break; sleep 0.1; done
+[ -S /var/run/slim-kube.sock ] && ok "kube apiserver up" || { bad "kube apiserver up"; cat /tmp/slimd.log; exit 1; }
 
 # Pre-pull so apply is fast/offline-ish.
 /slim/docker-slim pull alpine:3.19 >/dev/null 2>&1
@@ -64,8 +67,14 @@ $K exec web -- echo from-kube-exec >/tmp/o 2>&1 && grep -q "from-kube-exec" /tmp
 
 echo "== kubectl scale =="
 $K scale --replicas=3 deployment/web >/tmp/o 2>&1 && ok "scale cmd" || { bad "scale"; cat /tmp/o; }
-sleep 1
-$K get pods >/tmp/o 2>&1; PODS=$(grep -c "web-" /tmp/o); [ "$PODS" -ge 3 ] && ok "scaled to 3" || { bad "scaled (got $PODS)"; cat /tmp/o; }
+# Scale now updates the apiserver object; the controller bridge reconciles it
+# into a new container on its next tick (~1s), so poll rather than sleep once.
+PODS=0
+for i in $(seq 1 15); do
+  $K get pods >/tmp/o 2>&1; PODS=$(grep -c "web-" /tmp/o)
+  [ "$PODS" -ge 3 ] && break; sleep 1
+done
+[ "$PODS" -ge 3 ] && ok "scaled to 3" || { bad "scaled (got $PODS)"; cat /tmp/o; }
 
 echo "== kubectl delete =="
 $K delete -f /tmp/app.yaml >/tmp/o 2>&1 && ok "delete" || { bad "delete"; cat /tmp/o; }

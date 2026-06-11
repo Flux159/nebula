@@ -29,14 +29,16 @@ docker rm -f slim-bridge >/dev/null 2>&1
 docker run -d --privileged -p 16443:6443 -v "$STAGE:/slim" --name slim-bridge alpine:3.19 sh -c \
   'apk add --no-cache iptables ip6tables iproute2 >/dev/null 2>&1; mkdir -p /var/lib/nebula && mount -t tmpfs tmpfs /var/lib/nebula; export SLIM_DATA=/var/lib/nebula/slim SLIM_RUN_DIR=/var/lib/nebula/run SLIM_KUBE_API_ADDR=0.0.0.0:6443; exec /slim/slimd' >/dev/null 2>&1
 trap 'docker rm -f slim-bridge >/dev/null 2>&1' EXIT
-for i in $(seq 1 40); do curl -s http://localhost:16443/version >/dev/null 2>&1 && break; sleep 1; done
+for i in $(seq 1 40); do curl -sk https://localhost:16443/version >/dev/null 2>&1 && break; sleep 1; done
 
+# The bridge apiserver serves TLS (in-cluster operators always speak HTTPS);
+# skip verification and pass a dummy token (kubectl needs a user to not prompt).
 export KUBECONFIG="$STAGE/kubeconfig"
-printf 'apiVersion: v1\nkind: Config\nclusters: [{name: s, cluster: {server: "http://localhost:16443"}}]\ncontexts: [{name: s, context: {cluster: s, user: s}}]\ncurrent-context: s\nusers: [{name: s, user: {}}]\n' > "$KUBECONFIG"
+printf 'apiVersion: v1\nkind: Config\nclusters: [{name: s, cluster: {server: "https://localhost:16443", insecure-skip-tls-verify: true}}]\ncontexts: [{name: s, context: {cluster: s, user: s}}]\ncurrent-context: s\nusers: [{name: s, user: {token: t}}]\n' > "$KUBECONFIG"
 KC="kubectl --cache-dir=$STAGE/kc"
 psnames(){ docker exec slim-bridge sh -c '/slim/docker-slim ps --format "{{.Names}}"' 2>/dev/null | tr -d '"/[]' | sort; }
 
-curl -s http://localhost:16443/version | grep -q gitVersion && ok "apiserver reachable" || bad apiserver "down"
+curl -sk https://localhost:16443/version | grep -q gitVersion && ok "apiserver reachable" || bad apiserver "down"
 O=$($KC apply -f "$STAGE/dep.yaml" 2>&1); echo "$O" | grep -q "deployment.apps/web created" && ok "kubectl apply deployment (no flags)" || bad apply "$O"
 sleep 5
 N=$(psnames | grep -c "default_web-"); [ "$N" -eq 2 ] && ok "deployment spawned 2 real containers" || bad spawn "got $N: $(psnames)"

@@ -74,6 +74,31 @@ pub fn start(engine: &EngineRef, api_addr: &str) -> SharedStore {
         }
     };
 
+    // Also serve the apiserver on a unix socket (plain HTTP) so host-side
+    // kubectl-slim/helm-slim reach it through nebula's socket proxy (mirroring
+    // docker.sock); kubectl-slim inside the vessel connects directly. This is
+    // the "one source of truth" path — slim-kube is a thin client over it.
+    let kube_sock = std::env::var("SLIM_KUBE_SOCKET").unwrap_or_else(|_| {
+        std::env::var("SLIM_SOCKET")
+            .ok()
+            .and_then(|s| {
+                std::path::Path::new(&s)
+                    .parent()
+                    .map(|p| p.join("slim-kube.sock").to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "/var/run/slim-kube.sock".to_string())
+    });
+    {
+        let api2 = api.clone();
+        let sock = kube_sock.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = api2.serve_unix(&sock) {
+                eprintln!("slimd: kube apiserver (unix {sock}) stopped: {e}");
+            }
+        });
+        println!("slimd: kube apiserver-lite unix socket at {kube_sock}");
+    }
+
     let ctx = BridgeCtx {
         ca_pem,
         sa_root: engine.paths.data.join("kube-sa"),

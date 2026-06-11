@@ -1,33 +1,23 @@
-//! slim-kube: a Kubernetes facade that maps real k8s YAML onto slim engine
-//! containers via the Docker Engine API — NO control plane, NO k8s wire
-//! protocol. Used by the standalone `kubectl-slim` binary.
+//! slim-kube: a thin Kubernetes client for the slim apiserver-lite.
 //!
-//! Mapping:
-//!   Deployment  → N restart-supervised containers `<name>-<i>`
-//!   Pod         → one container `<name>`
-//!   Job         → run-to-completion container (restart=no) + backoffLimit
-//!   Service     → published ports (NodePort/LoadBalancer) + DNS via pod
-//!                 aliases (ClusterIP resolves by service name)
-//!   ConfigMap   → env / (mounted files: TODO) supplied to selecting workloads
-//!   Secret      → same as ConfigMap (base64 values decoded)
+//! Talks the *real* Kubernetes REST API over the kube unix socket that slimd
+//! serves next to docker.sock (see slimd::kube_bridge). This is the one source
+//! of truth: CRUD, discovery, CRDs, watch, scale, logs and exec all go through
+//! the apiserver, which reconciles workloads into engine containers. Used by
+//! the standalone `kubectl-slim` and `helm-slim` binaries.
 //!
-//! Identity is carried in container labels (io.nebula.kube.*) so get/delete/
-//! scale/logs can reconstruct the k8s view from the engine.
+//! Earlier this crate mapped YAML straight onto docker containers; routing
+//! through the apiserver means kubectl-slim now also sees CRDs/operators and a
+//! consistent object view rather than a reconstructed-from-labels one.
 
 pub mod model;
+pub mod ws;
 
-use model::*;
+use model::KubeObject;
 use serde_json::{json, Value};
 use slim_client::http::{ApiError, Client};
-use std::collections::BTreeMap;
-
-pub const LBL_MANAGED: &str = "io.nebula.kube.managed";
-pub const LBL_KIND: &str = "io.nebula.kube.kind";
-pub const LBL_NAME: &str = "io.nebula.kube.name";
-pub const LBL_NS: &str = "io.nebula.kube.namespace";
-pub const LBL_APP: &str = "io.nebula.kube.app";
-
-const V: &str = "/v1.43";
+use std::cell::RefCell;
+use std::io::Write;
 
 #[derive(Debug)]
 pub struct KubeError(pub String);
@@ -52,378 +42,385 @@ fn ke(s: impl Into<String>) -> KubeError {
 }
 pub type KubeResult<T> = Result<T, KubeError>;
 
+/// A discovered API resource (group/version/plural + scope), used to build
+/// REST paths and resolve user-supplied kind/short names.
+#[derive(Clone)]
+struct Res {
+    group: String,
+    version: String,
+    resource: String, // plural
+    singular: String,
+    kind: String,
+    namespaced: bool,
+    short_names: Vec<String>,
+}
+
+impl Res {
+    fn gv_path(&self) -> String {
+        if self.group.is_empty() {
+            format!("/api/{}", self.version)
+        } else {
+            format!("/apis/{}/{}", self.group, self.version)
+        }
+    }
+    fn collection_path(&self, ns: &str) -> String {
+        if self.namespaced && !ns.is_empty() {
+            format!("{}/namespaces/{}/{}", self.gv_path(), ns, self.resource)
+        } else {
+            format!("{}/{}", self.gv_path(), self.resource)
+        }
+    }
+    fn object_path(&self, ns: &str, name: &str) -> String {
+        format!("{}/{}", self.collection_path(ns), name)
+    }
+    fn display(&self) -> &str {
+        if !self.singular.is_empty() {
+            &self.singular
+        } else {
+            &self.kind
+        }
+    }
+}
+
 pub struct Facade<'a> {
     pub client: &'a Client,
     pub namespace: String,
+    disco: RefCell<Option<Vec<Res>>>,
 }
 
 impl<'a> Facade<'a> {
     pub fn new(client: &'a Client, namespace: &str) -> Self {
-        Facade { client, namespace: if namespace.is_empty() { "default".into() } else { namespace.into() } }
+        Facade {
+            client,
+            namespace: if namespace.is_empty() { "default".into() } else { namespace.into() },
+            disco: RefCell::new(None),
+        }
     }
 
-    // ---------- apply ----------
+    // ---------- discovery ----------
 
-    /// Apply a multi-doc manifest. Returns the kinds it skipped (unsupported),
-    /// so the caller can decide whether to treat that as an error (--strict).
-    pub fn apply_yaml(&self, yaml: &str, out: &mut dyn FnMut(&str)) -> KubeResult<Vec<String>> {
-        let mut skipped = Vec::new();
-        let docs = parse_docs(yaml)?;
-        // Pass 1: index config sources + services.
-        let mut configmaps: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-        let mut secrets: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-        let mut services: Vec<Service> = Vec::new();
-        let mut workloads: Vec<Value> = Vec::new();
-        for d in &docs {
-            match kind_of(d).as_str() {
-                "ConfigMap" => {
-                    configmaps.insert(name_of(d), string_map(d.get("data")));
-                }
-                "Secret" => {
-                    let mut m = string_map(d.get("data"));
-                    for v in m.values_mut() {
-                        if let Some(dec) = b64_decode_str(v) {
-                            *v = dec;
+    fn discovery(&self) -> KubeResult<Vec<Res>> {
+        if let Some(d) = self.disco.borrow().as_ref() {
+            return Ok(d.clone());
+        }
+        let mut out = self.fetch_reslist("/api/v1").unwrap_or_default();
+        if let Ok(groups) = self.client.json::<Value>("GET", "/apis", None) {
+            for g in groups.get("groups").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+                for gv in g.get("versions").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+                    if let Some(gvs) = gv.get("groupVersion").and_then(|v| v.as_str()) {
+                        if let Ok(rs) = self.fetch_reslist(&format!("/apis/{gvs}")) {
+                            out.extend(rs);
                         }
                     }
-                    // stringData is plaintext.
-                    for (k, val) in string_map(d.get("stringData")) {
-                        m.insert(k, val);
-                    }
-                    secrets.insert(name_of(d), m);
-                }
-                "Service" => services.push(Service::parse(d)),
-                "Deployment" | "Pod" | "Job" | "ReplicaSet" | "DaemonSet" | "StatefulSet" => {
-                    workloads.push(d.clone())
-                }
-                "" => {}
-                other => {
-                    out(&format!("warning: kind {other} is not supported by slim — skipped\n"));
-                    skipped.push(format!("{}/{}", other, name_of(d)));
                 }
             }
         }
-        // Pass 2: create workloads with env + service ports resolved.
-        for w in &workloads {
-            self.apply_workload(w, &configmaps, &secrets, &services, out)?;
+        if out.is_empty() {
+            return Err(ke("could not reach the slim apiserver (is the engine running?)"));
         }
-        // Services with no matching workload yet: still acknowledge.
-        for s in &services {
-            out(&format!("service/{} created\n", s.name));
-        }
-        Ok(skipped)
+        *self.disco.borrow_mut() = Some(out.clone());
+        Ok(out)
     }
 
-    fn apply_workload(
-        &self,
-        d: &Value,
-        configmaps: &BTreeMap<String, BTreeMap<String, String>>,
-        secrets: &BTreeMap<String, BTreeMap<String, String>>,
-        services: &[Service],
-        out: &mut dyn FnMut(&str),
-    ) -> KubeResult<()> {
-        let kind = kind_of(d);
-        let name = name_of(d);
-        let pod_spec = match kind.as_str() {
-            "Pod" => d.get("spec").cloned().unwrap_or(Value::Null),
-            _ => d.pointer("/spec/template/spec").cloned().unwrap_or(Value::Null),
+    fn fetch_reslist(&self, path: &str) -> KubeResult<Vec<Res>> {
+        let v: Value = self.client.json("GET", path, None)?;
+        let gv = v.get("groupVersion").and_then(|x| x.as_str()).unwrap_or("");
+        let (group, version) = match gv.split_once('/') {
+            Some((g, ver)) => (g.to_string(), ver.to_string()),
+            None => (String::new(), gv.to_string()),
         };
-        let app = d
-            .pointer("/spec/selector/matchLabels/app")
-            .and_then(|v| v.as_str())
-            .or_else(|| d.pointer("/metadata/labels/app").and_then(|v| v.as_str()))
-            .unwrap_or(&name)
-            .to_string();
-        let replicas = if kind == "Deployment" || kind == "ReplicaSet" || kind == "StatefulSet" {
-            d.pointer("/spec/replicas").and_then(|v| v.as_i64()).unwrap_or(1)
-        } else {
-            1
-        };
-        let restart = if kind == "Job" { "no" } else { "always" };
-
-        // Ports published by any Service selecting this app.
-        let mut port_bindings = serde_json::Map::new();
-        let mut exposed = serde_json::Map::new();
-        for svc in services {
-            if svc.selects(&app, &name) {
-                for p in &svc.ports {
-                    let target = p.target_port.unwrap_or(p.port);
-                    let key = format!("{target}/tcp");
-                    exposed.insert(key.clone(), json!({}));
-                    let host = match svc.svc_type.as_str() {
-                        "NodePort" | "LoadBalancer" => p.node_port.unwrap_or(p.port),
-                        _ => p.port,
-                    };
-                    port_bindings.insert(key, json!([{"HostIp": "", "HostPort": host.to_string()}]));
-                }
-            }
-        }
-
-        let containers = pod_spec.get("containers").and_then(|c| c.as_array()).cloned().unwrap_or_default();
-        let main = containers.first().ok_or_else(|| ke(format!("{kind}/{name}: no containers")))?;
-        let image = main.get("image").and_then(|v| v.as_str()).ok_or_else(|| ke("container missing image"))?.to_string();
-        let env = self.resolve_env(main, configmaps, secrets)?;
-        let cmd = strs(main.get("args"));
-        let entrypoint = strs(main.get("command"));
-
-        // Volumes from emptyDir/hostPath (subset) + configMap mounts: TODO.
-        let _ = pod_spec.get("volumes");
-
-        // Pull image up front (engine create requires it locally).
-        let _ = self.client.action("POST", &format!("{V}/images/create?fromImage={}", url(&split_ref(&image).0)), None);
-        self.pull(&image, out);
-
-        for i in 0..replicas {
-            let cname = if kind == "Pod" { name.clone() } else { format!("{name}-{i}") };
-            let mut labels = serde_json::Map::new();
-            labels.insert(LBL_MANAGED.into(), json!("true"));
-            labels.insert(LBL_KIND.into(), json!(kind));
-            labels.insert(LBL_NAME.into(), json!(name));
-            labels.insert(LBL_NS.into(), json!(self.namespace));
-            labels.insert(LBL_APP.into(), json!(app));
-
-            let mut host_config = json!({
-                "RestartPolicy": {"Name": restart, "MaximumRetryCount": 0},
-                "NetworkMode": "bridge",
-            });
-            if !port_bindings.is_empty() && i == 0 {
-                // Publish host ports on the first replica only (avoids collisions).
-                host_config["PortBindings"] = Value::Object(port_bindings.clone());
-            }
-            let mut config = json!({
-                "Image": image,
-                "Env": env,
-                "Labels": labels,
-                "ExposedPorts": exposed,
-                "HostConfig": host_config,
-                "NetworkingConfig": {"EndpointsConfig": {"bridge": {"Aliases": [name, app]}}},
-            });
-            if !cmd.is_empty() {
-                config["Cmd"] = json!(cmd);
-            }
-            if !entrypoint.is_empty() {
-                config["Entrypoint"] = json!(entrypoint);
-            }
-
-            // Remove an existing container of the same name (apply = upsert).
-            let _ = self.client.action("DELETE", &format!("{V}/containers/{cname}?force=true"), None);
-            let created: slim_api::container::ContainerCreateResponse = self
-                .client
-                .json("POST", &format!("{V}/containers/create?name={cname}"), Some(&config))
-                .map_err(|e| ke(format!("{kind}/{name}: {}", e.message)))?;
-            self.client.action("POST", &format!("{V}/containers/{}/start", created.id), None)?;
-        }
-        out(&format!("{}/{} created\n", kind.to_lowercase(), name));
-        Ok(())
-    }
-
-    fn resolve_env(
-        &self,
-        container: &Value,
-        configmaps: &BTreeMap<String, BTreeMap<String, String>>,
-        secrets: &BTreeMap<String, BTreeMap<String, String>>,
-    ) -> KubeResult<Vec<String>> {
-        let mut env = Vec::new();
-        // envFrom
-        for ef in container.get("envFrom").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
-            if let Some(n) = ef.pointer("/configMapRef/name").and_then(|v| v.as_str()) {
-                if let Some(m) = configmaps.get(n) {
-                    for (k, val) in m {
-                        env.push(format!("{k}={val}"));
-                    }
-                }
-            }
-            if let Some(n) = ef.pointer("/secretRef/name").and_then(|v| v.as_str()) {
-                if let Some(m) = secrets.get(n) {
-                    for (k, val) in m {
-                        env.push(format!("{k}={val}"));
-                    }
-                }
-            }
-        }
-        // env
-        for e in container.get("env").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
-            let name = e.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if name.is_empty() {
-                continue;
-            }
-            if let Some(val) = e.get("value").and_then(|v| v.as_str()) {
-                env.push(format!("{name}={val}"));
-            } else if let Some(r) = e.get("valueFrom") {
-                if let (Some(cm), Some(key)) = (
-                    r.pointer("/configMapKeyRef/name").and_then(|v| v.as_str()),
-                    r.pointer("/configMapKeyRef/key").and_then(|v| v.as_str()),
-                ) {
-                    if let Some(v) = configmaps.get(cm).and_then(|m| m.get(key)) {
-                        env.push(format!("{name}={v}"));
-                    }
-                } else if let (Some(sec), Some(key)) = (
-                    r.pointer("/secretKeyRef/name").and_then(|v| v.as_str()),
-                    r.pointer("/secretKeyRef/key").and_then(|v| v.as_str()),
-                ) {
-                    if let Some(v) = secrets.get(sec).and_then(|m| m.get(key)) {
-                        env.push(format!("{name}={v}"));
-                    }
-                }
-            }
-        }
-        Ok(env)
-    }
-
-    fn pull(&self, image: &str, out: &mut dyn FnMut(&str)) {
-        let (repo, tag) = split_ref(image);
-        let path = format!("{V}/images/create?fromImage={}&tag={}", url(&repo), url(&tag));
-        if let Ok(mut resp) = self.client.request("POST", &path, &[], Some(b"")) {
-            let _ = resp.stream_body(|_| {});
-        }
-        let _ = out;
-    }
-
-    // ---------- get ----------
-
-    pub fn get(&self, kind: &str, name: Option<&str>) -> KubeResult<Vec<KubeObject>> {
-        let want = normalize_kind(kind);
-        // Pods are the individual containers (every workload's members), the
-        // way `kubectl get pods` shows the Deployment's pods, not the
-        // Deployment.
-        if want == "Pod" {
-            let mut pods = self.list_pods()?;
-            if let Some(n) = name {
-                pods.retain(|p| p.name == n || p.name.starts_with(&format!("{n}-")));
-            }
-            return Ok(pods);
-        }
-        let all = self.list_managed()?;
-        Ok(all
-            .into_iter()
-            .filter(|o| (want.is_empty() || o.kind.eq_ignore_ascii_case(&want)) && name.map(|n| o.name == n).unwrap_or(true))
-            .collect())
-    }
-
-    fn list_pods(&self) -> KubeResult<Vec<KubeObject>> {
-        let filters = serde_json::to_string(&json!({"label": [format!("{LBL_MANAGED}=true")]})).unwrap();
-        let path = format!("{V}/containers/json?all=true&filters={}", url(&filters));
-        let conts: Vec<slim_api::container::ContainerSummary> = self.client.json("GET", &path, None)?;
-        Ok(conts
-            .into_iter()
-            .map(|c| {
-                let pod = c.names.first().cloned().unwrap_or_default().trim_start_matches('/').to_string();
-                let running = c.state == "running";
-                KubeObject {
-                    kind: "Pod".into(),
-                    name: pod.clone(),
-                    ready: if running { "1/1".into() } else { "0/1".into() },
-                    status: if running { "Running".into() } else { "Pending".into() },
-                    restarts: 0,
-                    members: vec![pod],
-                }
-            })
-            .collect())
-    }
-
-    /// Reconstruct k8s objects from container labels.
-    fn list_managed(&self) -> KubeResult<Vec<KubeObject>> {
-        let filters = serde_json::to_string(&json!({"label": [format!("{LBL_MANAGED}=true")]})).unwrap();
-        let path = format!("{V}/containers/json?all=true&filters={}", url(&filters));
-        let conts: Vec<slim_api::container::ContainerSummary> = self.client.json("GET", &path, None)?;
-        // Group containers into workloads by (kind,name).
-        let mut groups: BTreeMap<(String, String), Vec<slim_api::container::ContainerSummary>> = BTreeMap::new();
-        for c in conts {
-            let kind = c.labels.get(LBL_KIND).cloned().unwrap_or_default();
-            let name = c.labels.get(LBL_NAME).cloned().unwrap_or_default();
-            groups.entry((kind, name)).or_default().push(c);
-        }
         let mut out = Vec::new();
-        for ((kind, name), members) in groups {
-            let total = members.len();
-            let ready = members.iter().filter(|c| c.state == "running").count();
-            let restarts = 0; // RestartCount not in summary; left at 0 (lite)
-            out.push(KubeObject {
-                kind: if kind == "Pod" { "Pod".into() } else { kind.clone() },
-                name,
-                ready: format!("{ready}/{total}"),
-                status: if ready == total { "Running".into() } else { "Pending".into() },
-                restarts,
-                members: members.into_iter().map(|c| c.names.first().cloned().unwrap_or_default().trim_start_matches('/').to_string()).collect(),
+        for r in v.get("resources").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+            let name = r.get("name").and_then(|x| x.as_str()).unwrap_or("");
+            if name.is_empty() || name.contains('/') {
+                continue; // skip subresources (pods/log, etc.)
+            }
+            out.push(Res {
+                group: group.clone(),
+                version: version.clone(),
+                resource: name.to_string(),
+                singular: r.get("singularName").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                kind: r.get("kind").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                namespaced: r.get("namespaced").and_then(|x| x.as_bool()).unwrap_or(true),
+                short_names: r
+                    .get("shortNames")
+                    .and_then(|x| x.as_array())
+                    .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                    .unwrap_or_default(),
             });
         }
         Ok(out)
     }
 
-    // ---------- delete ----------
-
-    pub fn delete(&self, kind: &str, name: &str, out: &mut dyn FnMut(&str)) -> KubeResult<()> {
-        let objs = self.get(kind, Some(name))?;
-        if objs.is_empty() {
-            return Err(ke(format!("{} \"{name}\" not found", normalize_kind(kind).to_lowercase())));
-        }
-        for o in &objs {
-            for member in &o.members {
-                let _ = self.client.action("DELETE", &format!("{V}/containers/{member}?force=true&v=true"), None);
+    /// Resolve a user kind string (plural, singular, Kind, short name, or the
+    /// `kind.group` form) to a discovered resource.
+    fn resolve(&self, kind: &str) -> KubeResult<Res> {
+        let k = kind.to_lowercase();
+        let base = k.split('.').next().unwrap_or(&k);
+        let d = self.discovery()?;
+        for r in &d {
+            if r.resource == base
+                || r.singular == base
+                || r.kind.to_lowercase() == base
+                || r.short_names.iter().any(|s| s.to_lowercase() == base)
+            {
+                return Ok(r.clone());
             }
-            out(&format!("{}/{} deleted\n", o.kind.to_lowercase(), o.name));
         }
+        // tolerate a trailing plural 's' the discovery names don't carry
+        let dep = base.strip_suffix('s').unwrap_or(base);
+        for r in &d {
+            if r.singular == dep || r.kind.to_lowercase() == dep {
+                return Ok(r.clone());
+            }
+        }
+        Err(ke(format!("the server doesn't have a resource type \"{kind}\"")))
+    }
+
+    fn obj_ns(&self, d: &Value, res: &Res) -> String {
+        if !res.namespaced {
+            return String::new();
+        }
+        d.pointer("/metadata/namespace")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| self.namespace.clone())
+    }
+
+    // ---------- apply ----------
+
+    /// Apply a multi-doc manifest. CRDs are applied first so their types
+    /// register before any custom resources reference them. Returns the kinds
+    /// the apiserver doesn't know (so `--strict` can fail on them).
+    pub fn apply_yaml(&self, yaml: &str, out: &mut dyn FnMut(&str)) -> KubeResult<Vec<String>> {
+        let docs = parse_docs(yaml)?;
+        let (mut crds, mut rest) = (Vec::new(), Vec::new());
+        for d in docs {
+            if kind_of(&d) == "CustomResourceDefinition" {
+                crds.push(d);
+            } else {
+                rest.push(d);
+            }
+        }
+        for d in &crds {
+            self.apply_one(d, out)?;
+        }
+        if !crds.is_empty() {
+            self.disco.borrow_mut().take(); // bust discovery cache so CRs resolve
+        }
+        let mut skipped = Vec::new();
+        for d in &rest {
+            match self.apply_one(d, out) {
+                Ok(()) => {}
+                Err(KubeError(m)) if m.starts_with("UNSUPPORTED:") => {
+                    let kn = m.trim_start_matches("UNSUPPORTED:").to_string();
+                    out(&format!("warning: {kn} — kind unknown to the slim apiserver, skipped\n"));
+                    skipped.push(kn);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(skipped)
+    }
+
+    fn apply_one(&self, d: &Value, out: &mut dyn FnMut(&str)) -> KubeResult<()> {
+        let kind = kind_of(d);
+        if kind.is_empty() {
+            return Ok(());
+        }
+        let name = name_of(d);
+        if name.is_empty() {
+            return Err(ke(format!("{kind}: metadata.name is required")));
+        }
+        let res = match self.resolve(&kind) {
+            Ok(r) => r,
+            Err(_) => return Err(KubeError(format!("UNSUPPORTED:{kind}/{name}"))),
+        };
+        let ns = self.obj_ns(d, &res);
+        let obj_path = res.object_path(&ns, &name);
+        let mut body = d.clone();
+        let action = match self.client.json::<Value>("GET", &obj_path, None) {
+            Ok(existing) => {
+                // carry resourceVersion so the update isn't rejected as stale
+                if let Some(rv) = existing.pointer("/metadata/resourceVersion").cloned() {
+                    ensure_meta(&mut body).insert("resourceVersion".into(), rv);
+                }
+                self.client.json::<Value>("PUT", &obj_path, Some(&body))?;
+                "configured"
+            }
+            Err(_) => {
+                self.client.json::<Value>("POST", &res.collection_path(&ns), Some(&body))?;
+                "created"
+            }
+        };
+        out(&format!("{}/{} {}\n", res.display(), name, action));
         Ok(())
     }
 
     pub fn delete_yaml(&self, yaml: &str, out: &mut dyn FnMut(&str)) -> KubeResult<()> {
         for d in parse_docs(yaml)? {
-            let kind = kind_of(d_ref(&d));
-            let name = name_of(d_ref(&d));
-            if matches!(kind.as_str(), "Deployment" | "Pod" | "Job" | "ReplicaSet" | "StatefulSet" | "DaemonSet") {
-                let _ = self.delete(&kind, &name, out);
-            } else if !kind.is_empty() {
-                out(&format!("{}/{} deleted\n", kind.to_lowercase(), name));
+            let kind = kind_of(&d);
+            let name = name_of(&d);
+            if kind.is_empty() || name.is_empty() {
+                continue;
+            }
+            let Ok(res) = self.resolve(&kind) else { continue };
+            let ns = self.obj_ns(&d, &res);
+            match self.client.json::<Value>("DELETE", &res.object_path(&ns, &name), None) {
+                Ok(_) => out(&format!("{}/{} deleted\n", res.display(), name)),
+                Err(e) if e.status == 404 => {}
+                Err(e) => return Err(e.into()),
             }
         }
+        Ok(())
+    }
+
+    // ---------- get / describe ----------
+
+    pub fn get(&self, kind: &str, name: Option<&str>) -> KubeResult<Vec<KubeObject>> {
+        let res = self.resolve(kind)?;
+        let ns = if res.namespaced { self.namespace.clone() } else { String::new() };
+        let mut rows = Vec::new();
+        match name {
+            Some(n) => {
+                let obj: Value = self.client.json("GET", &res.object_path(&ns, n), None).map_err(|e| {
+                    if e.status == 404 {
+                        ke(format!("{} \"{n}\" not found", res.display()))
+                    } else {
+                        e.into()
+                    }
+                })?;
+                rows.push(obj_to_kube(&res, &obj));
+            }
+            None => {
+                let list: Value = self.client.json("GET", &res.collection_path(&ns), None)?;
+                for item in list.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+                    rows.push(obj_to_kube(&res, &item));
+                }
+            }
+        }
+        Ok(rows)
+    }
+
+    pub fn delete(&self, kind: &str, name: &str, out: &mut dyn FnMut(&str)) -> KubeResult<()> {
+        let res = self.resolve(kind)?;
+        let ns = if res.namespaced { self.namespace.clone() } else { String::new() };
+        self.client.json::<Value>("DELETE", &res.object_path(&ns, name), None).map_err(|e| {
+            if e.status == 404 {
+                ke(format!("{} \"{name}\" not found", res.display()))
+            } else {
+                e.into()
+            }
+        })?;
+        out(&format!("{}/{} deleted\n", res.display(), name));
         Ok(())
     }
 
     // ---------- scale ----------
 
-    pub fn scale(&self, name: &str, replicas: i64, out: &mut dyn FnMut(&str)) -> KubeResult<()> {
-        let objs = self.get("deployment", Some(name))?;
-        let obj = objs.first().ok_or_else(|| ke(format!("deployments.apps \"{name}\" not found")))?;
-        let current = obj.members.len() as i64;
-        if replicas > current {
-            // Clone replica 0's config into new members.
-            let base = format!("{name}-0");
-            let inspect: slim_api::container::ContainerInspect =
-                self.client.json("GET", &format!("{V}/containers/{base}/json"), None)?;
-            for i in current..replicas {
-                let cname = format!("{name}-{i}");
-                let mut config = serde_json::to_value(&inspect.config).unwrap_or(Value::Null);
-                config["HostConfig"] = serde_json::to_value(&inspect.host_config).unwrap_or(Value::Null);
-                // Drop published ports on scaled replicas to avoid collisions.
-                config["HostConfig"]["PortBindings"] = json!({});
-                let created: slim_api::container::ContainerCreateResponse =
-                    self.client.json("POST", &format!("{V}/containers/create?name={cname}"), Some(&config))?;
-                self.client.action("POST", &format!("{V}/containers/{}/start", created.id), None)?;
+    /// Scale a workload via the `/scale` subresource. `kind` defaults to
+    /// deployments when empty (kubectl `scale deployment/x`).
+    pub fn scale(&self, kind: &str, name: &str, replicas: i64, out: &mut dyn FnMut(&str)) -> KubeResult<()> {
+        let res = self.resolve(if kind.is_empty() { "deployments" } else { kind })?;
+        let ns = self.namespace.clone();
+        let scale_path = format!("{}/scale", res.object_path(&ns, name));
+        let body = json!({
+            "apiVersion": "autoscaling/v1",
+            "kind": "Scale",
+            "metadata": {"name": name, "namespace": ns},
+            "spec": {"replicas": replicas},
+        });
+        self.client.json::<Value>("PUT", &scale_path, Some(&body)).map_err(|e| {
+            if e.status == 404 {
+                ke(format!("{} \"{name}\" not found", res.display()))
+            } else {
+                e.into()
             }
-        } else {
-            for i in replicas..current {
-                let cname = format!("{name}-{i}");
-                let _ = self.client.action("DELETE", &format!("{V}/containers/{cname}?force=true&v=true"), None);
-            }
-        }
-        out(&format!("deployment.apps/{name} scaled\n"));
+        })?;
+        out(&format!("{}/{} scaled\n", res.display(), name));
         Ok(())
     }
 
     // ---------- logs / exec ----------
 
-    /// Resolve a pod-ish name to an engine container (exact, or first replica
-    /// of a deployment).
-    pub fn resolve_container(&self, name: &str) -> KubeResult<String> {
-        // exact container?
-        if self.client.call("GET", &format!("{V}/containers/{name}/json"), &[], None).map(|(s, _)| s == 200).unwrap_or(false) {
+    /// Resolve a pod-ish name to an existing pod (exact, or the first replica
+    /// `<name>-0` of a workload).
+    pub fn resolve_pod(&self, name: &str) -> KubeResult<String> {
+        let ns = &self.namespace;
+        let exists = |n: &str| {
+            self.client
+                .call("GET", &format!("/api/v1/namespaces/{ns}/pods/{n}"), &[], None)
+                .map(|(s, _)| s == 200)
+                .unwrap_or(false)
+        };
+        if exists(name) {
             return Ok(name.to_string());
         }
         let zero = format!("{name}-0");
-        if self.client.call("GET", &format!("{V}/containers/{zero}/json"), &[], None).map(|(s, _)| s == 200).unwrap_or(false) {
+        if exists(&zero) {
             return Ok(zero);
         }
         Err(ke(format!("pods \"{name}\" not found")))
+    }
+
+    pub fn logs(&self, pod: &str, follow: bool, w: &mut dyn Write) -> KubeResult<()> {
+        let ns = self.namespace.clone();
+        let pod = self.resolve_pod(pod)?;
+        let path = format!("/api/v1/namespaces/{ns}/pods/{pod}/log?follow={follow}&timestamps=false");
+        let mut resp = self.client.request("GET", &path, &[], None)?;
+        if resp.status == 404 {
+            return Err(ke(format!("pods \"{pod}\" not found")));
+        }
+        resp.stream_body(|c| {
+            let _ = w.write_all(c);
+            let _ = w.flush();
+        })?;
+        Ok(())
+    }
+
+    /// Exec into a pod through the apiserver's WebSocket exec subresource.
+    /// Returns the command's exit code.
+    pub fn exec(&self, pod: &str, cmd: &[String], interactive: bool, tty: bool) -> KubeResult<i32> {
+        let ns = self.namespace.clone();
+        let pod = self.resolve_pod(pod)?;
+        ws::exec(&self.client.socket, &ns, &pod, cmd, tty, interactive).map_err(|e| ke(e.to_string()))
+    }
+}
+
+// ---------- object → table row ----------
+
+fn obj_to_kube(res: &Res, obj: &Value) -> KubeObject {
+    let name = obj.pointer("/metadata/name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let kind = obj.get("kind").and_then(|v| v.as_str()).unwrap_or(&res.kind).to_string();
+    let (ready, status, restarts) = summarize(res, obj);
+    KubeObject { kind, name, ready, status, restarts, members: vec![] }
+}
+
+fn summarize(res: &Res, obj: &Value) -> (String, String, i64) {
+    match res.resource.as_str() {
+        "pods" => {
+            let phase = obj.pointer("/status/phase").and_then(|v| v.as_str()).unwrap_or("Pending").to_string();
+            let restarts = obj
+                .pointer("/status/containerStatuses")
+                .and_then(|c| c.as_array())
+                .map(|a| a.iter().filter_map(|c| c.get("restartCount").and_then(|r| r.as_i64())).sum())
+                .unwrap_or(0);
+            let ready = if phase == "Running" { "1/1" } else { "0/1" }.to_string();
+            (ready, phase, restarts)
+        }
+        "deployments" | "statefulsets" | "replicasets" => {
+            let desired = obj.pointer("/spec/replicas").and_then(|v| v.as_i64()).unwrap_or(1);
+            let avail = obj
+                .pointer("/status/readyReplicas")
+                .or_else(|| obj.pointer("/status/availableReplicas"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            (format!("{avail}/{desired}"), String::new(), 0)
+        }
+        _ => {
+            let status = obj.pointer("/status/phase").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            (String::new(), status, 0)
+        }
     }
 }
 
@@ -437,17 +434,12 @@ fn parse_docs(yaml: &str) -> KubeResult<Vec<Value>> {
             continue;
         }
         let v: serde_yaml::Value = serde_yaml::from_str(t).map_err(|e| ke(format!("YAML parse error: {e}")))?;
-        // Convert to serde_json::Value for uniform pointer access.
         let jv: Value = serde_json::to_value(&v).map_err(|e| ke(e.to_string()))?;
         if !jv.is_null() {
             out.push(jv);
         }
     }
     Ok(out)
-}
-
-fn d_ref(v: &Value) -> &Value {
-    v
 }
 
 fn kind_of(d: &Value) -> String {
@@ -457,90 +449,11 @@ fn name_of(d: &Value) -> String {
     d.pointer("/metadata/name").and_then(|v| v.as_str()).unwrap_or("").to_string()
 }
 
-fn string_map(v: Option<&Value>) -> BTreeMap<String, String> {
-    let mut m = BTreeMap::new();
-    if let Some(Value::Object(o)) = v {
-        for (k, val) in o {
-            if let Some(s) = val.as_str() {
-                m.insert(k.clone(), s.to_string());
-            } else {
-                m.insert(k.clone(), val.to_string());
-            }
-        }
-    }
-    m
-}
-
-fn strs(v: Option<&Value>) -> Vec<String> {
-    v.and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-        .unwrap_or_default()
-}
-
-fn normalize_kind(k: &str) -> String {
-    match k.to_lowercase().trim_end_matches('s') {
-        "deployment" | "deploy" => "Deployment",
-        "pod" | "po" => "Pod",
-        "job" => "Job",
-        "service" | "svc" => "Service",
-        "replicaset" | "rs" => "ReplicaSet",
-        "" | "all" => "",
-        _ => "",
-    }
-    .to_string()
-}
-
-fn split_ref(image: &str) -> (String, String) {
-    if let Some(at) = image.find('@') {
-        return (image[..at].to_string(), image[at + 1..].to_string());
-    }
-    match image.rsplit_once(':') {
-        Some((r, t)) if !t.contains('/') => (r.to_string(), t.to_string()),
-        _ => (image.to_string(), "latest".to_string()),
-    }
-}
-
-fn url(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
-fn b64_decode_str(s: &str) -> Option<String> {
-    let inv = |c: u8| -> i8 {
-        match c {
-            b'A'..=b'Z' => (c - b'A') as i8,
-            b'a'..=b'z' => (c - b'a' + 26) as i8,
-            b'0'..=b'9' => (c - b'0' + 52) as i8,
-            b'+' => 62,
-            b'/' => 63,
-            _ => -1,
-        }
-    };
-    let mut bytes = Vec::new();
-    let mut acc = 0u32;
-    let mut bits = 0;
-    for &c in s.trim().as_bytes() {
-        if c == b'=' {
-            break;
-        }
-        let v = inv(c);
-        if v < 0 {
-            return None;
-        }
-        acc = (acc << 6) | v as u32;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            bytes.push((acc >> bits) as u8);
-        }
-    }
-    String::from_utf8(bytes).ok()
+/// Get (creating if absent) the object's `/metadata` map for in-place edits.
+fn ensure_meta(obj: &mut Value) -> &mut serde_json::Map<String, Value> {
+    let map = obj.as_object_mut().expect("manifest must be a JSON object");
+    map.entry("metadata").or_insert_with(|| json!({}));
+    map.get_mut("metadata").unwrap().as_object_mut().expect("metadata must be an object")
 }
 
 #[cfg(test)]
@@ -558,14 +471,52 @@ mod tests {
     }
 
     #[test]
-    fn secret_decode() {
-        assert_eq!(b64_decode_str("aGVsbG8="), Some("hello".into()));
+    fn res_paths() {
+        let dep = Res {
+            group: "apps".into(),
+            version: "v1".into(),
+            resource: "deployments".into(),
+            singular: "deployment".into(),
+            kind: "Deployment".into(),
+            namespaced: true,
+            short_names: vec!["deploy".into()],
+        };
+        assert_eq!(dep.collection_path("default"), "/apis/apps/v1/namespaces/default/deployments");
+        assert_eq!(dep.object_path("default", "web"), "/apis/apps/v1/namespaces/default/deployments/web");
+        let ns = Res {
+            group: String::new(),
+            version: "v1".into(),
+            resource: "namespaces".into(),
+            singular: "namespace".into(),
+            kind: "Namespace".into(),
+            namespaced: false,
+            short_names: vec!["ns".into()],
+        };
+        assert_eq!(ns.collection_path(""), "/api/v1/namespaces");
+        assert_eq!(ns.object_path("", "kube-system"), "/api/v1/namespaces/kube-system");
     }
 
     #[test]
-    fn kind_norm() {
-        assert_eq!(normalize_kind("deploy"), "Deployment");
-        assert_eq!(normalize_kind("po"), "Pod");
-        assert_eq!(normalize_kind("svc"), "Service");
+    fn ensure_meta_creates() {
+        let mut o = json!({"kind": "Pod"});
+        ensure_meta(&mut o).insert("resourceVersion".into(), json!("7"));
+        assert_eq!(o.pointer("/metadata/resourceVersion").unwrap().as_str(), Some("7"));
+    }
+
+    #[test]
+    fn summarize_pod() {
+        let res = Res {
+            group: String::new(),
+            version: "v1".into(),
+            resource: "pods".into(),
+            singular: "pod".into(),
+            kind: "Pod".into(),
+            namespaced: true,
+            short_names: vec![],
+        };
+        let p = json!({"status": {"phase": "Running"}});
+        let (ready, status, _) = summarize(&res, &p);
+        assert_eq!(ready, "1/1");
+        assert_eq!(status, "Running");
     }
 }
