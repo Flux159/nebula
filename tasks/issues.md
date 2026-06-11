@@ -316,3 +316,27 @@ limitations; routine TODOs live in code.)
   hygiene: `nebula down` (graceful) before rebuilds; recovery: delete
   data.img. The guest could run e2fsck -p on mount failure in nebula-init —
   TODO worth doing for crash resilience on all OSes.
+
+- **(2026-06-11) krun-snapshot restore design (capture side DONE).** Capture
+  verified on KVM: pause(0ms) → save(0.61s: 2GB RAM → 103MB sparse via
+  zero-page holes + vm.state + vcpus.state + devices.state) → resume. Key
+  design points for restore (next):
+  * Device state WITHOUT per-device hooks: virtio queue config is frozen at
+    DRIVER_OK, so MmioTransport clones queue states at activation
+    (`activated_queue_states`) and `snapshot_state()` captures transport regs
+    + those. Dynamic ring cursors are NOT captured — they're reconstructed at
+    restore from the rings in restored guest RAM (`avail.idx`/`used.idx`),
+    valid because device workers keep draining while vcpus are paused
+    (quiesce), so device-side cursors equal the in-RAM indices.
+  * Restore flow: builder gets a restore mode (VmResources.restore_dir):
+    map memory.bin regions MAP_PRIVATE (CoW—clones share pages), create
+    devices in the SAME order (deterministic MMIO addrs/irqs), walk the bus
+    and `restore_from_state()` each transport — which replays activate() at
+    DRIVER_OK, respawning workers with restored queues — then Vm::restore_state
+    (irqchip/PIT/clock), per-vcpu Vcpu::restore_state before start_threaded,
+    start paused, resume.
+  * Host-side connections don't survive (vsock proxies/usernet flows reset;
+    guest-side listeners + agent survive in RAM; nebulad reconnects).
+  * Windows/WHP parity after KVM works: same flow, vcpu state via
+    WHvGet/SetVirtualProcessorRegisters (alignment wrapper) + XSAVE state;
+    memory restore via MapViewOfFile copy-on-write.

@@ -453,14 +453,61 @@ impl Vmm {
         }
         f.flush().map_err(|e| e.to_string())?;
 
+        self.save_devices(&dir.join("devices.state"))
+            .map_err(|e| format!("write devices.state: {e}"))?;
+
         self.save_memory(&dir.join("memory.bin"))
             .map_err(|e| format!("write memory.bin: {e}"))?;
 
-        // Version + completeness marker. Restore refuses anything but a
-        // format it fully understands.
-        std::fs::write(dir.join("format.txt"), "krun-snapshot-v0 no-device-state\n")
-            .map_err(|e| e.to_string())?;
+        // Version marker; restore refuses formats it doesn't understand.
+        std::fs::write(dir.join("format.txt"), "krun-snapshot-v1\n").map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Serialize every virtio MMIO transport's state in bus-address order.
+    /// Devices must be quiesced (vcpus paused, workers drained).
+    #[cfg(target_os = "linux")]
+    fn save_devices(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use devices::virtio::MmioTransport;
+        use std::io::Write;
+
+        let mut states = Vec::new();
+        for (_addr, dev) in self.mmio_device_manager.bus.iter_devices() {
+            let locked = dev.lock().unwrap();
+            if let Some(t) = locked.as_any().downcast_ref::<MmioTransport>() {
+                states.push(t.snapshot_state());
+            }
+        }
+
+        let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+        write_u64(&mut out, states.len() as u64)?;
+        for st in &states {
+            for v in [
+                st.device_type,
+                st.features_select,
+                st.acked_features_select,
+                st.queue_select,
+                st.device_status,
+                st.config_generation,
+                st.shm_region_select,
+            ] {
+                out.write_all(&v.to_le_bytes())?;
+            }
+            write_u64(&mut out, st.interrupt_status)?;
+            write_u64(&mut out, st.acked_features)?;
+            write_u64(&mut out, st.queue_states.len() as u64)?;
+            for q in &st.queue_states {
+                // QueueState is repr(C) plain data.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        q as *const devices::virtio::QueueState as *const u8,
+                        std::mem::size_of::<devices::virtio::QueueState>(),
+                    )
+                };
+                out.write_all(bytes)?;
+            }
+        }
+        out.flush()
     }
 
     /// Write all guest memory regions to `path` for a snapshot.

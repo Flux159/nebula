@@ -100,6 +100,11 @@ impl Bus {
         None
     }
 
+    /// All devices in address order (deterministic — used by snapshots).
+    pub fn iter_devices(&self) -> impl Iterator<Item = (u64, &Arc<Mutex<dyn BusDevice>>)> {
+        self.devices.iter().map(|(range, dev)| (range.0, dev))
+    }
+
     pub fn get_device(&self, addr: u64) -> Option<(u64, &Mutex<dyn BusDevice>)> {
         if let Some((BusRange(start, len), dev)) = self.first_before(addr) {
             let offset = addr - start;
