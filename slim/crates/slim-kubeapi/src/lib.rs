@@ -10,10 +10,12 @@
 //!
 //! See docs/slim-k8s-roadmap.md (Tier A, "passive generic apiserver").
 
+pub mod proxy;
 pub mod server;
 pub mod store;
 pub mod tls;
 
+pub use proxy::{ExecHandle, LogOpts, PodProxy};
 pub use server::ApiServer;
 pub use store::{ResourceInfo, SharedStore, Store};
 pub use tls::{generate as generate_tls, TlsIdentity};

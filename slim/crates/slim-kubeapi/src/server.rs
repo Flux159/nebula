@@ -4,6 +4,7 @@
 //! newline-delimited WatchEvents (chunked) — the wire format client-go
 //! informers expect.
 
+use crate::proxy::{LogOpts, PodProxy};
 use crate::store::{Gone, ResourceInfo, SharedStore, WatchEvent};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -12,18 +13,36 @@ use std::sync::Arc;
 
 pub struct ApiServer {
     pub store: SharedStore,
+    pub proxy: Option<Arc<dyn PodProxy>>,
 }
 
 struct Req {
     method: String,
     path: String,
     query: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
+}
+
+impl Req {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    }
+    fn is_ws_exec(&self) -> bool {
+        self.path.ends_with("/exec")
+            && self.header("upgrade").map(|u| u.eq_ignore_ascii_case("websocket")).unwrap_or(false)
+    }
 }
 
 impl ApiServer {
     pub fn new(store: SharedStore) -> Arc<Self> {
-        Arc::new(ApiServer { store })
+        Arc::new(ApiServer { store, proxy: None })
+    }
+
+    /// With a PodProxy, the apiserver serves pods/{}/log and pods/{}/exec from
+    /// the proxy (slimd's in-process engine).
+    pub fn with_proxy(store: SharedStore, proxy: Arc<dyn PodProxy>) -> Arc<Self> {
+        Arc::new(ApiServer { store, proxy: Some(proxy) })
     }
 
     pub fn serve(self: &Arc<Self>, addr: &str) -> std::io::Result<()> {
@@ -49,6 +68,11 @@ impl ApiServer {
                 None => return Ok(()),
             }
         };
+        // exec is the one duplex handler — it needs the raw Read+Write stream
+        // for the WebSocket upgrade, so it can't go through the dyn-Write route.
+        if req.is_ws_exec() {
+            return self.handle_exec_ws(&req, &mut stream);
+        }
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.route(&req, &mut stream)));
         if matches!(res, Ok(Err(_)) | Err(_)) {
             let _ = write_json(&mut stream, 500, &status_obj(500, "internal error", "InternalError"));
@@ -137,6 +161,10 @@ impl ApiServer {
         // `scale` decodes it), so route it specially.
         if subresource == Some("scale") {
             return self.handle_scale(verb, &info, &ns, name.unwrap_or(""), req, w);
+        }
+        // pods/{}/log → stream from the engine via the PodProxy.
+        if subresource == Some("log") && resource == "pods" {
+            return self.handle_log(&ns, name.unwrap_or(""), req, w);
         }
 
         let watch = query_bool(&req.query, "watch");
@@ -269,6 +297,113 @@ impl ApiServer {
             "status": {"replicas": replicas},
         });
         write_json(w, 200, &scale)
+    }
+
+    /// WebSocket exec (v4/v5.channel.k8s.io). Handles the non-interactive
+    /// `kubectl exec POD -- cmd` case: run the command, stream stdout/stderr as
+    /// channel frames, then a Status on the error channel. (Interactive -it
+    /// needs concurrent stdin over the same TLS stream — see kubectl-slim's
+    /// engine-socket path for that.)
+    fn handle_exec_ws<S: Read + Write>(&self, req: &Req, stream: &mut S) -> std::io::Result<()> {
+        let Some(proxy) = self.proxy.clone() else {
+            return write_to(stream, 501, "exec not available (no engine bound)");
+        };
+        // /api/v1/namespaces/<ns>/pods/<pod>/exec
+        let segs: Vec<&str> = req.path.split('/').filter(|s| !s.is_empty()).collect();
+        let ns = seg_after(&segs, "namespaces").unwrap_or("default");
+        let pod = seg_after(&segs, "pods").unwrap_or("");
+        let cmd: Vec<String> = req.query.iter().filter(|(k, _)| k == "command").map(|(_, v)| v.clone()).collect();
+        let tty = req.query.iter().any(|(k, v)| k == "tty" && (v == "true" || v == "1"));
+        if cmd.is_empty() || pod.is_empty() {
+            return write_to(stream, 400, "exec requires a pod and command");
+        }
+
+        let key = req.header("sec-websocket-key").unwrap_or("");
+        let proto = pick_subprotocol(req.header("sec-websocket-protocol").unwrap_or(""));
+        let accept = ws_accept(key);
+        let handshake = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Protocol: {proto}\r\n\r\n"
+        );
+        stream.write_all(handshake.as_bytes())?;
+        stream.flush()?;
+
+        let h = match proxy.exec_start(ns, pod, &cmd, tty, false) {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = ws_send(stream, 3, exec_status(1, &format!("exec failed: {e}")).as_bytes());
+                return ws_close(stream);
+            }
+        };
+
+        // Output readers → mpsc → single frame writer (this thread).
+        let (tx, rx) = std::sync::mpsc::channel::<(u8, Vec<u8>)>();
+        let mut joins = Vec::new();
+        let mut spawn_reader = |mut f: std::fs::File, ch: u8, tx: std::sync::mpsc::Sender<(u8, Vec<u8>)>| {
+            joins.push(std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match f.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if tx.send((ch, buf[..n].to_vec())).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }));
+        };
+        if let Some(pty) = h.pty {
+            spawn_reader(pty, 1, tx.clone());
+        } else {
+            if let Some(out) = h.stdout {
+                spawn_reader(out, 1, tx.clone());
+            }
+            if let Some(err) = h.stderr {
+                spawn_reader(err, 2, tx.clone());
+            }
+        }
+        drop(tx); // so rx ends when all readers finish (process exit)
+
+        while let Ok((ch, bytes)) = rx.recv() {
+            if ws_send(stream, ch, &bytes).is_err() {
+                break;
+            }
+        }
+        for j in joins {
+            let _ = j.join();
+        }
+        let code = proxy.exec_wait(h.pid);
+        let status = if code == 0 {
+            exec_status(0, "")
+        } else {
+            exec_status(code, &format!("command terminated with non-zero exit code {code}"))
+        };
+        let _ = ws_send(stream, 3, status.as_bytes());
+        ws_close(stream)
+    }
+
+    fn handle_log(&self, ns: &Option<String>, pod: &str, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
+        let Some(proxy) = &self.proxy else {
+            return write_json(w, 501, &status_obj(501, "logs not available (no engine bound)", "NotImplemented"));
+        };
+        let nsv = ns.clone().unwrap_or_else(|| "default".into());
+        let opts = LogOpts {
+            follow: query_bool(&req.query, "follow"),
+            tail: query_str(&req.query, "tailLines").and_then(|s| s.parse().ok()),
+            timestamps: query_bool(&req.query, "timestamps"),
+        };
+        // kubectl logs reads a plain (optionally chunked) text stream.
+        w.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")?;
+        w.flush()?;
+        let mut cw = ChunkWriter { inner: w };
+        match proxy.logs(&nsv, pod, &opts, &mut cw) {
+            Ok(_) => {}
+            Err(e) => {
+                let _ = cw.write_all(format!("error: {e}\n").as_bytes());
+            }
+        }
+        cw.finish()
     }
 
     fn do_watch(&self, info: &ResourceInfo, ns: Option<&str>, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
@@ -481,6 +616,102 @@ fn merge(base: &mut Value, patch: &Value) {
     }
 }
 
+// ---- WebSocket (exec subresource) ----
+
+const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+fn seg_after<'a>(segs: &'a [&'a str], key: &str) -> Option<&'a str> {
+    segs.iter().position(|s| *s == key).and_then(|i| segs.get(i + 1)).copied()
+}
+
+/// Choose a channel subprotocol from the client's offer (prefer v4, which we
+/// implement plainly; v5 framing is compatible for our output-only use).
+fn pick_subprotocol(offered: &str) -> String {
+    let want = ["v4.channel.k8s.io", "v5.channel.k8s.io", "channel.k8s.io"];
+    for w in want {
+        if offered.split(',').any(|p| p.trim() == w) {
+            return w.to_string();
+        }
+    }
+    "v4.channel.k8s.io".to_string()
+}
+
+fn ws_accept(key: &str) -> String {
+    use sha1::{Digest, Sha1};
+    let mut h = Sha1::new();
+    h.update(key.as_bytes());
+    h.update(WS_GUID.as_bytes());
+    b64_std(&h.finalize())
+}
+
+/// Send a k8s channel message as one unmasked binary WebSocket frame:
+/// payload = [channel byte] ++ data.
+fn ws_send<S: Write>(stream: &mut S, channel: u8, data: &[u8]) -> std::io::Result<()> {
+    let mut payload = Vec::with_capacity(1 + data.len());
+    payload.push(channel);
+    payload.extend_from_slice(data);
+    let mut frame = vec![0x82u8]; // FIN + binary
+    let len = payload.len();
+    if len < 126 {
+        frame.push(len as u8);
+    } else if len < 65536 {
+        frame.push(126);
+        frame.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        frame.push(127);
+        frame.extend_from_slice(&(len as u64).to_be_bytes());
+    }
+    frame.extend_from_slice(&payload);
+    stream.write_all(&frame)?;
+    stream.flush()
+}
+
+fn ws_close<S: Write>(stream: &mut S) -> std::io::Result<()> {
+    // Close frame WITH a 1000 (normal closure) status — a payload-less close is
+    // status 1005, which kubectl surfaces as an error and masks the exit code.
+    stream.write_all(&[0x88, 0x02, 0x03, 0xE8])?;
+    stream.flush()
+}
+
+fn exec_status(code: i32, msg: &str) -> String {
+    if code == 0 {
+        json!({"kind":"Status","apiVersion":"v1","status":"Success","metadata":{}}).to_string()
+    } else {
+        json!({
+            "kind":"Status","apiVersion":"v1","status":"Failure","metadata":{},
+            "message": msg,"reason":"NonZeroExitCode",
+            "details":{"causes":[{"reason":"ExitCode","message": code.to_string()}]},
+        })
+        .to_string()
+    }
+}
+
+fn write_to<S: Write>(stream: &mut S, code: u16, msg: &str) -> std::io::Result<()> {
+    let body = json!({"kind":"Status","status":"Failure","message":msg,"code":code}).to_string();
+    let head = format!(
+        "HTTP/1.1 {code} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        reason_phrase(code),
+        body.len()
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body.as_bytes())?;
+    stream.flush()
+}
+
+fn b64_std(data: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
 // ---- HTTP plumbing ----
 
 fn read_request<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Req>> {
@@ -507,18 +738,21 @@ fn read_request<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Req>> {
     let method = r.method.unwrap_or("GET").to_string();
     let full = r.path.unwrap_or("/").to_string();
     let (path, query) = parse_query(&full);
-    let clen = r
+    let hdrs: Vec<(String, String)> = r
         .headers
         .iter()
-        .find(|h| h.name.eq_ignore_ascii_case("content-length"))
-        .and_then(|h| std::str::from_utf8(h.value).ok())
-        .and_then(|s| s.trim().parse::<usize>().ok())
+        .map(|h| (h.name.to_string(), String::from_utf8_lossy(h.value).into_owned()))
+        .collect();
+    let clen = hdrs
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.trim().parse::<usize>().ok())
         .unwrap_or(0);
     let mut body = vec![0u8; clen];
     if clen > 0 {
         reader.read_exact(&mut body)?;
     }
-    Ok(Some(Req { method, path, query, body }))
+    Ok(Some(Req { method, path, query, headers: hdrs, body }))
 }
 
 fn parse_query(full: &str) -> (String, Vec<(String, String)>) {
@@ -628,6 +862,33 @@ fn write_watch_event(w: &mut dyn Write, ev: &WatchEvent) -> std::io::Result<()> 
     w.write_all(&line)?;
     w.write_all(b"\r\n")?;
     w.flush()
+}
+
+/// Chunked-transfer writer over a borrowed response stream (for log streaming
+/// after the headers are already sent).
+struct ChunkWriter<'a> {
+    inner: &'a mut dyn Write,
+}
+impl Write for ChunkWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        write!(self.inner, "{:x}\r\n", buf.len())?;
+        self.inner.write_all(buf)?;
+        self.inner.write_all(b"\r\n")?;
+        self.inner.flush()?;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+impl ChunkWriter<'_> {
+    fn finish(&mut self) -> std::io::Result<()> {
+        self.inner.write_all(b"0\r\n\r\n")?;
+        self.inner.flush()
+    }
 }
 
 fn reason_phrase(code: u16) -> &'static str {

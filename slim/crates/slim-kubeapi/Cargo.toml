@@ -13,3 +13,4 @@ libc.workspace = true
 # ring backend: builds cleanly for the musl guest (same as ureq's ring).
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+sha1 = "0.10"

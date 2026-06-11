@@ -11,9 +11,11 @@
 
 use crate::engine::EngineRef;
 use serde_json::{json, Value};
-use slim_kubeapi::{ApiServer, SharedStore, Store};
+use slim_kubeapi::{ApiServer, ExecHandle, LogOpts, PodProxy, SharedStore, Store};
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 const OWNER: &str = "io.nebula.kube.owner"; // "<kind>/<ns>/<name>"
 const POD_OF: &str = "io.nebula.kube.pod"; // "<ns>/<podname>"
@@ -42,7 +44,8 @@ pub fn start(engine: &EngineRef, api_addr: &str) -> SharedStore {
         .unwrap_or_else(|| "10.88.0.1".to_string());
     let port: u16 = api_addr.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(6443);
 
-    let api = ApiServer::new(store.clone());
+    // Serve pods/{}/log and pods/{}/exec from the in-process engine.
+    let api = ApiServer::with_proxy(store.clone(), Arc::new(EngineProxy { engine: engine.clone() }));
     let addr = api_addr.to_string();
     // TLS so in-cluster operators (always HTTPS) can connect; the CA is
     // projected into pods. Falls back to plain HTTP if cert generation fails.
@@ -99,6 +102,88 @@ fn register_kubernetes_service(store: &SharedStore, engine: &EngineRef, ctx: &Br
     }
     for name in ["kubernetes.default.svc.cluster.local", "kubernetes.default.svc", "kubernetes.default", "kubernetes"] {
         engine.dns.set(name, &ctx.kube_host);
+    }
+}
+
+/// Serves pod log/exec subresources from the engine. A pod named `<pod>` in
+/// namespace `<ns>` maps to the engine container `<ns>_<pod>`.
+struct EngineProxy {
+    engine: EngineRef,
+}
+
+impl PodProxy for EngineProxy {
+    fn logs(&self, ns: &str, pod: &str, opts: &LogOpts, w: &mut dyn Write) -> std::io::Result<()> {
+        let cname = format!("{ns}_{pod}");
+        let entry = self.engine.get_entry(&cname)?;
+        let log_path = entry.c.lock().unwrap().log_path.clone();
+        let ropts = slim_runtime::jsonlog::LogReadOpts {
+            stdout: true,
+            stderr: true,
+            tail: opts.tail,
+            since: None,
+            until: None,
+            timestamps: opts.timestamps,
+        };
+        let path = std::path::Path::new(&log_path);
+        let mut pos = slim_runtime::jsonlog::read_log(path, &ropts, 0, |_s, bytes| {
+            let _ = w.write_all(bytes);
+        })?;
+        if !opts.follow {
+            return Ok(());
+        }
+        let fopts = slim_runtime::jsonlog::LogReadOpts { tail: None, ..ropts };
+        loop {
+            let running = entry.c.lock().unwrap().running();
+            let mut wrote = false;
+            pos = slim_runtime::jsonlog::read_log(path, &fopts, pos, |_s, bytes| {
+                wrote = true;
+                let _ = w.write_all(bytes);
+            })?;
+            if !wrote {
+                if !running {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+        Ok(())
+    }
+
+    fn exec_start(&self, ns: &str, pod: &str, cmd: &[String], tty: bool, stdin: bool) -> std::io::Result<ExecHandle> {
+        let cname = format!("{ns}_{pod}");
+        let entry = self.engine.get_entry(&cname)?;
+        let pid = {
+            let c = entry.c.lock().unwrap();
+            if !c.running() {
+                return Err(std::io::Error::other("container not running"));
+            }
+            c.state.pid
+        };
+        let spec = slim_runtime::ExecSpec {
+            argv: cmd.to_vec(),
+            env: vec![],
+            cwd: String::new(),
+            user: String::new(),
+            tty,
+            open_stdin: stdin,
+        };
+        let h = slim_runtime::exec_in_container_cg(pid, &spec, Some(&cname))?;
+        Ok(ExecHandle {
+            pid: h.pid,
+            tty: h.pty_master.is_some(),
+            pty: h.pty_master,
+            stdin: h.stdin,
+            stdout: h.stdout,
+            stderr: h.stderr,
+        })
+    }
+
+    fn exec_wait(&self, pid: i32) -> i32 {
+        slim_runtime::wait_pid(pid).map(|s| s.code).unwrap_or(-1)
+    }
+
+    fn exec_resize(&self, pty_fd: i32, cols: u16, rows: u16) {
+        slim_runtime::resize_pty(pty_fd, cols, rows);
     }
 }
 
