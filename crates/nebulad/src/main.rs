@@ -103,7 +103,16 @@ fn read_live_pid(paths: &paths::Paths) -> Option<u32> {
     // Liveness probe; stale pid files are common after crashes.
     #[cfg(unix)]
     return (unsafe { libc::kill(pid as i32, 0) } == 0).then_some(pid);
-    // Windows: the control-socket probe in server::serve is the real guard.
+    // Windows: ask tasklist whether that pid is a live nebulad. A stale pid
+    // file must not block startup (force-kills don't run our cleanup).
     #[cfg(windows)]
-    Some(pid)
+    {
+        let out = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        (text.contains(&format!("\"{pid}\"")) && text.to_lowercase().contains("nebulad"))
+            .then_some(pid)
+    }
 }
