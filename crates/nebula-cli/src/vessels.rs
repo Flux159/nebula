@@ -367,6 +367,14 @@ fn start_with(name: &str, restore: Option<&std::path::Path>) -> anyhow::Result<(
         spec.restore_path = restore.map(|p| p.to_path_buf());
     }
 
+    // Windows: any inheritable handle leaks into the worker (CreateProcess
+    // bInheritHandles=TRUE whenever stdio is redirected). If our stdout is a
+    // pipeline pipe, the immortal worker holds it open and the parent shell
+    // never sees EOF — `nebula vessels new x | ...` hangs forever. Strip the
+    // inherit flag from our own stdio before spawning.
+    #[cfg(windows)]
+    unset_stdio_inheritance();
+
     let spec_json = serde_json::to_string(&spec)?;
     let exe = std::env::current_exe()?;
     let child = if backend == "vz" {
@@ -434,6 +442,27 @@ fn start_with(name: &str, restore: Option<&std::path::Path>) -> anyhow::Result<(
             );
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Strip the inherit flag from this process's stdio handles so spawned
+/// workers can't keep an ancestor's pipe alive past our exit.
+#[cfg(windows)]
+fn unset_stdio_inheritance() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetStdHandle(nstdhandle: u32) -> isize;
+        fn SetHandleInformation(hobject: isize, dwmask: u32, dwflags: u32) -> i32;
+    }
+    const HANDLE_FLAG_INHERIT: u32 = 1;
+    // STD_INPUT/OUTPUT/ERROR_HANDLE
+    for std in [-10i32 as u32, -11i32 as u32, -12i32 as u32] {
+        unsafe {
+            let h = GetStdHandle(std);
+            if h != 0 && h != -1 {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
     }
 }
 
@@ -704,21 +733,26 @@ fn engine_exec_long(script: &str) -> anyhow::Result<ExecResult> {
 }
 
 fn clone_file(from: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()> {
-    // APFS clonefile on macOS; reflink (btrfs/XFS) on Linux, both fall back
-    // to a plain copy below when CoW isn't available.
-    let flag = if cfg!(target_os = "macos") {
-        "-c"
+    // APFS clonefile on macOS; reflink (btrfs/XFS) on Linux. Falls back to a
+    // plain copy when CoW isn't available — including Windows, which has no
+    // `cp` at all (NTFS has no reflink; sparse ranges still copy as data).
+    let cloned = if cfg!(windows) {
+        false
     } else {
-        "--reflink=auto"
+        let flag = if cfg!(target_os = "macos") {
+            "-c"
+        } else {
+            "--reflink=auto"
+        };
+        std::process::Command::new("cp")
+            .arg(flag)
+            .arg(from)
+            .arg(to)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     };
-    let status = std::process::Command::new("cp")
-        .arg(flag)
-        .arg(from)
-        .arg(to)
-        .status()?;
-    if !status.success() {
-        // clonefile only works within one APFS volume; fall back to a copy
-        // (e.g. --rootfs-img sources on another disk).
+    if !cloned {
         std::fs::copy(from, to)
             .with_context(|| format!("clone/copy {} -> {} failed", from.display(), to.display()))?;
     }

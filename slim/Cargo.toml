@@ -12,6 +12,7 @@ members = [
     "crates/slim-kubeapi",
     "crates/slim-helm",
     "crates/slim-tmpl",
+    "crates/pause",
     "crates/slimd",
     "crates/docker-slim",
     "crates/kubectl-slim",

@@ -37,6 +37,9 @@ struct BridgeCtx {
     readiness: Arc<Mutex<HashMap<String, bool>>>,
     /// Host dir root for pod emptyDir volumes (<data>/kube-vol).
     vol_root: PathBuf,
+    /// The registered built-in pause image ref for pod sandboxes, if the pause
+    /// binary was found and registered; else None (fall back to app-image+sleep).
+    pause_image: Option<String>,
 }
 
 /// Start the apiserver-lite (TLS) + the reconcile loop. Spawns background
@@ -115,6 +118,7 @@ pub fn start(engine: &EngineRef, api_addr: &str) -> SharedStore {
         kube_port: port,
         readiness: Arc::new(Mutex::new(HashMap::new())),
         vol_root: engine.paths.data.join("kube-vol"),
+        pause_image: register_pause_image(engine),
     };
     register_kubernetes_service(&store, engine, &ctx);
 
@@ -769,11 +773,17 @@ fn build_create_req(
 }
 
 /// Build the pod sandbox (pause) container: it owns the netns/IP/DNS for the
-/// pod's whole life. Reuses container-0's image (already pulled) running a long
-/// sleep, so there's no extra pull. Liberty: an image without `sleep`
-/// (distroless/scratch) can't serve as the sandbox.
-fn build_sandbox_req(_ctx: &BridgeCtx, d: &Desired) -> Option<slim_api::container::ContainerCreateRequest> {
-    let image = d.containers.first()?.get("image").and_then(|v| v.as_str())?.to_string();
+/// pod's whole life. Uses the built-in `nebula/pause` image (a tiny static
+/// binary, no pull, works for any pod incl. distroless); falls back to
+/// container-0's image running `sleep` if the pause image isn't registered.
+fn build_sandbox_req(ctx: &BridgeCtx, d: &Desired) -> Option<slim_api::container::ContainerCreateRequest> {
+    let (image, entrypoint) = match &ctx.pause_image {
+        Some(img) => (img.clone(), None), // image's own /pause entrypoint
+        None => (
+            d.containers.first()?.get("image").and_then(|v| v.as_str())?.to_string(),
+            Some(vec!["sleep".to_string(), "2147483647".to_string()]),
+        ),
+    };
     let mut labels = std::collections::BTreeMap::new();
     labels.insert(MANAGED.to_string(), "true".to_string());
     labels.insert(OWNER.to_string(), d.owner.clone());
@@ -782,7 +792,7 @@ fn build_sandbox_req(_ctx: &BridgeCtx, d: &Desired) -> Option<slim_api::containe
     labels.insert(CNAME.to_string(), "pause".to_string());
     let config = slim_api::container::ContainerConfig {
         image,
-        entrypoint: Some(vec!["sleep".to_string(), "2147483647".to_string()]),
+        entrypoint,
         labels,
         ..Default::default()
     };
@@ -804,6 +814,83 @@ fn build_sandbox_req(_ctx: &BridgeCtx, d: &Desired) -> Option<slim_api::containe
         host_config,
         networking_config: slim_api::container::NetworkingConfig { endpoints_config: endpoints },
     })
+}
+
+const PAUSE_IMAGE: &str = "nebula/pause:slim";
+
+/// Locate the baked-in static `pause` binary and register it as a built-in
+/// single-layer image so pod sandboxes need no pull and no `sleep` in the app
+/// image. Returns the image ref, or None if the binary isn't shipped (sandboxes
+/// then fall back to app-image + sleep).
+fn register_pause_image(engine: &EngineRef) -> Option<String> {
+    if engine.store.resolve(PAUSE_IMAGE).is_some() {
+        return Some(PAUSE_IMAGE.to_string()); // already registered (slimd restart)
+    }
+    let bytes = find_pause_binary()?;
+    let diff_id = format!("sha256:{}", hex_sha(&bytes));
+    let layer = engine.store.layer_dir(&diff_id);
+    std::fs::create_dir_all(&layer).ok()?;
+    let bin = layer.join("pause");
+    std::fs::write(&bin, &bytes).ok()?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755));
+    let _ = std::fs::write(layer.join(".complete"), "0");
+
+    let config = slim_api::image::ImageConfig {
+        entrypoint: Some(vec!["/pause".to_string()]),
+        ..Default::default()
+    };
+    let created = slim_runtime::jsonlog::rfc3339_now();
+    let oci = json!({
+        "architecture": engine.store.arch,
+        "os": "linux",
+        "config": config,
+        "rootfs": {"type": "layers", "diff_ids": [diff_id]},
+        "created": created,
+        "history": [],
+    });
+    let config_raw = serde_json::to_vec(&oci).ok()?;
+    let id = format!("sha256:{}", hex_sha(&config_raw));
+    let record = slim_image::ImageRecord {
+        id,
+        manifest_digest: String::new(),
+        diff_ids: vec![diff_id],
+        size: bytes.len() as i64,
+        created,
+        architecture: engine.store.arch.clone(),
+        os: "linux".to_string(),
+        config,
+    };
+    engine.store.insert_local(&config_raw, record, Some(PAUSE_IMAGE)).ok()?;
+    println!("slimd: registered built-in pod sandbox image {PAUSE_IMAGE}");
+    Some(PAUSE_IMAGE.to_string())
+}
+
+/// Find the static pause binary: SLIM_PAUSE_BIN, next to slimd, or rootfs paths.
+fn find_pause_binary() -> Option<Vec<u8>> {
+    let mut cands: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = std::env::var("SLIM_PAUSE_BIN") {
+        cands.push(PathBuf::from(p));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            cands.push(dir.join("pause"));
+        }
+    }
+    cands.push(PathBuf::from("/usr/local/share/slim/pause"));
+    cands.push(PathBuf::from("/usr/local/bin/nebula-pause"));
+    for c in cands {
+        if let Ok(b) = std::fs::read(&c) {
+            if !b.is_empty() {
+                return Some(b);
+            }
+        }
+    }
+    None
+}
+
+fn hex_sha(data: &[u8]) -> String {
+    slim_image::sha256(data).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Resolve a container's volumeMounts against the pod's volumes into host binds.

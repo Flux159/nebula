@@ -7,7 +7,7 @@
 //! `macos/vstate.rs`: it consumes `whp::{WhpVm, WhpVcpu, VcpuExitReason}`
 //! and routes I/O and MMIO exits through the WHP instruction emulator.
 
-use log::{debug, error, warn};
+use log::{debug, error};
 use std::ffi::c_void;
 use std::fmt::{Display, Formatter};
 use std::io;
@@ -304,6 +304,7 @@ pub struct Vcpu {
     event_sender: Option<Sender<VcpuEvent>>,
     response_receiver: Option<Receiver<VcpuResponse>>,
     response_sender: Sender<VcpuResponse>,
+    dbg_exits: u64,
 }
 
 impl Vcpu {
@@ -337,6 +338,7 @@ impl Vcpu {
             event_sender: Some(event_sender),
             response_receiver: Some(response_receiver),
             response_sender,
+            dbg_exits: 0,
         })
     }
 
@@ -485,7 +487,25 @@ impl Vcpu {
     }
 
     fn run_emulation(&mut self) -> Result<VcpuEmulation> {
-        let reason = self.whp_vcpu.run().map_err(Error::VcpuRun)?;
+        let reason = self.whp_vcpu.run().map_err(|e| {
+            if std::env::var_os("NEBULA_SNAP_DEBUG").is_some() {
+                eprintln!("snap-debug vp{} run error: {e}", self.cpu_index());
+            }
+            Error::VcpuRun(e)
+        })?;
+        if std::env::var_os("NEBULA_SNAP_DEBUG").is_some() {
+            // First exits per vcpu, then every 4096th — enough to see whether
+            // a vcpu cycles (and on what) without flooding the log.
+            self.dbg_exits += 1;
+            if self.dbg_exits <= 6 || self.dbg_exits % 4096 == 0 {
+                eprintln!(
+                    "snap-debug vp{} exit#{} {:?}",
+                    self.cpu_index(),
+                    self.dbg_exits,
+                    reason
+                );
+            }
+        }
         let result = match reason {
             VcpuExitReason::IoPortAccess => {
                 let ctx = self.callback_context(&self.io_bus as *const devices::Bus);

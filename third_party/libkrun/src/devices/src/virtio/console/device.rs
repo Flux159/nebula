@@ -352,6 +352,36 @@ impl VirtioDevice for Console {
         self.device_state.is_activated()
     }
 
+    /// A restored guest already completed the DEVICE_READY/PORT_READY/
+    /// PORT_OPEN control handshake before the snapshot and will never repeat
+    /// it, so no PORT_OPEN will ever arrive to start the per-port IO threads.
+    /// Without them the TX ring is never drained and the guest's first
+    /// console write spins forever in __send_to_port with IRQs off. Start
+    /// every port that still has its queues now.
+    fn post_restore(&mut self) {
+        let DeviceState::Activated(ref mem, ref interrupt) = self.device_state else {
+            return;
+        };
+        let mem = mem.clone();
+        let interrupt = interrupt.clone();
+        for port_id in 0..self.ports.len() {
+            let rx_idx = port_id_to_queue_idx(QueueDirection::Rx, port_id);
+            let tx_idx = port_id_to_queue_idx(QueueDirection::Tx, port_id);
+            let (Some(rx), Some(tx)) = (self.queues[rx_idx].take(), self.queues[tx_idx].take())
+            else {
+                continue;
+            };
+            log::debug!("console restore: starting port {port_id} io threads");
+            self.ports[port_id].start(
+                mem.clone(),
+                rx.queue,
+                tx.queue,
+                interrupt.clone(),
+                self.control.clone(),
+            );
+        }
+    }
+
     fn reset(&mut self) -> bool {
         // Shutdown ports and clear queues.
         for port in &mut self.ports {

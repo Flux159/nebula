@@ -49,12 +49,20 @@ fi
 # instead of dockerd+containerd when /usr/local/bin/slimd is present.
 # .slimkeep is the always-present anchor for the optional-COPY in the
 # Dockerfile (so non-slim builds don't error on a missing slimd).
-rm -f vessel/rootfs/bin/slimd
+rm -f vessel/rootfs/bin/slimd vessel/rootfs/bin/pause
 touch vessel/rootfs/bin/.slimkeep
 if [ "${FLAVOR:-full}" = "slim" ]; then
     SLIMD_BIN="${SLIMD_BIN:-$HOME/Projects/nebula-slim/target/$MUSL_TARGET/release/slimd}"
     test -f "$SLIMD_BIN" || { echo "ERROR: slimd not found at $SLIMD_BIN (build it: nebula-slim/scripts/build-musl.sh)" >&2; exit 1; }
     cp "$SLIMD_BIN" vessel/rootfs/bin/slimd
+    # pause: tiny static pod-sandbox binary (nebula/pause:slim). Optional — if
+    # absent, slimd falls back to the app image + sleep for the sandbox.
+    PAUSE_BIN="${PAUSE_BIN:-$HOME/Projects/nebula-slim/target/$MUSL_TARGET/release/pause}"
+    if [ -f "$PAUSE_BIN" ]; then
+        cp "$PAUSE_BIN" vessel/rootfs/bin/pause
+    else
+        echo "warn: pause binary not found at $PAUSE_BIN — pod sandboxes fall back to app-image+sleep" >&2
+    fi
 fi
 
 # Embedder hooks: OVERLAY=dir (copied over /), SETUP=script (runs in build).

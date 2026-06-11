@@ -124,14 +124,18 @@ pod `Pending`. Extend test/kube-sidecar.sh.
 - Volume types: ✅ DONE — configMap/secret/hostPath + subPath/readOnly
   (kube-volumes.sh 5/5). Liberty: configMap/secret snapshot at create.
 - **Pause/sandbox model: ✅ DONE.** A dedicated `<ns>_<pod>.pause` container
-  (reuses container-0's image running `sleep`, bridge net + DNS, restart=always)
-  owns the pod netns/IP/DNS for the pod's whole life; **every init and main
-  container joins it** via `container:<sandbox>`. This is the kubelet model and
-  it fixes three things at once: init containers now run in the pod netns; the
-  pod IP is stable across main-container restarts; and a container-0 restart no
-  longer strands sidecars. Liberty: an image without `sleep` (distroless/scratch)
-  can't be a sandbox; if the sandbox itself is force-killed (near-never — it's a
-  `sleep`), running joiners hold a stale netns until they exit and reconcile
+  (bridge net + DNS, restart=always) owns the pod netns/IP/DNS for the pod's
+  whole life; **every init and main container joins it** via `container:<sandbox>`.
+  This is the kubelet model and it fixes three things at once: init containers
+  now run in the pod netns; the pod IP is stable across main-container restarts;
+  and a container-0 restart no longer strands sidecars.
+- **Built-in pause image: ✅ DONE.** The sandbox runs `nebula/pause:slim` — a
+  ~360 KB static `pause` binary (crate `pause`) baked into the slim rootfs and
+  registered by slimd as a single-layer local image at boot: no pull, works
+  offline, works for **any** pod incl. distroless/scratch. Falls back to
+  container-0's image + `sleep` if the binary isn't shipped. kube-sidecar.sh
+  asserts the sandbox runs `nebula/pause:slim`. Residual liberty: a force-killed
+  sandbox (near-never — it's a `pause()`) strands joiners until reconcile
   recreates them.
 
 **All phases + volume types + pause sandbox complete. Full suite: 99/99 on macOS

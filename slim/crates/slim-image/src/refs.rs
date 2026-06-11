@@ -41,13 +41,21 @@ impl Reference {
         Reference { registry, repo, tag, digest }
     }
 
-    /// Registry API host (docker.io → registry-1.docker.io).
-    pub fn api_host(&self) -> &str {
+    /// Registry API host (docker.io → registry-1.docker.io). `SLIM_REGISTRY_MIRROR`
+    /// redirects docker.io pulls through a pull-through mirror (e.g. mirror.gcr.io
+    /// or a local registry:2) — the reference identity/tag is unchanged, only the
+    /// network host. Lets CI/offline setups avoid Docker Hub anonymous rate limits.
+    pub fn api_host(&self) -> String {
         if self.registry == "docker.io" {
-            "registry-1.docker.io"
-        } else {
-            &self.registry
+            if let Ok(m) = std::env::var("SLIM_REGISTRY_MIRROR") {
+                let m = m.trim();
+                if !m.is_empty() {
+                    return m.to_string();
+                }
+            }
+            return "registry-1.docker.io".to_string();
         }
+        self.registry.clone()
     }
 
     /// Canonical display form: docker.io/library/x → x, the way docker

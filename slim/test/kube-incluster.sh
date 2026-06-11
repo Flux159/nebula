@@ -6,12 +6,13 @@
 set -u
 SLIMD="${SLIMD:-$(dirname "$0")/../target/aarch64-unknown-linux-musl/release/slimd}"
 DSLIM="${DSLIM:-$(dirname "$0")/../target/aarch64-unknown-linux-musl/release/docker-slim}"
+PAUSE="${PAUSE:-$(dirname "$0")/../target/aarch64-unknown-linux-musl/release/pause}"
 STAGE="$HOME/.slim-incluster-test"
 PASS=0; FAIL=0
 ok(){ PASS=$((PASS+1)); echo "PASS: $1"; }
 bad(){ FAIL=$((FAIL+1)); echo "FAIL: $1 -- $2"; }
 
-rm -rf "$STAGE"; mkdir -p "$STAGE"; cp "$SLIMD" "$STAGE/slimd"; cp "$DSLIM" "$STAGE/docker-slim"
+rm -rf "$STAGE"; mkdir -p "$STAGE"; cp "$SLIMD" "$STAGE/slimd"; cp "$DSLIM" "$STAGE/docker-slim"; cp "$PAUSE" "$STAGE/pause"
 cat > "$STAGE/dep.yaml" <<YAML
 apiVersion: apps/v1
 kind: Deployment
@@ -25,7 +26,7 @@ spec:
 YAML
 
 docker rm -f slim-incluster >/dev/null 2>&1
-docker run -d --privileged -p 17443:6443 -v "$STAGE:/slim" --name slim-incluster alpine:3.19 sh -c \
+docker run -d --privileged -e SLIM_REGISTRY_MIRROR -p 17443:6443 -v "$STAGE:/slim" --name slim-incluster alpine:3.19 sh -c \
   'apk add --no-cache iptables ip6tables iproute2 >/dev/null 2>&1; mkdir -p /var/lib/nebula && mount -t tmpfs tmpfs /var/lib/nebula; export SLIM_DATA=/var/lib/nebula/slim SLIM_RUN_DIR=/var/lib/nebula/run SLIM_KUBE_API_ADDR=0.0.0.0:6443; exec /slim/slimd' >/dev/null 2>&1
 trap 'docker rm -f slim-incluster >/dev/null 2>&1' EXIT
 for i in $(seq 1 40); do curl -sk https://localhost:17443/version >/dev/null 2>&1 && break; sleep 1; done
@@ -45,7 +46,7 @@ $KC apply -f "$STAGE/dep.yaml" >/dev/null 2>&1 && ok "kubectl apply over HTTPS" 
 # the bridge pulls the (curl-capable) image then starts the pod — allow time
 POD=""
 for i in $(seq 1 40); do
-  POD=$(dslim 'ps --format "{{.Names}}"' | tr -d '"/[]' | grep default_op- | head -1)
+  POD=$(dslim 'ps --format "{{.Names}}"' | tr -d '"/[]' | grep -E 'default_op-[0-9]+$' | head -1)
   [ -n "$POD" ] && break; sleep 2
 done
 [ -n "$POD" ] && ok "deployment spawned pod container ($POD)" || { bad spawn "no pod"; echo "RESULT: $PASS passed, $((FAIL+1)) failed"; exit 1; }

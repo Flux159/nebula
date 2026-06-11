@@ -286,6 +286,10 @@ impl MmioTransport {
         self.device_status = st.device_status;
         if st.device_status & device_status::DRIVER_OK != 0 {
             self.activate();
+            // The restored guest never repeats driver handshakes — let the
+            // device re-prime anything it defers until one (console port IO
+            // threads, started on PORT_OPEN at boot).
+            self.locked_device().post_restore();
             // Kick every ready queue once: the re-offered descriptors must
             // be processed even though the driver won't notify again (its
             // notification-suppression state predates the restore).

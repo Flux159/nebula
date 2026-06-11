@@ -3613,7 +3613,6 @@ fn read_snapshot_memory(
     guest_memory: &GuestMemoryMmap,
 ) -> std::result::Result<(), String> {
     use std::io::{Seek, SeekFrom};
-    use vm_memory::Address;
 
     let mut f = std::io::BufReader::with_capacity(1 << 20, &snap.mem_file);
     f.seek(SeekFrom::Start(snap.mem_data_start))
@@ -3642,9 +3641,6 @@ pub fn build_microvm_from_snapshot(
     _shutdown_efd: Option<EventFd>,
     _sender: Sender<WorkerMessage>,
 ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
-    use vm_memory::Address;
-    use vm_memory::GuestMemoryRegion;
-
     let err = StartMicrovmError::RestoreSnapshot;
 
     let snapshot = load_snapshot(restore_dir).map_err(err)?;
@@ -3777,6 +3773,16 @@ pub fn build_microvm_from_snapshot(
         vcpu.restore_state(state)
             .map_err(Error::Vcpu)
             .map_err(StartMicrovmError::Internal)?;
+        if std::env::var_os("NEBULA_SNAP_DEBUG").is_some() {
+            eprintln!(
+                "snap-debug vp{i} saved-lapic    {}",
+                whp::debug_parse_apic(&state.0.lapic)
+            );
+            eprintln!(
+                "snap-debug vp{i} restored-lapic {}",
+                whp::debug_sample_apic(vm.whp_vm(), i as u32)
+            );
+        }
         vcpus.push(vcpu);
     }
 
@@ -3867,6 +3873,31 @@ pub fn build_microvm_from_snapshot(
 
     vmm.start_vcpus(vcpus)
         .map_err(StartMicrovmError::Internal)?;
+
+    // Debug aid: sample VP0's execution state after restore so a wedged
+    // guest (dead timer, stuck RIP) is visible in the worker log.
+    if std::env::var_os("NEBULA_SNAP_DEBUG").is_some() {
+        let whp_vm = vmm.vm.whp_vm().clone();
+        std::thread::spawn(move || {
+            for i in 0..8 {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                for vp in 0..2u32 {
+                    eprintln!(
+                        "snap-debug t={}s vp{vp} {}",
+                        (i + 1) * 2,
+                        whp::debug_sample_vp(&whp_vm, vp)
+                    );
+                }
+                if i == 2 {
+                    // Test: VMM-injected CALL_FUNCTION_SINGLE to vp1. If this
+                    // unwedges the guest, guest ICR-initiated IPIs are what's
+                    // broken post-restore.
+                    eprintln!("snap-debug injecting test IPI 0xfb -> apic id 1");
+                    whp_vm.request_fixed_interrupt(0xfb, 1);
+                }
+            }
+        });
+    }
 
     #[allow(clippy::arc_with_non_send_sync)]
     let vmm = Arc::new(Mutex::new(vmm));

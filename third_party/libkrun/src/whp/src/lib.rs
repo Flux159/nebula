@@ -49,8 +49,9 @@ use windows_sys::Win32::System::Hypervisor::{
     WHvX64RegisterR15, WHvX64RegisterRbp, WHvX64RegisterRdi, WHvX64RegisterRflags,
     WHvX64RegisterRsi, WHvX64RegisterRsp, WHvX64RegisterSfmask, WHvX64RegisterSs,
     WHvX64RegisterStar, WHvX64RegisterSysenterCs, WHvX64RegisterSysenterEip,
-    WHvX64RegisterSysenterEsp, WHvX64RegisterTr, WHvX64RegisterTsc, WHvX64RegisterTscAux,
-    WHvX64RegisterXCr0,
+    WHvX64RegisterSpecCtrl, WHvX64RegisterSysenterEsp, WHvX64RegisterTr, WHvX64RegisterTsc,
+    WHvX64RegisterTscAdjust, WHvX64RegisterTscAux, WHvX64RegisterTscDeadline, WHvX64RegisterXCr0,
+    WHvX64RegisterXfd, WHvX64RegisterXss,
 };
 use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
@@ -1180,7 +1181,7 @@ impl Drop for WhpVcpu {
 /// tables, control + debug registers, the MSRs WHP models as registers, and
 /// the pending-interrupt/deliverability state. Captured and reapplied as one
 /// positional batch.
-const SNAPSHOT_REGS: [WHV_REGISTER_NAME; 56] = [
+const SNAPSHOT_REGS: [WHV_REGISTER_NAME; 58] = [
     WHvX64RegisterRax,
     WHvX64RegisterRcx,
     WHvX64RegisterRdx,
@@ -1220,6 +1221,10 @@ const SNAPSHOT_REGS: [WHV_REGISTER_NAME; 56] = [
     WHvX64RegisterDr3,
     WHvX64RegisterDr6,
     WHvX64RegisterDr7,
+    // XCR0 (with IA32_XSS below) defines the XSAVE area layout — both MUST
+    // be applied before WHvSetVirtualProcessorXsaveState or task FPU buffers
+    // in the restored RAM misparse ("Bad FPU state detected" guest panics).
+    // The register batch runs before the xsave blob, preserving that order.
     WHvX64RegisterXCr0,
     WHvX64RegisterEfer,
     WHvX64RegisterKernelGsBase,
@@ -1234,9 +1239,15 @@ const SNAPSHOT_REGS: [WHV_REGISTER_NAME; 56] = [
     WHvX64RegisterSfmask,
     WHvX64RegisterTsc,
     WHvX64RegisterTscAux,
+    WHvX64RegisterTscAdjust,
     WHvRegisterPendingInterruption,
     WHvRegisterInterruptState,
     WHvX64RegisterDeliverabilityNotifications,
+    // Keep last: the armed LAPIC timer deadline (TSC-deadline mode — what
+    // Linux uses). restore_state() reapplies it AFTER the interrupt
+    // controller blob so the APIC state restore can't clear it; without it
+    // the guest never receives another timer interrupt and wedges silently.
+    WHvX64RegisterTscDeadline,
 ];
 
 /// Full per-VP machine state for snapshots. Same-machine only — raw WHP
@@ -1256,11 +1267,26 @@ impl WhpVcpu {
     /// `WHvRunVirtualProcessor` (paused).
     pub fn save_state(&self) -> Result<VcpuSavedState, Error> {
         let values = self.get_registers(SNAPSHOT_REGS)?;
-        let regs = SNAPSHOT_REGS
+        let mut regs: Vec<(WHV_REGISTER_NAME, [u8; 16])> = SNAPSHOT_REGS
             .iter()
             .zip(values.iter())
             .map(|(n, v)| (*n, unsafe { mem::transmute_copy::<WHV_REGISTER_VALUE, [u8; 16]>(v) }))
             .collect();
+
+        // Host/CPU-dependent registers: fetched singly, skipped when the
+        // hypervisor rejects them (one bad name fails a whole batch).
+        // IA32_XSS matters for XSAVES-format task FPU buffers; the rest are
+        // best-effort. Restore replays exactly what was captured.
+        for opt in [WHvX64RegisterXss, WHvX64RegisterXfd, WHvX64RegisterSpecCtrl] {
+            match self.get_registers([opt]) {
+                Ok([v]) => {
+                    regs.push((opt, unsafe {
+                        mem::transmute_copy::<WHV_REGISTER_VALUE, [u8; 16]>(&v)
+                    }));
+                }
+                Err(e) => log::debug!("vcpu {}: register {opt} not captured: {e}", self.index),
+            }
+        }
 
         // 16K covers every XSAVE layout current hardware reports.
         let mut xsave = vec![0u8; 16384];
@@ -1299,11 +1325,17 @@ impl WhpVcpu {
     }
 
     /// Reapply state captured by [`save_state`](Self::save_state) onto a
-    /// freshly created VP (before it ever runs).
+    /// freshly created VP (before it ever runs). The TSC deadline is applied
+    /// last — after the interrupt-controller blob — so the armed LAPIC timer
+    /// survives the APIC state restore.
     pub fn restore_state(&self, st: &VcpuSavedState) -> Result<(), Error> {
-        let names: Vec<WHV_REGISTER_NAME> = st.regs.iter().map(|(n, _)| *n).collect();
-        let values: Vec<AlignedRegisterValue> = st
+        let (late, main): (Vec<(WHV_REGISTER_NAME, [u8; 16])>, Vec<_>) = st
             .regs
+            .iter()
+            .copied()
+            .partition(|(n, _)| *n == WHvX64RegisterTscDeadline);
+        let names: Vec<WHV_REGISTER_NAME> = main.iter().map(|(n, _)| *n).collect();
+        let values: Vec<AlignedRegisterValue> = main
             .iter()
             .map(|(_, b)| {
                 AlignedRegisterValue(unsafe {
@@ -1357,6 +1389,102 @@ impl WhpVcpu {
             }
         }
 
+        for (n, b) in &late {
+            let value = AlignedRegisterValue(unsafe {
+                mem::transmute_copy::<[u8; 16], WHV_REGISTER_VALUE>(b)
+            });
+            if let Err(e) = self.set_whp_registers(&[*n], &[value]) {
+                log::warn!(
+                    "vcpu {} restore: late register {n} not restored: {e}",
+                    self.index
+                );
+            }
+        }
+
         Ok(())
     }
+}
+
+/// Debug aid for snapshot work: sample a VP's execution state. Registers
+/// can be read while the VP runs; values are racy but indicative.
+pub fn debug_sample_vp(vm: &WhpVm, index: u32) -> String {
+    let names = [
+        WHvX64RegisterRip,
+        WHvX64RegisterRflags,
+        WHvX64RegisterTsc,
+        WHvX64RegisterTscDeadline,
+        WHvRegisterInterruptState,
+        WHvRegisterPendingInterruption,
+    ];
+    let mut values: [AlignedRegisterValue; 6] = [AlignedRegisterValue::zeroed(); 6];
+    let hr = unsafe {
+        WHvGetVirtualProcessorRegisters(
+            vm.partition_handle(),
+            index,
+            names.as_ptr(),
+            names.len() as u32,
+            values.as_mut_ptr() as *mut WHV_REGISTER_VALUE,
+        )
+    };
+    if hr != S_OK {
+        return format!("sample failed: HRESULT 0x{hr:08x}");
+    }
+    unsafe {
+        format!(
+            "rip={:#x} rflags={:#x} tsc={} deadline={} intstate={:#x} pending={:#x}",
+            values[0].0.Reg64,
+            values[1].0.Reg64,
+            values[2].0.Reg64,
+            values[3].0.Reg64,
+            values[4].0.Reg64,
+            values[5].0.Reg64,
+        )
+    }
+}
+
+/// Debug aid: dump key xAPIC registers from a VP's interrupt-controller
+/// state blob (ID, version, spurious/SW-enable, ICR, LVT timer, and whether
+/// any ISR/IRR bits are set).
+pub fn debug_sample_apic(vm: &WhpVm, index: u32) -> String {
+    let mut buf = vec![0u8; 4096];
+    let mut written = 0u32;
+    let hr = unsafe {
+        WHvGetVirtualProcessorInterruptControllerState2(
+            vm.partition_handle(),
+            index,
+            buf.as_mut_ptr() as *mut c_void,
+            buf.len() as u32,
+            &mut written,
+        )
+    };
+    if hr != S_OK {
+        return format!("apic read failed: HRESULT 0x{hr:08x}");
+    }
+    buf.truncate(written as usize);
+    debug_parse_apic(&buf)
+}
+
+/// Debug aid: decode key xAPIC registers from a raw state blob.
+pub fn debug_parse_apic(buf: &[u8]) -> String {
+    let dw = |off: usize| -> u32 {
+        if off + 4 <= buf.len() {
+            u32::from_le_bytes(buf[off..off + 4].try_into().unwrap())
+        } else {
+            0
+        }
+    };
+    let bits = |base: usize| -> u32 { (0..8).map(|i| dw(base + i * 0x10).count_ones()).sum() };
+    format!(
+        "len={} id={:#x} ver={:#x} tpr={:#x} svr={:#x} icr={:#x}:{:#x} lvt_timer={:#x} isr_bits={} irr_bits={}",
+        buf.len(),
+        dw(0x20),
+        dw(0x30),
+        dw(0x80),
+        dw(0xf0),
+        dw(0x310),
+        dw(0x300),
+        dw(0x320),
+        bits(0x100),
+        bits(0x200),
+    )
 }

@@ -367,3 +367,36 @@ limitations; routine TODOs live in code.)
   * `cargo build -p libkrun` WITHOUT `--features blk,net` produces a
     featureless .so that breaks vessel boot ("NetSpec::Nat needs NET=1") —
     always build the fork on the ubuntu box with `--features blk,net`.
+
+- 2026-06-11 — Windows/WHP restore WORKS end-to-end (resume ~2.2s incl disk
+  copies; tmpfs + uptime continuity + agent verified). Three root causes dug
+  out of "restored guest wedges silently", in order of discovery:
+  * virtio-console: Port IO threads only start on the guest's PORT_OPEN
+    control message — a restored guest never repeats the handshake, so its
+    first console write spun forever in __send_to_port (IRQs off, port lock
+    held) polling a TX ring nobody drains. CROSS-PLATFORM bug; Linux just
+    never tripped it because kvmclock restore causes no immediate printk
+    while the QPC time jump on Windows does. Fix: VirtioDevice::post_restore
+    hook called by the transport after the activate replay; console starts
+    all ports. Verified on Linux with a post-restore /dev/kmsg write.
+  * WHvX64RegisterTscDeadline wasn't captured: Linux's TSC-deadline LAPIC
+    timer never refires post-restore. Restored last (after the interrupt-
+    controller blob) so the APIC state restore can't clear it.
+  * IA32_XSS (WHvX64RegisterXss) wasn't restored before
+    WHvSetVirtualProcessorXsaveState: XSAVES-format task FPU buffers in
+    restored RAM misparse -> guest "Bad FPU state detected" panic. XCR0+XSS
+    now precede the xsave blob; Xss/Xfd/SpecCtrl are captured singly and
+    skipped where unsupported (one bad name fails a whole WHP batch).
+  Debug machinery that cracked it (kept, env-gated NEBULA_SNAP_DEBUG):
+  whp::debug_sample_vp / debug_sample_apic + a post-restore sampler thread
+  and per-vcpu exit logging — plus resolving guest RIPs against the unstripped
+  kernel image (nm ~/.nebula/kernel/Image) which turned "spinning at
+  0xffffffff8182b9f8" into "__send_to_port+0x108".
+  Windows-only nebula fixes along the way: clone_file shelled out to `cp`
+  (absent on Windows; named vessels had never run there), the krun-worker CLI
+  subcommand was stale-gated to unix, and spawned workers inherited the CLI's
+  stdout pipe handle (CreateProcess bInheritHandles) so `vessels new | ...`
+  never saw EOF — stdio inherit flags are now stripped before spawning.
+  Perf note: Windows snapshots are full-size on disk (no sparse files / no
+  reflink on NTFS — 2GiB memory.bin, 7s save vs 1.2s/100MiB on Linux);
+  FSCTL_SET_SPARSE is the follow-up.

@@ -434,20 +434,15 @@ fn main() -> anyhow::Result<()> {
                 cmd,
             }),
         },
-        #[allow(unused_variables)]
         Commands::KrunWorker { spec } => {
-            #[cfg(unix)]
+            // Cross-platform: KVM-backed libkrun on Linux, WHP on Windows
+            // (nebulad spawns the same worker entry for the engine vessel).
             match nebula_core::backend::krun::run_worker(&spec) {
                 Ok(never) => match never {},
                 Err(e) => {
                     eprintln!("krun-worker: {e}");
                     std::process::exit(1);
                 }
-            }
-            #[cfg(not(unix))]
-            {
-                eprintln!("krun-worker requires unix (the WHP worker is separate)");
-                std::process::exit(1);
             }
         }
         Commands::VzWorker {

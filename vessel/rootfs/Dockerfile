@@ -26,11 +26,13 @@ RUN if [ "$FLAVOR" = "slim" ]; then \
     fi
 
 # slimd: the nebula-slim engine binary, staged into vessel/rootfs/bin by
-# build-rootfs.sh when FLAVOR=slim (built from ~/Projects/nebula-slim).
-# The .slimkeep anchor (always present) lets the slimd* wildcard match zero
-# files for non-slim flavors without erroring (canonical optional-COPY trick).
-COPY bin/.slimkeep bin/slimd* /usr/local/bin/
+# build-rootfs.sh when FLAVOR=slim (built from ~/Projects/nebula-slim). `pause`
+# is the tiny static pod-sandbox binary slimd registers as nebula/pause:slim.
+# The .slimkeep anchor (always present) lets the slimd*/pause* wildcards match
+# zero files for non-slim flavors without erroring (canonical optional-COPY trick).
+COPY bin/.slimkeep bin/slimd* bin/pause* /usr/local/bin/
 RUN if [ -f /usr/local/bin/slimd ]; then chmod 755 /usr/local/bin/slimd; fi
+RUN if [ -f /usr/local/bin/pause ]; then chmod 755 /usr/local/bin/pause; fi
 
 # k3s: full flavor only (it bundles its own kubectl for in-guest use).
 # Release asset name: k3s-arm64 for arm64; plain `k3s` for amd64.

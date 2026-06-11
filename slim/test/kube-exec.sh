@@ -5,13 +5,14 @@
 set -u
 SLIMD="${SLIMD:-$(dirname "$0")/../target/aarch64-unknown-linux-musl/release/slimd}"
 DSLIM="${DSLIM:-$(dirname "$0")/../target/aarch64-unknown-linux-musl/release/docker-slim}"
+PAUSE="${PAUSE:-$(dirname "$0")/../target/aarch64-unknown-linux-musl/release/pause}"
 KUBECTL="${KUBECTL:-/opt/homebrew/bin/kubectl}"; command -v "$KUBECTL" >/dev/null || KUBECTL=kubectl
 STAGE="$HOME/.slim-exec-test"
 PASS=0; FAIL=0
 ok(){ PASS=$((PASS+1)); echo "PASS: $1"; }
 bad(){ FAIL=$((FAIL+1)); echo "FAIL: $1 -- $2"; }
 
-rm -rf "$STAGE"; mkdir -p "$STAGE"; cp "$SLIMD" "$STAGE/slimd"; cp "$DSLIM" "$STAGE/docker-slim"
+rm -rf "$STAGE"; mkdir -p "$STAGE"; cp "$SLIMD" "$STAGE/slimd"; cp "$DSLIM" "$STAGE/docker-slim"; cp "$PAUSE" "$STAGE/pause"
 cat > "$STAGE/dep.yaml" <<YAML
 apiVersion: apps/v1
 kind: Deployment
@@ -24,7 +25,7 @@ spec:
     spec: {containers: [{name: app, image: alpine:3.19, command: ["sh","-c","echo BOOT-LOG; sleep 600"]}]}
 YAML
 docker rm -f slim-exec >/dev/null 2>&1
-docker run -d --privileged -p 18443:6443 -v "$STAGE:/slim" --name slim-exec alpine:3.19 sh -c \
+docker run -d --privileged -e SLIM_REGISTRY_MIRROR -p 18443:6443 -v "$STAGE:/slim" --name slim-exec alpine:3.19 sh -c \
   'apk add --no-cache iptables ip6tables iproute2 >/dev/null 2>&1; mkdir -p /var/lib/nebula && mount -t tmpfs tmpfs /var/lib/nebula; export SLIM_DATA=/var/lib/nebula/slim SLIM_RUN_DIR=/var/lib/nebula/run SLIM_KUBE_API_ADDR=0.0.0.0:6443; exec /slim/slimd' >/dev/null 2>&1
 trap 'docker rm -f slim-exec >/dev/null 2>&1' EXIT
 for i in $(seq 1 40); do curl -sk https://localhost:18443/version >/dev/null 2>&1 && break; sleep 1; done

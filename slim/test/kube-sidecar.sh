@@ -5,13 +5,14 @@
 set -u
 SLIMD="${SLIMD:-$(dirname "$0")/../target/aarch64-unknown-linux-musl/release/slimd}"
 DSLIM="${DSLIM:-$(dirname "$0")/../target/aarch64-unknown-linux-musl/release/docker-slim}"
+PAUSE="${PAUSE:-$(dirname "$0")/../target/aarch64-unknown-linux-musl/release/pause}"
 KUBECTL="${KUBECTL:-/opt/homebrew/bin/kubectl}"; command -v "$KUBECTL" >/dev/null || KUBECTL=kubectl
 STAGE="$HOME/.slim-sidecar-test"
 PASS=0; FAIL=0
 ok(){ PASS=$((PASS+1)); echo "PASS: $1"; }
 bad(){ FAIL=$((FAIL+1)); echo "FAIL: $1 -- $2"; }
 
-rm -rf "$STAGE"; mkdir -p "$STAGE"; cp "$SLIMD" "$STAGE/slimd"; cp "$DSLIM" "$STAGE/docker-slim"
+rm -rf "$STAGE"; mkdir -p "$STAGE"; cp "$SLIMD" "$STAGE/slimd"; cp "$DSLIM" "$STAGE/docker-slim"; cp "$PAUSE" "$STAGE/pause"
 
 # app writes a file into the shared emptyDir and serves it on localhost:8080;
 # the sidecar shares the netns (reaches localhost) and the volume (reads the file).
@@ -41,7 +42,7 @@ YAML
 
 docker rm -f slim-sidecar >/dev/null 2>&1
 for i in $(seq 1 20); do docker inspect slim-sidecar >/dev/null 2>&1 || break; sleep 0.5; done
-docker run -d --privileged -p 16445:6443 -v "$STAGE:/slim" --name slim-sidecar alpine:3.19 sh -c \
+docker run -d --privileged -e SLIM_REGISTRY_MIRROR -p 16445:6443 -v "$STAGE:/slim" --name slim-sidecar alpine:3.19 sh -c \
   'apk add --no-cache iptables ip6tables iproute2 >/dev/null 2>&1; mkdir -p /var/lib/nebula && mount -t tmpfs tmpfs /var/lib/nebula; export SLIM_DATA=/var/lib/nebula/slim SLIM_RUN_DIR=/var/lib/nebula/run SLIM_KUBE_API_ADDR=0.0.0.0:6443; exec /slim/slimd' >/dev/null 2>&1
 trap 'docker rm -f slim-sidecar >/dev/null 2>&1' EXIT
 for i in $(seq 1 40); do curl -sk https://localhost:16445/version >/dev/null 2>&1 && break; sleep 1; done
@@ -73,6 +74,10 @@ O=$($KC exec multi-0 -c side -- nc -w2 localhost 8080 2>&1); echo "$O" | grep -q
 
 # default exec (no -c) targets the holder (app)
 O=$($KC exec multi-0 -- cat /data/msg 2>&1); echo "$O" | grep -q from-app && ok "default exec targets holder" || bad exec-holder "$O"
+
+# the pod sandbox uses the built-in pause image (not the app image)
+O=$(docker exec slim-sidecar /slim/docker-slim ps -a --format '{{.Image}}' 2>/dev/null)
+echo "$O" | grep -q "nebula/pause" && ok "pod sandbox uses built-in pause image" || bad pause-image "$O"
 
 # delete tears down both containers
 $KC delete deployment multi >/dev/null 2>&1; sleep 4

@@ -164,6 +164,13 @@ pub trait VirtioDevice: AsAny + Send {
     fn shm_region(&self) -> Option<&VirtioShmRegion> {
         None
     }
+
+    /// Called after a snapshot-restore activation replay. The restored guest
+    /// will never repeat driver handshakes it already performed (e.g. the
+    /// virtio-console DEVICE_READY/PORT_READY/PORT_OPEN control exchange),
+    /// so devices that defer worker startup until such a handshake must
+    /// re-prime themselves here.
+    fn post_restore(&mut self) {}
 }
 
 pub trait VmmExitObserver: Send {
