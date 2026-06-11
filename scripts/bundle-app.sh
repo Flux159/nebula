@@ -25,7 +25,13 @@ fi
 scripts/sign-dev.sh target/release/nebula target/release/nebulad
 
 echo "==> guest images"
-if [ ! -f dist/kernel-Image.gz ] || [ ! -f dist/rootfs.img.gz ]; then
+# dist/ artifacts are arch-suffixed (package-images.sh / guest-images.yml);
+# the in-app resource keeps the plain name (the .app is arm64-only).
+case "$(uname -m)" in
+    arm64|aarch64) IMG_ARCH=arm64 ;;
+    *) IMG_ARCH=x86_64 ;;
+esac
+if [ ! -f "dist/kernel-Image-$IMG_ARCH.gz" ] || [ ! -f "dist/rootfs-$IMG_ARCH.img.gz" ]; then
     test -f vessel/out/Image && test -f vessel/out/rootfs.img \
         || { echo "ERROR: build guest images first (vessel/build-*.sh) or fetch dist/"; exit 1; }
     scripts/package-images.sh
@@ -41,7 +47,8 @@ echo "==> staging sidecars + resources"
 mkdir -p ui/src-tauri/binaries ui/src-tauri/resources ui/src-tauri/frameworks
 cp target/release/nebula  "ui/src-tauri/binaries/nebula-$TRIPLE"
 cp target/release/nebulad "ui/src-tauri/binaries/nebulad-$TRIPLE"
-cp dist/kernel-Image.gz dist/rootfs.img.gz ui/src-tauri/resources/
+cp "dist/kernel-Image-$IMG_ARCH.gz" ui/src-tauri/resources/kernel-Image.gz
+cp "dist/rootfs-$IMG_ARCH.img.gz" ui/src-tauri/resources/rootfs.img.gz
 cp apps/catalog.json ui/src-tauri/resources/apps-catalog.json
 # -> Nebula.app/Contents/Frameworks (the nebula sidecar in Contents/MacOS
 #    resolves Frameworks/libkrun.dylib via its ancestor walk).
