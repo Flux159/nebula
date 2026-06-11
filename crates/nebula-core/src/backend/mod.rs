@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::spec::VmSpec;
 
-#[cfg(all(feature = "libkrun", unix))]
+#[cfg(feature = "libkrun")]
 pub mod krun;
 
 /// Host-side stream for a guest vsock connection. Unix sockets on
@@ -111,7 +111,7 @@ pub fn backend_by_name(name: &str) -> Result<Box<dyn VmmBackend>> {
     match name {
         #[cfg(all(target_os = "macos", feature = "vz"))]
         "vz" => Ok(Box::new(vz::VzBackend::new())),
-        #[cfg(all(feature = "libkrun", unix))]
+        #[cfg(feature = "libkrun")]
         "krun" => Ok(Box::new(krun::KrunBackend::new())),
         other => Err(Error::BackendUnavailable(
             "unknown",

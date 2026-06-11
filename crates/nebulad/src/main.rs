@@ -24,8 +24,7 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     // The krun backend re-execs the CURRENT binary as its VM worker
     // (krun_start_enter takes over the process) — when the engine runs on
-    // krun (Linux), that binary is nebulad, so route the arg before clap.
-    #[cfg(unix)]
+    // krun (Linux/Windows), that binary is nebulad, so route the arg before clap.
     {
         let mut args = std::env::args().skip(1);
         if args.next().as_deref() == Some("krun-worker") {

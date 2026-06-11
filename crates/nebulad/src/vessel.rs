@@ -80,11 +80,18 @@ impl Vessel {
                     read_only: false,
                 },
             ],
-            shares: home_share(),
-            // Nat everywhere: VZ NAT on macOS; passt-backed virtio-net on
-            // Linux (the engine needs outbound for image pulls — TSI's
-            // guest-side hijack doesn't apply to our own-init disk boots).
-            net: NetSpec::Nat,
+            // No virtiofs on the Windows fork yet (and HOME is unix-only).
+            shares: if cfg!(windows) { vec![] } else { home_share() },
+            // Nat everywhere it exists: VZ NAT on macOS; the fork's usernet
+            // virtio-net on Linux (the engine needs outbound for image
+            // pulls — TSI's guest-side hijack doesn't apply to our
+            // own-init disk boots). Windows: no net device until usernet's
+            // socketpair transport is ported — agent/vsock still work.
+            net: if cfg!(windows) {
+                NetSpec::None
+            } else {
+                NetSpec::Nat
+            },
             vsock: macos,
             console: ConsoleSpec::File(paths.console_log()),
             balloon: macos,

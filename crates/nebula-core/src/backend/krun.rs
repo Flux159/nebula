@@ -33,6 +33,8 @@ const DYLIB_CANDIDATES: &[&str] = &[
     "/usr/lib64/libkrun.so.1",
     "/usr/lib/libkrun.so.1",
 ];
+#[cfg(target_os = "windows")]
+const DYLIB_CANDIDATES: &[&str] = &[];
 
 /// Near-binary fork locations checked before the system candidates
 /// (app bundle / embed kit / dev tree).
@@ -47,6 +49,12 @@ const NEAR_EXE_CANDIDATES: &[&str] = &[
     "lib/libkrun.so.1",
     "third_party/libkrun/target/release/libkrun.so.1.18.0",
 ];
+#[cfg(target_os = "windows")]
+const NEAR_EXE_CANDIDATES: &[&str] = &[
+    "krun.dll",
+    "lib/krun.dll",
+    "third_party/libkrun/target/release/krun.dll",
+];
 
 /// Direct kernel boot format per guest arch: arm64 takes the raw `Image`,
 /// x86_64 takes an ELF `vmlinux`.
@@ -55,6 +63,11 @@ const KRUN_KERNEL_FORMAT: u32 = 0; // KRUN_KERNEL_FORMAT_RAW
 #[cfg(target_arch = "x86_64")]
 const KRUN_KERNEL_FORMAT: u32 = 1; // KRUN_KERNEL_FORMAT_ELF
 
+#[cfg(unix)]
+type ConsoleIo = i32;
+#[cfg(windows)]
+type ConsoleIo = *mut c_void;
+
 #[allow(non_snake_case)]
 struct KrunApi {
     krun_create_ctx: unsafe extern "C" fn() -> i32,
@@ -62,8 +75,10 @@ struct KrunApi {
     krun_set_vm_config: unsafe extern "C" fn(u32, u8, u32) -> i32,
     krun_set_kernel:
         unsafe extern "C" fn(u32, *const c_char, u32, *const c_char, *const c_char) -> i32,
-    /// Wire a virtio-console (hvc0) to explicit host fds.
-    krun_add_virtio_console_default: unsafe extern "C" fn(u32, i32, i32, i32) -> i32,
+    /// Wire a virtio-console (hvc0) to explicit host fds (unix) or
+    /// kernel HANDLEs (windows).
+    krun_add_virtio_console_default:
+        unsafe extern "C" fn(u32, ConsoleIo, ConsoleIo, ConsoleIo) -> i32,
     /// Optional: only exported when libkrun is built with BLK=1.
     krun_add_disk2:
         Option<unsafe extern "C" fn(u32, *const c_char, *const c_char, u32, bool) -> i32>,
@@ -79,6 +94,16 @@ struct KrunApi {
     /// Optional: our fork's in-process usermode NAT (no passt needed).
     krun_add_net_usernet: Option<unsafe extern "C" fn(u32, *const u8) -> i32>,
     krun_start_enter: unsafe extern "C" fn(u32) -> i32,
+}
+
+#[cfg(windows)]
+mod win_dl {
+    use std::ffi::{c_char, c_void};
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        pub fn LoadLibraryW(lp_lib_file_name: *const u16) -> *mut c_void;
+        pub fn GetProcAddress(h_module: *mut c_void, lp_proc_name: *const c_char) -> *mut c_void;
+    }
 }
 
 /// virglrenderer flags (libkrun.h): VENUS | no_virgl | thread_sync | external_blob.
@@ -125,14 +150,36 @@ fn load_api() -> Result<&'static KrunApi> {
     static API: OnceLock<std::result::Result<KrunApi, String>> = OnceLock::new();
     let res = API.get_or_init(|| {
         let path = dylib_path().map_err(|e| e.to_string())?;
-        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
-        let handle = unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-        if handle.is_null() {
-            return Err(format!("dlopen({}) failed", path.display()));
-        }
+        #[cfg(unix)]
+        let handle = {
+            let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+            let handle =
+                unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+            if handle.is_null() {
+                return Err(format!("dlopen({}) failed", path.display()));
+            }
+            handle
+        };
+        #[cfg(windows)]
+        let handle = {
+            let mut wide: Vec<u16> = path.to_string_lossy().encode_utf16().collect();
+            wide.push(0);
+            let handle = unsafe { win_dl::LoadLibraryW(wide.as_ptr()) };
+            if handle.is_null() {
+                return Err(format!(
+                    "LoadLibraryW({}) failed: {}",
+                    path.display(),
+                    std::io::Error::last_os_error()
+                ));
+            }
+            handle
+        };
         unsafe fn sym<T>(handle: *mut c_void, name: &str) -> std::result::Result<T, String> {
             let cname = CString::new(name).unwrap();
+            #[cfg(unix)]
             let ptr = unsafe { libc::dlsym(handle, cname.as_ptr()) };
+            #[cfg(windows)]
+            let ptr = unsafe { win_dl::GetProcAddress(handle, cname.as_ptr()) };
             if ptr.is_null() {
                 return Err(format!("symbol `{name}` missing from libkrun"));
             }
@@ -253,9 +300,18 @@ impl VmHandle for KrunVm {
         let Some(child) = guard.as_mut() else {
             return Ok(());
         };
-        let pid = child.id() as i32;
-        let sig = if force { libc::SIGKILL } else { libc::SIGTERM };
-        unsafe { libc::kill(pid, sig) };
+        #[cfg(unix)]
+        {
+            let pid = child.id() as i32;
+            let sig = if force { libc::SIGKILL } else { libc::SIGTERM };
+            unsafe { libc::kill(pid, sig) };
+        }
+        #[cfg(windows)]
+        {
+            // No SIGTERM equivalent for a console-less worker; terminate.
+            let _ = force;
+            let _ = child.kill();
+        }
         let _ = child.wait();
         Ok(())
     }
@@ -276,12 +332,33 @@ impl VmHandle for KrunVm {
                     format!("vsock:{port}: no host socket mapped for this port"),
                 )
             })?;
-        std::os::unix::net::UnixStream::connect(&map.host_path).map_err(|e| {
+        #[cfg(unix)]
+        return std::os::unix::net::UnixStream::connect(&map.host_path).map_err(|e| {
             Error::backend(
                 BACKEND,
                 format!("vsock:{port} via {}: {e}", map.host_path.display()),
             )
-        })
+        });
+        // Windows: the fork's vsock backend binds 127.0.0.1:0 and publishes
+        // the port number in a file at host_path (nebula ipc convention).
+        #[cfg(windows)]
+        {
+            let text = std::fs::read_to_string(&map.host_path).map_err(|e| {
+                Error::backend(
+                    BACKEND,
+                    format!("vsock:{port} port file {}: {e}", map.host_path.display()),
+                )
+            })?;
+            let tcp_port: u16 = text.trim().parse().map_err(|_| {
+                Error::backend(
+                    BACKEND,
+                    format!("vsock:{port} bad port file {}", map.host_path.display()),
+                )
+            })?;
+            std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, tcp_port)).map_err(
+                |e| Error::backend(BACKEND, format!("vsock:{port} via 127.0.0.1:{tcp_port}: {e}")),
+            )
+        }
     }
 
     fn balloon_set_guest_mib(&mut self, _target_mib: u64) -> Result<()> {
@@ -305,6 +382,7 @@ impl Drop for KrunVm {
 /// spec and enters it; never returns (the process becomes the VM).
 /// Find passt for NetSpec::Nat NICs. Env override, PATH, then ~/.local/bin
 /// (the sudo-free dpkg-extract location).
+#[cfg(unix)]
 fn passt_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("NEBULA_PASST_PATH") {
         let p = PathBuf::from(p);
@@ -388,16 +466,36 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            use std::os::fd::IntoRawFd;
-            let out = std::fs::File::create(path)?.into_raw_fd();
-            let err = libc::dup(out);
-            let devnull = std::fs::File::open("/dev/null")?.into_raw_fd();
-            // fds are intentionally leaked into the VMM (it owns them now);
-            // err gets its own fd — libkrun's epoll shim rejects duplicates.
-            check(
-                "krun_add_virtio_console_default",
-                (api.krun_add_virtio_console_default)(ctx, devnull, out, err),
-            )?;
+            #[cfg(unix)]
+            {
+                use std::os::fd::IntoRawFd;
+                let out = std::fs::File::create(path)?.into_raw_fd();
+                let err = libc::dup(out);
+                let devnull = std::fs::File::open("/dev/null")?.into_raw_fd();
+                // fds are intentionally leaked into the VMM (it owns them now);
+                // err gets its own fd — libkrun's epoll shim rejects duplicates.
+                check(
+                    "krun_add_virtio_console_default",
+                    (api.krun_add_virtio_console_default)(ctx, devnull, out, err),
+                )?;
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::IntoRawHandle;
+                let out_file = std::fs::File::create(path)?;
+                let err_file = out_file.try_clone()?;
+                let devnull = std::fs::File::open("NUL")?;
+                // handles are intentionally leaked into the VMM (it owns them).
+                check(
+                    "krun_add_virtio_console_default",
+                    (api.krun_add_virtio_console_default)(
+                        ctx,
+                        devnull.into_raw_handle(),
+                        out_file.into_raw_handle(),
+                        err_file.into_raw_handle(),
+                    ),
+                )?;
+            }
         }
 
         // Networking: with no net device libkrun uses TSI (transparent
@@ -417,6 +515,14 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
                     check("krun_add_net_usernet", add_usernet(ctx, mac.as_ptr()))?;
                 }
             }
+            #[cfg(windows)]
+            if force_passt || api.krun_add_net_usernet.is_none() {
+                return Err(Error::backend(
+                    BACKEND,
+                    "NetSpec::Nat on Windows needs the fork's usernet (not ported yet)",
+                ));
+            }
+            #[cfg(unix)]
             if force_passt || api.krun_add_net_usernet.is_none() {
                 // Fallback/debug path: external passt proxy.
                 let add_net = api.krun_add_net_unixstream.ok_or_else(|| {
