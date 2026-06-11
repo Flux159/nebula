@@ -3061,3 +3061,158 @@ pub mod tests {
         let _ = format!("{err}{err:?}");
     }
 }
+
+
+// --- snapshot restore -------------------------------------------------------
+
+/// Loaded contents of a krun snapshot directory (linux/KVM).
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub struct LoadedSnapshot {
+    pub guest_memory: GuestMemoryMmap,
+    pub vm_state: crate::vstate::VmState,
+    pub vcpu_states: Vec<crate::vstate::VcpuState>,
+    pub device_states: Vec<devices::virtio::MmioTransportState>,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn load_snapshot(dir: &std::path::Path) -> std::result::Result<LoadedSnapshot, String> {
+    use std::io::Read;
+
+    let format = std::fs::read_to_string(dir.join("format.txt"))
+        .map_err(|e| format!("read format.txt: {e}"))?;
+    if format.trim() != "krun-snapshot-v1" {
+        return Err(format!("unsupported snapshot format: {}", format.trim()));
+    }
+
+    // Guest memory: each region mapped MAP_PRIVATE from memory.bin — pages
+    // fault in on demand and clones share them copy-on-write.
+    let mem_file =
+        std::fs::File::open(dir.join("memory.bin")).map_err(|e| format!("memory.bin: {e}"))?;
+    let mut rd = std::io::BufReader::new(&mem_file);
+    let mut u64buf = [0u8; 8];
+    let mut read_u64 = |rd: &mut dyn Read| -> std::result::Result<u64, String> {
+        rd.read_exact(&mut u64buf)
+            .map_err(|e| format!("memory.bin header: {e}"))?;
+        Ok(u64::from_le_bytes(u64buf))
+    };
+    let n_regions = read_u64(&mut rd)? as usize;
+    let mut layout = Vec::with_capacity(n_regions);
+    for _ in 0..n_regions {
+        let addr = read_u64(&mut rd)?;
+        let len = read_u64(&mut rd)?;
+        layout.push((addr, len));
+    }
+    let data_start = 8 + n_regions as u64 * 16;
+
+    let mut regions = Vec::with_capacity(n_regions);
+    let mut off = data_start;
+    for (addr, len) in &layout {
+        let file = mem_file.try_clone().map_err(|e| e.to_string())?;
+        let mmap = MmapRegion::build(
+            Some(vm_memory::FileOffset::new(file, off)),
+            *len as usize,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_NORESERVE,
+        )
+        .map_err(|e| format!("map region @{addr:#x}: {e}"))?;
+        regions.push(
+            GuestRegionMmap::new(mmap, GuestAddress(*addr))
+                .ok_or_else(|| "bad region".to_string())?,
+        );
+        off += len;
+    }
+    let guest_memory = GuestMemoryMmap::from_regions(regions)
+        .map_err(|e| format!("assemble guest memory: {e}"))?;
+
+    let mut f = std::io::BufReader::new(
+        std::fs::File::open(dir.join("vm.state")).map_err(|e| format!("vm.state: {e}"))?,
+    );
+    let vm_state =
+        crate::vstate::VmState::deserialize_from(&mut f).map_err(|e| format!("vm.state: {e}"))?;
+
+    let mut f = std::io::BufReader::new(
+        std::fs::File::open(dir.join("vcpus.state")).map_err(|e| format!("vcpus.state: {e}"))?,
+    );
+    let mut cbuf = [0u8; 8];
+    f.read_exact(&mut cbuf).map_err(|e| e.to_string())?;
+    let n_vcpus = u64::from_le_bytes(cbuf) as usize;
+    let mut vcpu_states = Vec::with_capacity(n_vcpus);
+    for _ in 0..n_vcpus {
+        vcpu_states.push(
+            crate::vstate::VcpuState::deserialize_from(&mut f)
+                .map_err(|e| format!("vcpu state: {e}"))?,
+        );
+    }
+
+    let device_states = load_device_states(&dir.join("devices.state"))?;
+
+    Ok(LoadedSnapshot {
+        guest_memory,
+        vm_state,
+        vcpu_states,
+        device_states,
+    })
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn load_device_states(
+    path: &std::path::Path,
+) -> std::result::Result<Vec<devices::virtio::MmioTransportState>, String> {
+    use std::io::Read;
+
+    let mut f = std::io::BufReader::new(
+        std::fs::File::open(path).map_err(|e| format!("devices.state: {e}"))?,
+    );
+    let mut b8 = [0u8; 8];
+    let mut b4 = [0u8; 4];
+    let mut ru64 = |f: &mut dyn Read| -> std::result::Result<u64, String> {
+        f.read_exact(&mut b8).map_err(|e| e.to_string())?;
+        Ok(u64::from_le_bytes(b8))
+    };
+    let mut ru32 = |f: &mut dyn Read| -> std::result::Result<u32, String> {
+        f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+        Ok(u32::from_le_bytes(b4))
+    };
+
+    let n = ru64(&mut f)? as usize;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let device_type = ru32(&mut f)?;
+        let features_select = ru32(&mut f)?;
+        let acked_features_select = ru32(&mut f)?;
+        let queue_select = ru32(&mut f)?;
+        let device_status = ru32(&mut f)?;
+        let config_generation = ru32(&mut f)?;
+        let shm_region_select = ru32(&mut f)?;
+        let interrupt_status = ru64(&mut f)?;
+        let acked_features = ru64(&mut f)?;
+        let n_queues = ru64(&mut f)? as usize;
+        let mut queue_states = Vec::with_capacity(n_queues);
+        for _ in 0..n_queues {
+            let mut qs = std::mem::MaybeUninit::<devices::virtio::QueueState>::zeroed();
+            // SAFETY: QueueState is repr(C) plain data; filling its bytes
+            // fully initializes it.
+            unsafe {
+                let bytes = std::slice::from_raw_parts_mut(
+                    qs.as_mut_ptr() as *mut u8,
+                    std::mem::size_of::<devices::virtio::QueueState>(),
+                );
+                f.read_exact(bytes).map_err(|e| e.to_string())?;
+                queue_states.push(qs.assume_init());
+            }
+        }
+        out.push(devices::virtio::MmioTransportState {
+            device_type,
+            features_select,
+            acked_features_select,
+            queue_select,
+            device_status,
+            config_generation,
+            shm_region_select,
+            interrupt_status,
+            acked_features,
+            queue_states,
+        });
+    }
+    Ok(out)
+}
