@@ -470,7 +470,7 @@ impl Vmm {
     /// vcpus are paused.
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub fn save_memory(&self, path: &std::path::Path) -> std::io::Result<()> {
-        use std::io::Write;
+        use std::io::{Seek, Write};
         use vm_memory::{Address, GuestMemory, GuestMemoryRegion};
 
         let mut out = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(path)?);
@@ -480,6 +480,12 @@ impl Vmm {
             write_u64(&mut out, r.start_addr().raw_value())?;
             write_u64(&mut out, r.len())?;
         }
+        // Write sparsely: all-zero 4K pages become holes (seek), which both
+        // shrinks idle-VM snapshots dramatically and lets the MAP_PRIVATE
+        // restore fault them in as zero pages for free.
+        out.flush()?;
+        let mut file = out.into_inner().map_err(|e| e.into_error())?;
+        const PAGE: usize = 4096;
         for r in &regions {
             // SAFETY: the region is a live mapping of len bytes; vcpus are
             // paused so the snapshot is consistent.
@@ -488,9 +494,27 @@ impl Vmm {
                 .get_host_address(r.start_addr())
                 .map_err(|e| std::io::Error::other(format!("host addr: {e}")))?;
             let bytes = unsafe { std::slice::from_raw_parts(host, r.len() as usize) };
-            out.write_all(bytes)?;
+            let mut run_start = 0usize;
+            let mut off = 0usize;
+            while off < bytes.len() {
+                let end = (off + PAGE).min(bytes.len());
+                if bytes[off..end].iter().all(|&b| b == 0) {
+                    if run_start < off {
+                        file.write_all(&bytes[run_start..off])?;
+                    }
+                    file.seek(std::io::SeekFrom::Current((end - off) as i64))?;
+                    run_start = end;
+                }
+                off = end;
+            }
+            if run_start < bytes.len() {
+                file.write_all(&bytes[run_start..])?;
+            }
         }
-        out.flush()
+        // Holes at EOF need an explicit length.
+        let total: u64 = 8 + regions.len() as u64 * 16 + regions.iter().map(|r| r.len()).sum::<u64>();
+        file.set_len(total)?;
+        file.flush()
     }
 
     pub fn guest_memory(&self) -> &GuestMemoryMmap {
