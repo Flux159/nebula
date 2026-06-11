@@ -47,6 +47,9 @@ const NEAR_EXE_CANDIDATES: &[&str] = &[
 #[cfg(target_os = "linux")]
 const NEAR_EXE_CANDIDATES: &[&str] = &[
     "lib/libkrun.so.1",
+    // plain `cargo build` output first: the versioned name is only refreshed
+    // by scripts/build-libkrun.sh and goes stale in dev trees
+    "third_party/libkrun/target/release/libkrun.so",
     "third_party/libkrun/target/release/libkrun.so.1.18.0",
 ];
 #[cfg(target_os = "windows")]
