@@ -38,7 +38,9 @@ docker build \
 # Canonical artifact name is out/Image on both arches (x86_64 emits an
 # ELF vmlinux; everything downstream — install-image, packaging — keys
 # off the single name).
-if [ -f out/vmlinux ] && [ ! -f out/Image ]; then
-    cp out/vmlinux out/Image
+if [ -f out/vmlinux ]; then
+    # Overwrite: a stale Image from a previous build must not shadow the
+    # fresh vmlinux (the docker export only refreshes the arch's own file).
+    cp -f out/vmlinux out/Image
 fi
 ls -la out/Image out/vmlinux 2>/dev/null || true
