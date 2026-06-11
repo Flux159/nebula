@@ -43,6 +43,11 @@ O=$($KC apply -f "$STAGE/dep.yaml" 2>&1); echo "$O" | grep -q "deployment.apps/w
 sleep 5
 N=$(psnames | grep -c "default_web-"); [ "$N" -eq 2 ] && ok "deployment spawned 2 real containers" || bad spawn "got $N: $(psnames)"
 O=$($KC get pods 2>&1); echo "$O" | grep -q "web-0" && ok "kubectl get pods shows synthesized pods" || bad getpods "$O"
+# Phase 1: containerStatuses → real kubectl READY column + per-container fields.
+O=$($KC get pod web-0 -o jsonpath='{.status.containerStatuses[0].ready}' 2>&1); [ "$O" = "true" ] && ok "containerStatus ready=true" || bad cs-ready "$O"
+O=$($KC get pod web-0 -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>&1); [ "$O" = "0" ] && ok "containerStatus restartCount present" || bad cs-restarts "$O"
+O=$($KC get pod web-0 --no-headers 2>&1); echo "$O" | grep -qE "web-0 +1/1 +Running" && ok "kubectl READY column 1/1" || bad ready-col "$O"
+O=$($KC get pod web-0 -o jsonpath='{.status.containerStatuses[0].state.running.startedAt}' 2>&1); [ -n "$O" ] && ok "containerStatus state.running.startedAt" || bad cs-started "$O"
 O=$($KC scale deployment/web --replicas=3 2>&1); echo "$O" | grep -q scaled && ok "kubectl scale (clean)" || bad scale "$O"
 sleep 5
 N=$(psnames | grep -c "default_web-"); [ "$N" -eq 3 ] && ok "scaled up to 3 containers" || bad scaleup "got $N"

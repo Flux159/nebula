@@ -9,13 +9,15 @@
 //! operators watching Pods see live state. Simpler and more self-healing than
 //! edge-triggered reconciliation.
 
+use crate::container::State;
 use crate::engine::EngineRef;
 use serde_json::{json, Value};
 use slim_kubeapi::{ApiServer, ExecHandle, LogOpts, PodProxy, SharedStore, Store};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const OWNER: &str = "io.nebula.kube.owner"; // "<kind>/<ns>/<name>"
 const POD_OF: &str = "io.nebula.kube.pod"; // "<ns>/<podname>"
@@ -28,6 +30,9 @@ struct BridgeCtx {
     sa_root: PathBuf,
     kube_host: String, // the bridge gateway IP slimd's TLS listener is on
     kube_port: u16,
+    /// Per-container readiness from the prober (cname → ready). Absent = no
+    /// readiness probe (ready == running); present = gated on the probe.
+    readiness: Arc<Mutex<HashMap<String, bool>>>,
 }
 
 /// Start the apiserver-lite (TLS) + the reconcile loop. Spawns background
@@ -104,8 +109,19 @@ pub fn start(engine: &EngineRef, api_addr: &str) -> SharedStore {
         sa_root: engine.paths.data.join("kube-sa"),
         kube_host: gw,
         kube_port: port,
+        readiness: Arc::new(Mutex::new(HashMap::new())),
     };
     register_kubernetes_service(&store, engine, &ctx);
+
+    // Probe loop: evaluates readiness/liveness probes and feeds readiness back
+    // into pod status (reconcile reads ctx.readiness). Liveness failures kill
+    // the container so the engine's restart supervision recreates it.
+    {
+        let engine_p = engine.clone();
+        let store_p = store.clone();
+        let readiness = ctx.readiness.clone();
+        std::thread::spawn(move || probe_loop(&engine_p, &store_p, &readiness));
+    }
 
     let engine = engine.clone();
     let store2 = store.clone();
@@ -381,13 +397,16 @@ fn ensure_container(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d:
             }
             Err(e) => {
                 eprintln!("slimd: bridge create {} failed: {e}", d.cname);
-                sync_pod(store, d, "Pending", "", &format!("create failed: {e}"));
+                let (cn, img) = pod_container0(&d.template);
+                let cs = vec![waiting_status(&cn, &img, "CreateContainerError")];
+                sync_pod(store, d, "Pending", "", &format!("create failed: {e}"), &cs);
                 return;
             }
         }
     }
-    // Sync Pod status from the live container.
-    let (phase, ip, msg) = match engine.get_entry(&d.cname) {
+    // Sync Pod status + containerStatuses from the live container.
+    let (cname_k8s, image) = pod_container0(&d.template);
+    let (phase, ip, msg, cstatuses) = match engine.get_entry(&d.cname) {
         Ok(entry) => {
             let c = entry.c.lock().unwrap();
             let phase = match c.state.status.as_str() {
@@ -397,11 +416,61 @@ fn ensure_container(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d:
                 "exited" => "Failed",
                 _ => "Unknown",
             };
-            (phase, c.ip.clone(), String::new())
+            let ready_override = ctx.readiness.lock().unwrap().get(&d.cname).copied();
+            let cs = container_status(&cname_k8s, &image, &c.id, &c.state, ready_override);
+            (phase, c.ip.clone(), String::new(), vec![cs])
         }
-        Err(_) => ("Pending", String::new(), String::new()),
+        Err(_) => (
+            "Pending",
+            String::new(),
+            String::new(),
+            vec![waiting_status(&cname_k8s, &image, "ContainerCreating")],
+        ),
     };
-    sync_pod(store, d, phase, &ip, &msg);
+    sync_pod(store, d, phase, &ip, &msg, &cstatuses);
+}
+
+/// The pod's first container's k8s name + image, from the template.
+fn pod_container0(template: &Value) -> (String, String) {
+    let c0 = template.get("containers").and_then(|a| a.as_array()).and_then(|a| a.first());
+    let name = c0.and_then(|c| c.get("name")).and_then(|v| v.as_str()).unwrap_or("main").to_string();
+    let image = c0.and_then(|c| c.get("image")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    (name, image)
+}
+
+/// Build a k8s containerStatus from a live engine container State. `ready_override`
+/// is the prober verdict when a readiness probe exists (None = ready when running).
+fn container_status(name: &str, image: &str, id: &str, st: &State, ready_override: Option<bool>) -> Value {
+    let state_obj = match st.status.as_str() {
+        "running" => json!({"running": {"startedAt": st.started_at}}),
+        "exited" | "dead" => json!({"terminated": {
+            "exitCode": st.exit_code,
+            "startedAt": st.started_at,
+            "finishedAt": st.finished_at,
+            "reason": if st.exit_code == 0 { "Completed" } else { "Error" },
+        }}),
+        _ => json!({"waiting": {"reason": "ContainerCreating"}}),
+    };
+    let ready = st.status == "running" && ready_override.unwrap_or(true);
+    json!({
+        "name": name,
+        "image": image,
+        "imageID": image,
+        "containerID": format!("slim://{id}"),
+        "ready": ready,
+        "started": st.status == "running",
+        "restartCount": st.restart_count,
+        "state": state_obj,
+    })
+}
+
+/// A containerStatus for a container that doesn't exist yet (waiting).
+fn waiting_status(name: &str, image: &str, reason: &str) -> Value {
+    json!({
+        "name": name, "image": image, "imageID": "",
+        "ready": false, "started": false, "restartCount": 0,
+        "state": {"waiting": {"reason": reason}},
+    })
 }
 
 /// Translate a pod template into a docker-style create request, resolving env
@@ -583,7 +652,7 @@ fn decode_secret(v: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| v.to_string())
 }
 
-fn sync_pod(store: &SharedStore, d: &Desired, phase: &str, ip: &str, msg: &str) {
+fn sync_pod(store: &SharedStore, d: &Desired, phase: &str, ip: &str, msg: &str, cstatuses: &[Value]) {
     let Some(info) = store.lookup("", "pods") else { return };
     let mut labels = d.labels.clone();
     if let Some(o) = labels.as_object_mut() {
@@ -593,6 +662,11 @@ fn sync_pod(store: &SharedStore, d: &Desired, phase: &str, ip: &str, msg: &str) 
         let mut it = d.owner.splitn(3, '/');
         (it.next().unwrap_or("").to_string(), { it.next(); it.next().unwrap_or("").to_string() })
     };
+    // Pod is Ready iff every container reports ready (Phase 2 makes per-container
+    // readiness probe-driven; for now ready == running).
+    let all_ready = !cstatuses.is_empty()
+        && cstatuses.iter().all(|c| c.get("ready").and_then(|r| r.as_bool()).unwrap_or(false));
+    let yn = |b: bool| if b { "True" } else { "False" };
     let pod = json!({
         "apiVersion": "v1",
         "kind": "Pod",
@@ -608,7 +682,13 @@ fn sync_pod(store: &SharedStore, d: &Desired, phase: &str, ip: &str, msg: &str) 
             "podIP": ip,
             "hostIP": "10.88.0.1",
             "message": msg,
-            "conditions": [{"type":"Ready","status": if phase=="Running" {"True"} else {"False"}}],
+            "containerStatuses": cstatuses,
+            "conditions": [
+                {"type":"PodScheduled","status":"True"},
+                {"type":"Initialized","status":"True"},
+                {"type":"ContainersReady","status": yn(all_ready)},
+                {"type":"Ready","status": yn(all_ready)},
+            ],
         },
     });
     store.put(&info, pod, &d.pod_ns, &d.pod_name, false);
@@ -618,4 +698,261 @@ fn strs(v: Option<&Value>) -> Vec<String> {
     v.and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default()
+}
+
+// ---- readiness / liveness probes (Phase 2) ----
+
+enum ProbeKind {
+    Http { path: String, port: u16 },
+    Tcp { port: u16 },
+    Exec { cmd: Vec<String> },
+}
+
+struct Probe {
+    kind: ProbeKind,
+    initial_delay: u64,
+    period: u64,
+    success_threshold: u32,
+    failure_threshold: u32,
+    timeout: u64,
+}
+
+#[derive(Default)]
+struct ProbeTrack {
+    first_seen: Option<Instant>,
+    last_run: Option<Instant>,
+    successes: u32,
+    failures: u32,
+    passing: bool,
+}
+
+/// Probe loop: every second, evaluate due readiness/liveness probes for managed
+/// running pods. Readiness feeds `readiness` (→ pod status); liveness failure
+/// kills the container so restart supervision recreates it. One thread, serial —
+/// fine at embedding scale; a slow exec/HTTP probe only delays the next tick.
+fn probe_loop(engine: &EngineRef, store: &SharedStore, readiness: &Arc<Mutex<HashMap<String, bool>>>) {
+    let mut tracks: HashMap<(String, &'static str), ProbeTrack> = HashMap::new();
+    loop {
+        probe_tick(engine, store, readiness, &mut tracks);
+        std::thread::sleep(Duration::from_millis(1000));
+    }
+}
+
+fn probe_tick(
+    engine: &EngineRef,
+    store: &SharedStore,
+    readiness: &Arc<Mutex<HashMap<String, bool>>>,
+    tracks: &mut HashMap<(String, &'static str), ProbeTrack>,
+) {
+    let Some(info) = store.lookup("", "pods") else { return };
+    let pods = store.list(&info, None, &[]).0;
+    let mut live: HashSet<String> = HashSet::new();
+    for pod in pods {
+        if pod.pointer("/metadata/labels").and_then(|l| l.get(MANAGED)).is_none() {
+            continue;
+        }
+        let ns = pod.pointer("/metadata/namespace").and_then(|v| v.as_str()).unwrap_or("default");
+        let name = pod.pointer("/metadata/name").and_then(|v| v.as_str()).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let cname = format!("{ns}_{name}");
+        let pod_ip = pod.pointer("/status/podIP").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let c0 = pod.pointer("/spec/containers/0");
+        let readiness_probe = c0.and_then(|c| c.get("readinessProbe")).and_then(parse_probe);
+        let liveness_probe = c0.and_then(|c| c.get("livenessProbe")).and_then(parse_probe);
+        live.insert(cname.clone());
+
+        let running = engine.get_entry(&cname).map(|e| e.c.lock().unwrap().running()).unwrap_or(false);
+        if !running {
+            // Not running (or restarting): drop tracks so probing restarts clean.
+            if readiness_probe.is_some() {
+                readiness.lock().unwrap().insert(cname.clone(), false);
+            }
+            tracks.remove(&(cname.clone(), "readiness"));
+            tracks.remove(&(cname.clone(), "liveness"));
+            continue;
+        }
+
+        if let Some(p) = &readiness_probe {
+            let pass = eval_probe(engine, &cname, &pod_ip, p, tracks, "readiness");
+            readiness.lock().unwrap().insert(cname.clone(), pass);
+        }
+        if let Some(p) = &liveness_probe {
+            let healthy = eval_probe(engine, &cname, &pod_ip, p, tracks, "liveness");
+            if !healthy {
+                eprintln!("slimd: liveness probe failed for {cname}; restarting");
+                // SIGKILL the process directly (NOT engine.kill, which marks the
+                // container stopping and vetoes its restart policy). The exit
+                // monitor then restarts it per `always` and bumps restartCount —
+                // exactly kubelet liveness semantics.
+                if let Ok(entry) = engine.get_entry(&cname) {
+                    let (pid, id) = {
+                        let c = entry.c.lock().unwrap();
+                        (c.state.pid, c.id.clone())
+                    };
+                    // Never signal pid <= 1: signal_pid(0) would SIGKILL slimd's
+                    // whole process group (it's pid 1 in the vessel).
+                    if pid > 1 {
+                        let sig = slim_runtime::parse_signal("KILL");
+                        let _ = slim_runtime::kill_cgroup(&id);
+                        let _ = slim_runtime::signal_pid(pid, sig);
+                    }
+                }
+                tracks.remove(&(cname.clone(), "liveness"));
+                tracks.remove(&(cname.clone(), "readiness"));
+                readiness.lock().unwrap().insert(cname.clone(), false);
+            }
+        }
+    }
+    // GC state for pods that disappeared.
+    readiness.lock().unwrap().retain(|k, _| live.contains(k));
+    tracks.retain(|(c, _), _| live.contains(c));
+}
+
+/// Run a probe if due; track success/failure streaks. Returns readiness
+/// "passing" for the readiness kind, or "healthy" (failures < threshold) for
+/// liveness. Respects initialDelaySeconds and periodSeconds.
+fn eval_probe(
+    engine: &EngineRef,
+    cname: &str,
+    pod_ip: &str,
+    p: &Probe,
+    tracks: &mut HashMap<(String, &'static str), ProbeTrack>,
+    kind: &'static str,
+) -> bool {
+    let now = Instant::now();
+    let t = tracks.entry((cname.to_string(), kind)).or_default();
+    if t.first_seen.is_none() {
+        t.first_seen = Some(now);
+    }
+    if now.duration_since(t.first_seen.unwrap()).as_secs() < p.initial_delay {
+        return kind != "readiness"; // not ready yet; liveness healthy during grace
+    }
+    let due = t.last_run.map(|l| now.duration_since(l).as_secs() >= p.period).unwrap_or(true);
+    if due {
+        t.last_run = Some(now);
+        if run_probe(engine, cname, pod_ip, p) {
+            t.successes += 1;
+            t.failures = 0;
+            if t.successes >= p.success_threshold {
+                t.passing = true;
+            }
+        } else {
+            t.failures += 1;
+            t.successes = 0;
+            if t.failures >= p.failure_threshold {
+                t.passing = false;
+            }
+        }
+    }
+    if kind == "readiness" {
+        t.passing
+    } else {
+        t.failures < p.failure_threshold
+    }
+}
+
+fn run_probe(engine: &EngineRef, cname: &str, pod_ip: &str, p: &Probe) -> bool {
+    match &p.kind {
+        ProbeKind::Tcp { port } => tcp_ok(pod_ip, *port, p.timeout),
+        ProbeKind::Http { path, port } => http_ok(pod_ip, *port, path, p.timeout),
+        ProbeKind::Exec { cmd } => exec_ok(engine, cname, cmd),
+    }
+}
+
+fn tcp_ok(ip: &str, port: u16, timeout: u64) -> bool {
+    use std::net::ToSocketAddrs;
+    if ip.is_empty() {
+        return false;
+    }
+    match format!("{ip}:{port}").to_socket_addrs().ok().and_then(|mut a| a.next()) {
+        Some(sa) => std::net::TcpStream::connect_timeout(&sa, Duration::from_secs(timeout)).is_ok(),
+        None => false,
+    }
+}
+
+fn http_ok(ip: &str, port: u16, path: &str, timeout: u64) -> bool {
+    use std::io::{Read, Write};
+    use std::net::ToSocketAddrs;
+    if ip.is_empty() {
+        return false;
+    }
+    let Some(sa) = format!("{ip}:{port}").to_socket_addrs().ok().and_then(|mut a| a.next()) else { return false };
+    let Ok(mut s) = std::net::TcpStream::connect_timeout(&sa, Duration::from_secs(timeout)) else { return false };
+    let _ = s.set_read_timeout(Some(Duration::from_secs(timeout)));
+    let _ = s.set_write_timeout(Some(Duration::from_secs(timeout)));
+    let path = if path.starts_with('/') { path.to_string() } else { format!("/{path}") };
+    let req = format!("GET {path} HTTP/1.0\r\nHost: {ip}\r\nConnection: close\r\n\r\n");
+    if s.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 128];
+    let n = s.read(&mut buf).unwrap_or(0);
+    if n == 0 {
+        return false;
+    }
+    String::from_utf8_lossy(&buf[..n])
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse::<u16>().ok())
+        .map(|c| (200..400).contains(&c))
+        .unwrap_or(false)
+}
+
+fn exec_ok(engine: &EngineRef, cname: &str, cmd: &[String]) -> bool {
+    let Ok(entry) = engine.get_entry(cname) else { return false };
+    let pid = {
+        let c = entry.c.lock().unwrap();
+        if !c.running() {
+            return false;
+        }
+        c.state.pid
+    };
+    let spec = slim_runtime::ExecSpec {
+        argv: cmd.to_vec(),
+        env: vec![],
+        cwd: String::new(),
+        user: String::new(),
+        tty: false,
+        open_stdin: false,
+    };
+    match slim_runtime::exec_in_container_cg(pid, &spec, Some(cname)) {
+        Ok(h) => slim_runtime::wait_pid(h.pid).map(|s| s.code == 0).unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+fn parse_probe(v: &Value) -> Option<Probe> {
+    let u = |k: &str, d: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d);
+    let kind = if let Some(h) = v.get("httpGet") {
+        ProbeKind::Http {
+            path: h.get("path").and_then(|x| x.as_str()).unwrap_or("/").to_string(),
+            port: probe_port(h.get("port"))?,
+        }
+    } else if let Some(t) = v.get("tcpSocket") {
+        ProbeKind::Tcp { port: probe_port(t.get("port"))? }
+    } else if let Some(e) = v.get("exec") {
+        let cmd = strs(e.get("command"));
+        if cmd.is_empty() {
+            return None;
+        }
+        ProbeKind::Exec { cmd }
+    } else {
+        return None;
+    };
+    Some(Probe {
+        kind,
+        initial_delay: u("initialDelaySeconds", 0),
+        period: u("periodSeconds", 10).max(1),
+        success_threshold: u("successThreshold", 1).max(1) as u32,
+        failure_threshold: u("failureThreshold", 3).max(1) as u32,
+        timeout: u("timeoutSeconds", 1).max(1),
+    })
+}
+
+/// Probe port as an integer (named ports aren't resolved — a slim liberty).
+fn probe_port(v: Option<&Value>) -> Option<u16> {
+    let v = v?;
+    v.as_u64().map(|n| n as u16).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }

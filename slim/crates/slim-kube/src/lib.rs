@@ -400,13 +400,20 @@ fn summarize(res: &Res, obj: &Value) -> (String, String, i64) {
     match res.resource.as_str() {
         "pods" => {
             let phase = obj.pointer("/status/phase").and_then(|v| v.as_str()).unwrap_or("Pending").to_string();
-            let restarts = obj
-                .pointer("/status/containerStatuses")
-                .and_then(|c| c.as_array())
-                .map(|a| a.iter().filter_map(|c| c.get("restartCount").and_then(|r| r.as_i64())).sum())
-                .unwrap_or(0);
-            let ready = if phase == "Running" { "1/1" } else { "0/1" }.to_string();
-            (ready, phase, restarts)
+            // Prefer real containerStatuses (ready count + restarts); fall back
+            // to phase for older/sparse status.
+            match obj.pointer("/status/containerStatuses").and_then(|c| c.as_array()) {
+                Some(arr) if !arr.is_empty() => {
+                    let total = arr.len();
+                    let ready = arr.iter().filter(|c| c.get("ready").and_then(|r| r.as_bool()).unwrap_or(false)).count();
+                    let restarts = arr.iter().filter_map(|c| c.get("restartCount").and_then(|r| r.as_i64())).sum();
+                    (format!("{ready}/{total}"), phase, restarts)
+                }
+                _ => {
+                    let ready = if phase == "Running" { "1/1" } else { "0/1" }.to_string();
+                    (ready, phase, 0)
+                }
+            }
         }
         "deployments" | "statefulsets" | "replicasets" => {
             let desired = obj.pointer("/spec/replicas").and_then(|v| v.as_i64()).unwrap_or(1);

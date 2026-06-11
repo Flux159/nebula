@@ -186,6 +186,8 @@ pub struct VmResources {
     pub kernel_bundle: Option<KernelBundle>,
     /// The path to an external kernel, as an alternative to KernelBundle.
     pub external_kernel: Option<ExternalKernel>,
+    /// Restore from a krun snapshot directory instead of booting a kernel.
+    pub restore_dir: Option<std::path::PathBuf>,
     /// The parameters for the qboot bundle to be loaded in this microVM.
     #[cfg(feature = "tee")]
     pub qboot_bundle: Option<QbootBundle>,

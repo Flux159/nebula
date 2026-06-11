@@ -184,6 +184,7 @@ mod tests {
             rng: true,
             rosetta: false,
             gpu: false,
+            control_path: None,
             vsock_ports: vec![],
             backend: None,
             mac: None,

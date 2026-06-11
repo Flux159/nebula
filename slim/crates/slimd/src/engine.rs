@@ -143,16 +143,25 @@ impl Engine {
     // ---------- lookup ----------
 
     pub fn get_entry(&self, name_or_id: &str) -> io::Result<Arc<Entry>> {
-        let map = self.containers.lock().unwrap();
-        // exact id
-        if let Some(e) = map.get(name_or_id) {
-            return Ok(e.clone());
-        }
+        // Snapshot the entry Arcs under the map lock (E), then release E before
+        // locking any container (C). Holding E across a blocking c.lock() would
+        // deadlock against start_entry, which holds C and acquires E (via
+        // refresh_network_hosts). Invariant: never block on C while holding E.
+        let entries: Vec<Arc<Entry>> = {
+            let map = self.containers.lock().unwrap();
+            if let Some(e) = map.get(name_or_id) {
+                return Ok(e.clone());
+            }
+            map.values().cloned().collect()
+        };
         let want = name_or_id.trim_start_matches('/');
         let mut hit = None;
-        for e in map.values() {
-            let c = e.c.lock().unwrap();
-            if c.name == want || c.id.starts_with(want) {
+        for e in &entries {
+            let matches = {
+                let c = e.c.lock().unwrap();
+                c.name == want || c.id.starts_with(want)
+            };
+            if matches {
                 if hit.is_some() {
                     return Err(conflict(format!("multiple containers match {name_or_id}")));
                 }
@@ -163,11 +172,9 @@ impl Engine {
     }
 
     fn name_taken(&self, name: &str) -> bool {
-        self.containers
-            .lock()
-            .unwrap()
-            .values()
-            .any(|e| e.c.lock().unwrap().name == name)
+        // Snapshot under E, release, then lock C (see get_entry).
+        let entries: Vec<Arc<Entry>> = self.containers.lock().unwrap().values().cloned().collect();
+        entries.iter().any(|e| e.c.lock().unwrap().name == name)
     }
 
     // ---------- images (delegate to store, add auth/events) ----------
@@ -769,9 +776,11 @@ impl Engine {
     // ---------- list / inspect ----------
 
     pub fn list(&self, all: bool) -> Vec<Container> {
-        let map = self.containers.lock().unwrap();
-        let mut out: Vec<Container> = map
-            .values()
+        // Snapshot under E, release, then lock each C (see get_entry) — never
+        // hold the map lock across a blocking container lock.
+        let entries: Vec<Arc<Entry>> = self.containers.lock().unwrap().values().cloned().collect();
+        let mut out: Vec<Container> = entries
+            .iter()
             .map(|e| e.c.lock().unwrap().clone())
             .filter(|c| all || c.running())
             .collect();

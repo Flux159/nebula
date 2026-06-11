@@ -213,7 +213,7 @@ impl ApiServer {
         match verb {
             Verb::Get if name.is_none() && watch => self.do_watch(&info, ns.as_deref(), req, w),
             Verb::Get if name.is_none() => self.do_list(&info, ns.as_deref(), req, w),
-            Verb::Get => self.do_get(&info, &ns, name.unwrap(), w),
+            Verb::Get => self.do_get(&info, &ns, name.unwrap(), req, w),
             Verb::Create => self.do_create(&info, &ns, req, w),
             Verb::Update => self.do_update(&info, &ns, name.unwrap_or(""), subresource, req, w),
             Verb::Patch => self.do_patch(&info, &ns, name.unwrap_or(""), subresource, req, w),
@@ -224,6 +224,11 @@ impl ApiServer {
     fn do_list(&self, info: &ResourceInfo, ns: Option<&str>, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
         let labels = label_selector(&req.query);
         let (items, rv) = self.store.list(info, ns, &labels);
+        // kubectl's human-readable `get` requests a server-side Table; without
+        // it kubectl falls back to a generic NAME/AGE printer (blank columns).
+        if wants_table(req) {
+            return write_json(w, 200, &build_table(info, &items, rv));
+        }
         let list = json!({
             "apiVersion": info.group_version(),
             "kind": info.list_kind(),
@@ -233,10 +238,16 @@ impl ApiServer {
         write_json(w, 200, &list)
     }
 
-    fn do_get(&self, info: &ResourceInfo, ns: &Option<String>, name: &str, w: &mut dyn Write) -> std::io::Result<()> {
+    fn do_get(&self, info: &ResourceInfo, ns: &Option<String>, name: &str, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
         let nsv = ns.clone().unwrap_or_default();
         match self.store.get(info, &nsv, name) {
-            Some(obj) => write_json(w, 200, &obj),
+            Some(obj) => {
+                if wants_table(req) {
+                    let rv = obj.pointer("/metadata/resourceVersion").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    return write_json(w, 200, &build_table(info, std::slice::from_ref(&obj), rv));
+                }
+                write_json(w, 200, &obj)
+            }
             None => write_json(w, 404, &status_obj(404, &format!("{} \"{name}\" not found", info.singular), "NotFound")),
         }
     }
@@ -658,6 +669,113 @@ fn version_info() -> Value {
         "buildDate":"2026-06-10T00:00:00Z","goVersion":"none","compiler":"rustc",
         "platform":"linux/amd64",
     })
+}
+
+// ---- server-side Table printing (kubectl human-readable `get`) ----
+
+fn wants_table(req: &Req) -> bool {
+    req.header("accept").map(|a| a.contains("as=Table")).unwrap_or(false)
+}
+
+/// Build a meta.k8s.io/v1 Table for `items` with per-kind columns, so real
+/// kubectl renders NAME/READY/STATUS/RESTARTS/AGE instead of its generic
+/// NAME/AGE fallback.
+fn build_table(info: &ResourceInfo, items: &[Value], rv: u64) -> Value {
+    let cols: &[(&str, &str)] = match info.resource.as_str() {
+        "pods" => &[("Name", "string"), ("Ready", "string"), ("Status", "string"), ("Restarts", "integer"), ("Age", "string")],
+        "deployments" | "replicasets" | "statefulsets" => {
+            &[("Name", "string"), ("Ready", "string"), ("Up-to-date", "integer"), ("Available", "integer"), ("Age", "string")]
+        }
+        _ => &[("Name", "string"), ("Age", "string")],
+    };
+    let coldefs: Vec<Value> = cols
+        .iter()
+        .enumerate()
+        .map(|(i, (n, t))| json!({"name": n, "type": t, "format": if i == 0 { "name" } else { "" }, "description": "", "priority": 0}))
+        .collect();
+    let rows: Vec<Value> = items
+        .iter()
+        .map(|o| {
+            let name = o.pointer("/metadata/name").and_then(|v| v.as_str()).unwrap_or("");
+            let age = age_of(o);
+            let cells: Vec<Value> = match info.resource.as_str() {
+                "pods" => {
+                    let phase = o.pointer("/status/phase").and_then(|v| v.as_str()).unwrap_or("Pending");
+                    let (ready, restarts) = pod_ready_restarts(o);
+                    vec![json!(name), json!(ready), json!(phase), json!(restarts), json!(age)]
+                }
+                "deployments" | "replicasets" | "statefulsets" => {
+                    let desired = o.pointer("/spec/replicas").and_then(|v| v.as_i64()).unwrap_or(1);
+                    let ready = o.pointer("/status/readyReplicas").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let updated = o.pointer("/status/updatedReplicas").and_then(|v| v.as_i64()).unwrap_or(ready);
+                    let avail = o.pointer("/status/availableReplicas").and_then(|v| v.as_i64()).unwrap_or(ready);
+                    vec![json!(name), json!(format!("{ready}/{desired}")), json!(updated), json!(avail), json!(age)]
+                }
+                _ => vec![json!(name), json!(age)],
+            };
+            json!({"cells": cells, "object": o})
+        })
+        .collect();
+    json!({
+        "kind": "Table",
+        "apiVersion": "meta.k8s.io/v1",
+        "metadata": {"resourceVersion": rv.to_string()},
+        "columnDefinitions": coldefs,
+        "rows": rows,
+    })
+}
+
+/// (ready "n/m", total restarts) from a pod's containerStatuses.
+fn pod_ready_restarts(pod: &Value) -> (String, i64) {
+    match pod.pointer("/status/containerStatuses").and_then(|c| c.as_array()) {
+        Some(arr) if !arr.is_empty() => {
+            let total = arr.len();
+            let ready = arr.iter().filter(|c| c.get("ready").and_then(|r| r.as_bool()).unwrap_or(false)).count();
+            let restarts = arr.iter().filter_map(|c| c.get("restartCount").and_then(|r| r.as_i64())).sum();
+            (format!("{ready}/{total}"), restarts)
+        }
+        _ => {
+            let running = pod.pointer("/status/phase").and_then(|v| v.as_str()) == Some("Running");
+            (if running { "1/1".into() } else { "0/1".into() }, 0)
+        }
+    }
+}
+
+/// kubectl-style age ("5s","3m","2h","4d") from metadata.creationTimestamp.
+fn age_of(obj: &Value) -> String {
+    let Some(ts) = obj.pointer("/metadata/creationTimestamp").and_then(|v| v.as_str()) else {
+        return "<unknown>".into();
+    };
+    let Some(created) = parse_rfc3339(ts) else { return "<unknown>".into() };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let secs = (now - created).max(0);
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
+}
+
+/// Parse "YYYY-MM-DDTHH:MM:SSZ" into epoch seconds (days-from-civil).
+fn parse_rfc3339(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() < 20 {
+        return None;
+    }
+    let n = |a: usize, z: usize| s.get(a..z)?.parse::<i64>().ok();
+    let (y, mo, d) = (n(0, 4)?, n(5, 7)?, n(8, 10)?);
+    let (h, mi, se) = (n(11, 13)?, n(14, 16)?, n(17, 19)?);
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some(days * 86400 + h * 3600 + mi * 60 + se)
 }
 
 fn status_obj(code: u16, msg: &str, reason: &str) -> Value {
