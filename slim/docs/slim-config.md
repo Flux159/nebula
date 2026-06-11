@@ -66,13 +66,21 @@ differently because their stores are built differently:
   layers/blobs). Pointing N slim engines at one `NEBULA_IMAGES_DIR` gives a true
   pull-once / reuse-many cache, safe across processes — as described above.
 - **Full Nebula** ships the real Docker engine, whose `data-root` is a single
-  monolithic tree (images + containers + volumes together) that dockerd is not
-  designed to share between concurrent daemons. There `NEBULA_IMAGES_DIR`
-  relocates the store to the same path (one engine, persistent across restarts),
-  but the *cross-engine* cache is delivered the docker-native way — a
-  pull-through `SLIM_REGISTRY_MIRROR` (a `registry:2` / `mirror.gcr.io`), which
-  both engines already honor. So the cache is shared at the registry layer for
-  full Nebula and at the store layer for slim.
+  monolithic tree (images + containers + volumes together) — dockerd has no way
+  to relocate *only* images, and is not designed to share its data-root between
+  concurrent daemons. `NEBULA_IMAGES_DIR` would therefore have to move the whole
+  store and still couldn't be shared, so it is intentionally a **no-op on full
+  Nebula** rather than a knob that quietly means something different from its
+  name. Cross-engine image reuse on full Nebula is instead the docker-native
+  way: a pull-through registry mirror (a `registry:2` / `mirror.gcr.io`). The
+  *config surface* differs per engine — slim reads `SLIM_REGISTRY_MIRROR`, full
+  Nebula's dockerd reads `registry-mirrors` in its `daemon.json` — but the
+  effect is the same registry-layer cache.
 
-Net: same env var, same intent (one place for images, no redundant pulls), with
-each engine using the sharing mechanism its store actually supports.
+Net: `NEBULA_IMAGES_DIR` is the store-layer shared cache, and it only does
+something on slim (the docs say so rather than pretending otherwise). A
+pull-through registry mirror is the registry-layer cache available on both
+engines, configured per-engine (`SLIM_REGISTRY_MIRROR` for slim,
+`registry-mirrors` in `daemon.json` for full Nebula). The `NEBULA_IMAGES_DIR`
+name stays engine-neutral so the knob can grow a full-Nebula meaning later if
+dockerd ever gains a separable image store.

@@ -10,8 +10,10 @@
 //!   POST /v1alpha1/exec              {"cmd": "...", "args": [...]} -> ExecResult
 //!   POST /v1alpha1/balloon           {"target_mib": N}
 //!   GET  /v1alpha1/containers        compat shim (full plane below)
-//!   ANY  /docker/...                 verbatim dockerd proxy (Docker SDKs
-//! work against it unmodified).
+//!   ANY  /docker/...                 verbatim container-engine proxy
+//!   ANY  /k8s/...                    verbatim apiserver proxy (slim only:
+//! slim's apiserver-lite speaks plain HTTP on a host socket; k3s is mTLS,
+//! so full nebula answers 501 here — fetch /v1alpha1/kubeconfig instead).
 //!
 //! Binding: `api_host` in config.toml, overridden by NEBULA_API_HOST
 //! (default 127.0.0.1). Auth: when NEBULA_API_TOKEN is set, every request
@@ -42,6 +44,9 @@ struct Ctx {
     vessel: Arc<Vessel>,
     balloon: Arc<BalloonState>,
     docker_sock: PathBuf,
+    /// slim's plain-HTTP apiserver socket (beside docker.sock); absent when
+    /// the guest runs k3s.
+    kube_sock: PathBuf,
     kubeconfig: PathBuf,
     token: Option<String>,
 }
@@ -78,10 +83,15 @@ pub fn start(
         return;
     }
 
+    let kube_sock = docker_sock
+        .parent()
+        .map(|d| d.join("slim-kube.sock"))
+        .unwrap_or_default();
     let ctx = Arc::new(Ctx {
         vessel,
         balloon,
         docker_sock,
+        kube_sock,
         kubeconfig,
         token,
     });
@@ -205,16 +215,22 @@ async fn route(ctx: Arc<Ctx>, req: Request<Incoming>) -> Result<Resp, hyper::Err
         }
     }
 
-    // Verbatim docker plane: `DOCKER_HOST=tcp://127.0.0.1:7440/docker` —
-    // any Docker SDK works against nebula unmodified.
-    if path == "/docker" || path.starts_with("/docker/") {
-        let rest = &path["/docker".len()..];
-        let target = if rest.is_empty() { "/" } else { rest };
-        let path_q = match req.uri().query() {
-            Some(q) => format!("{target}?{q}"),
-            None => target.to_string(),
-        };
-        return Ok(docker_proxy(&ctx, req, &path_q).await);
+    // Verbatim container plane: the engine's own Docker API (dockerd in
+    // full nebula, slimd's reimplementation in slim) behind our auth.
+    if let Some(path_q) = strip_plane(&req, &path, "/docker") {
+        return Ok(sock_proxy(&ctx.docker_sock, req, &path_q).await);
+    }
+    // Verbatim kubernetes plane — slim only (plain-HTTP apiserver-lite
+    // socket). k3s speaks mTLS, which can't be meaningfully re-proxied:
+    // those clients fetch /v1alpha1/kubeconfig and dial the apiserver.
+    if let Some(path_q) = strip_plane(&req, &path, "/k8s") {
+        if !ctx.kube_sock.exists() {
+            return Ok(err_json(
+                501,
+                "no plain-HTTP apiserver (k3s guest?) — use /v1alpha1/kubeconfig",
+            ));
+        }
+        return Ok(sock_proxy(&ctx.kube_sock, req, &path_q).await);
     }
 
     match (method, path.as_str()) {
@@ -342,7 +358,7 @@ async fn route(ctx: Arc<Ctx>, req: Request<Incoming>) -> Result<Resp, hyper::Err
         }
         (Method::GET, "/v1alpha1/containers") => {
             // Compat shim from before the verbatim /docker plane existed.
-            Ok(docker_proxy(&ctx, req, "/v1.43/containers/json?all=true").await)
+            Ok(sock_proxy(&ctx.docker_sock, req, "/v1.43/containers/json?all=true").await)
         }
         _ => Ok(err_json(404, "not found")),
     }
@@ -356,28 +372,41 @@ async fn read_body(req: Request<Incoming>) -> Result<Bytes, ()> {
         .map_err(|_| ())
 }
 
-/// Forward a request verbatim to the engine's dockerd socket, streaming the
-/// response back. `path_q` replaces the URI (the /docker prefix stripped).
-async fn docker_proxy(ctx: &Ctx, req: Request<Incoming>, path_q: &str) -> Resp {
+/// `/docker/foo?q` -> `Some("/foo?q")` when `path` is under `prefix`.
+fn strip_plane(req: &Request<Incoming>, path: &str, prefix: &str) -> Option<String> {
+    if path != prefix && !path.starts_with(&format!("{prefix}/")) {
+        return None;
+    }
+    let rest = &path[prefix.len()..];
+    let target = if rest.is_empty() { "/" } else { rest };
+    Some(match req.uri().query() {
+        Some(q) => format!("{target}?{q}"),
+        None => target.to_string(),
+    })
+}
+
+/// Forward a request verbatim to an engine socket, streaming the response
+/// back. `path_q` replaces the URI (the plane prefix stripped).
+async fn sock_proxy(sock: &std::path::Path, req: Request<Incoming>, path_q: &str) -> Resp {
     #[cfg(unix)]
-    let stream = match tokio::net::UnixStream::connect(&ctx.docker_sock).await {
+    let stream = match tokio::net::UnixStream::connect(sock).await {
         Ok(s) => s,
-        Err(e) => return err_json(502, format!("docker socket: {e}")),
+        Err(e) => return err_json(502, format!("engine socket: {e}")),
     };
     #[cfg(windows)]
     let stream = {
         // The ipc convention on Windows: the "socket" is a file holding a
         // loopback TCP port.
-        let port = match std::fs::read_to_string(&ctx.docker_sock)
+        let port = match std::fs::read_to_string(sock)
             .ok()
             .and_then(|s| s.trim().parse::<u16>().ok())
         {
             Some(p) => p,
-            None => return err_json(502, "docker port file unreadable"),
+            None => return err_json(502, "engine port file unreadable"),
         };
         match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
             Ok(s) => s,
-            Err(e) => return err_json(502, format!("docker connect: {e}")),
+            Err(e) => return err_json(502, format!("engine connect: {e}")),
         }
     };
     proxy_over(stream, req, path_q).await

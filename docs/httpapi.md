@@ -1,0 +1,149 @@
+# The HTTP API (`v1alpha1`)
+
+nebulad serves a REST API that is the **embedding surface** for both full
+Nebula and Nebula-slim — same daemon, same API, same SDKs; slim only swaps
+what runs inside the guest. Everything the CLI can do is (or will be)
+reachable as plain HTTP: no shelling out, no stdout parsing.
+
+```
+http://127.0.0.1:7440
+├── /healthz                  liveness (auth-exempt)
+├── /v1alpha1/...             nebula's own resources (status, exec, vessels…)
+├── /docker/...               the container engine's Docker API, verbatim
+└── /k8s/...                  the kubernetes apiserver, verbatim (slim)
+```
+
+`v1alpha1` follows the Kubernetes API versioning convention: **alpha means
+the surface may change between releases.** When it stabilizes it will be
+published as `/v1/...` with a compatibility promise; until then, pin the
+nebula version you embed.
+
+## Binding & auth
+
+| | default | override |
+|---|---|---|
+| port | `7440` | `api_port` in `~/.nebula/config.toml` (0 disables) |
+| address | `127.0.0.1` | `api_host` in config.toml, or `NEBULA_API_HOST` env |
+| auth | off (loopback) | `NEBULA_API_TOKEN` env → bearer auth |
+
+When `NEBULA_API_TOKEN` is set, every request except `GET /healthz` must
+carry `Authorization: Bearer <token>`. **Binding a non-loopback address
+requires a token** — nebulad refuses to serve `0.0.0.0` without one.
+
+```bash
+NEBULA_API_TOKEN=$(openssl rand -hex 24) NEBULA_API_HOST=0.0.0.0 nebula up
+curl -H "Authorization: Bearer $NEBULA_API_TOKEN" http://host:7440/v1alpha1/status
+```
+
+## Nebula endpoints
+
+| method & path | does |
+|---|---|
+| `GET /healthz` | liveness — `{"ok":true}` (no auth) |
+| `GET /v1alpha1/status` | VM state, cpus/mem, agent health, guest memory |
+| `GET /v1alpha1/stats` | balloon target, host footprint, guest memory |
+| `POST /v1alpha1/exec` | `{"cmd":"uname","args":["-r"],"timeout_ms":30000}` → `{exit_code, stdout, stderr, timed_out}` — runs in the engine guest |
+| `POST /v1alpha1/balloon` | `{"target_mib": N}` — set the memory target |
+| `GET /v1alpha1/kubeconfig` | standalone kubeconfig YAML (404 until k8s is up) |
+| `GET /v1alpha1/containers` | compat shim; prefer `/docker/...` below |
+
+Vessel lifecycle endpoints (`/v1alpha1/vessels`, snapshot/restore/branch)
+are landing with the `nebula_core::vessels` hoist — the CLI and the API will
+share one implementation. Branching is the embedding primitive to know
+about: a memory snapshot fans out into N live mid-execution clones
+(copy-on-write RAM on macOS/Linux) in roughly a second per clone.
+
+## Containers: `/docker/...`
+
+Everything under `/docker` is **proxied verbatim to the engine's Docker
+API** — dockerd in full Nebula, slimd's reimplementation in slim. The proxy
+streams bodies and supports connection upgrades (`attach`, hijacked
+`exec`), and nebula's bearer auth applies in front.
+
+```bash
+curl -s http://127.0.0.1:7440/docker/v1.43/version
+curl -s "http://127.0.0.1:7440/docker/v1.43/containers/json?all=true"
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"Image":"alpine","Cmd":["echo","hi"]}' \
+  "http://127.0.0.1:7440/docker/v1.43/containers/create?name=demo"
+```
+
+Notes for client libraries:
+
+- Any HTTP client works — the payloads are the [Docker Engine API]
+  (https://docs.docker.com/engine/api/) unmodified.
+- SDKs that accept a **base URL with a path prefix** can point straight at
+  `http://127.0.0.1:7440/docker`.
+- The stock `docker` CLI cannot put a path prefix in `DOCKER_HOST`. For
+  local CLI use, keep pointing it at the socket nebula already exposes
+  (`DOCKER_HOST=unix://~/.nebula/run/docker.sock`); the `/docker` plane is
+  for programmatic embedders and remote/authized access.
+
+```ts
+// TypeScript: list containers through the authenticated plane
+const api = "http://127.0.0.1:7440";
+const headers = { Authorization: `Bearer ${process.env.NEBULA_API_TOKEN}` };
+const ps = await fetch(`${api}/docker/v1.43/containers/json?all=true`, { headers });
+console.log(await ps.json());
+```
+
+## Kubernetes
+
+Two engines, two mechanisms — by design:
+
+**Full Nebula (k3s): fetch the kubeconfig, dial the apiserver directly.**
+The k8s API speaks TLS with client-certificate auth plus WebSocket/SPDY
+subprotocols (`exec`, `port-forward`); that cannot be meaningfully
+re-proxied through a plain-HTTP server without breaking the cert identity.
+The apiserver is already forwarded to the host (port 6443), so clients
+connect to it natively:
+
+```ts
+// TypeScript: drive k8s with the standard client library,
+// bootstrapped entirely over the nebula HTTP API.
+import * as k8s from "@kubernetes/client-node";
+
+const api = "http://127.0.0.1:7440";
+const headers = { Authorization: `Bearer ${process.env.NEBULA_API_TOKEN}` };
+
+// 1. fetch the kubeconfig nebula generated (bearer-gated)
+const res = await fetch(`${api}/v1alpha1/kubeconfig`, { headers });
+if (!res.ok) throw new Error("k8s not up — POST /v1alpha1/exec or `nebula kube up` first");
+const kubeconfigYaml = await res.text();
+
+// 2. load it — the client now talks mTLS straight to the apiserver
+const kc = new k8s.KubeConfig();
+kc.loadFromString(kubeconfigYaml);
+
+// 3. use any client API as usual
+const core = kc.makeApiClient(k8s.CoreV1Api);
+const pods = await core.listPodForAllNamespaces();
+console.log(pods.items.map((p) => p.metadata?.name));
+```
+
+Caveat: in remote mode the returned kubeconfig still points at
+`127.0.0.1:6443`; rewriting `server:` to the request host (plus cert SANs)
+is a planned follow-up. Local embedding — the primary story — needs nothing.
+
+**Nebula-slim: `/k8s/...` is a verbatim apiserver proxy.** slim's
+apiserver-lite also serves plain HTTP on a host-side socket
+(`slim-kube.sock`, beside `docker.sock`), so nebulad can proxy it the same
+way as `/docker` — one port, one bearer token, containers *and* kubernetes:
+
+```ts
+// slim: typeless k8s CRUD with nothing but fetch
+const deploys = await fetch(`${api}/k8s/apis/apps/v1/namespaces/default/deployments`, { headers });
+console.log(await deploys.json());
+```
+
+slim also serves the same apiserver over TLS on 6443 (stock `kubectl` and
+client libraries work against it via the kubeconfig flow above), so both
+mechanisms work there; `/k8s` is just the lighter path. On a k3s guest,
+`/k8s/...` answers `501` with a pointer to `/v1alpha1/kubeconfig`.
+
+## Which engine am I talking to?
+
+You usually don't care — same API. When you do: `GET /docker/v1.43/version`
+returns the engine's own version payload (dockerd reports `Docker Engine`,
+slim reports slim), and `/k8s/healthz` answering 200 vs 501 distinguishes
+the apiserver-lite from k3s.

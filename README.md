@@ -1,13 +1,24 @@
 # Nebula
 
 Open source, simple, and performant container, Kubernetes & microVM manager for
-macOS (Apple Silicon).
+macOS, Linux, and Windows.
 
-Nebula runs one elastically-sized Linux VM (the **Vessel**) on
-Virtualization.framework for your everyday containers and Kubernetes, plus
+Nebula runs one elastically-sized Linux VM (the **Vessel**) on the platform's
+native hypervisor for your everyday containers and Kubernetes, plus
 millisecond-boot isolated microVMs on a vendored [libkrun](https://github.com/containers/libkrun)
 fork for sandboxes and GPU workloads — with memory ballooning so the whole
 stack only holds the RAM your workloads actually use.
+
+Runs on **macOS** (Virtualization.framework), **Linux** (KVM), and **Windows**
+(Hyper-V/WHP) — no WSL2 — with CI/CD release builds for all three.
+
+**Two flavors share one host.** *Full* Nebula ships the real Go stack
+(dockerd/containerd, k3s, kubectl, helm) — the genuine article.
+**[Nebula-slim](slim/README.md)** swaps the guest for `slimd`, a from-scratch
+Rust reimplementation of a useful container + Kubernetes + Helm subset that's
+small enough to **embed** (~32 MB, no Go runtime). Pick full when you need real
+k8s; pick slim to embed an engine or when size/RAM is the budget. See
+**[slim/README.md](slim/README.md)**.
 
 ```
 brew install … (packaging WIP — build from source below)
@@ -61,8 +72,15 @@ nebula ui                 # open the desktop app (a client of the engine)
   primitive for tree-search over agent runs. `vessels new --from-image
   debian:bookworm-slim` boots any arm64 docker image as a snapshot-capable
   microVM.
+- **Apps platform.** A catalog of one-click installs in the UI — pick an app and
+  it runs, no compose-file wrangling. Docker images and raw YAML/compose "boxes"
+  install the same way.
 - **Embeddable.** REST API (`127.0.0.1:7440`, v1alpha1) with TypeScript
-  (`sdk/typescript`) and Python (`sdk/python`) clients; Tauri UI in `ui/`.
+  (`sdk/typescript`) and Python (`sdk/python`) clients; Tauri UI in `ui/`. For
+  embedding into your *own* app, **[Nebula-slim](slim/README.md)** is the
+  purpose-built path: ~32 MB, no Go runtime, CLIs on macOS/Linux/Windows.
+- **Signed & notarized.** Releases are Developer ID–signed, notarized, and
+  stapled (local + CI), so the `.app` and CLIs run without Gatekeeper prompts.
 - **Daemon-first.** The engine (`nebulad`) runs independently of the app and
   CLI — close either and your containers keep running. `nebula autostart
   enable` installs a launchd agent (start at login + crash restart); the app
@@ -118,8 +136,14 @@ target/debug/nebula up
 
 Acceptance suites: `scripts/test-phase{1..10}.sh`.
 
+For **Linux** (KVM) and **Windows** (Hyper-V/WHP) the build recipes — toolchain,
+libkrun `.so`/`krun.dll`, and packaging — are the source of truth in
+[`.github/workflows/release.yml`](.github/workflows/release.yml) (the
+`linux-release` and `windows-release` jobs).
+
 ## Documentation
 
+- [`slim/README.md`](slim/README.md) — **Nebula-slim**: the embeddable Rust engine, what it supports, and why it's the path for embedding
 - [`tasks/features.md`](tasks/features.md) — the full phased plan and architecture
 - [`tasks/issues.md`](tasks/issues.md) — open questions, characterizations, incidents
 - [`tasks/spike-notes.md`](tasks/spike-notes.md) — VMM backend findings and perf numbers
@@ -129,8 +153,18 @@ Acceptance suites: `scripts/test-phase{1..10}.sh`.
 
 Phases 0–10 of the plan are implemented and tested (VMM backends, Vessel,
 docker/nerdctl, networking/virtiofs, elastic memory, k3s, reliability rig,
-sandboxes, GPU device support, REST API + SDKs, UI). Stretch tracks — Linux
-hosts, games (sommelier), hosted Nebula, Windows (WHP) — are tracked in the
+sandboxes, GPU device support, REST API + SDKs, UI), plus the Apps platform and
+a signed/notarized release pipeline.
+
+**Cross-platform.** Tested on macOS (Apple Silicon, Virtualization.framework),
+Linux (x86_64, KVM), and Windows (x86_64, Hyper-V/WHP — no WSL2). CI builds and
+tests all three (`.github/workflows/ci.yml`); `release.yml` ships artifacts for
+each: a signed/notarized `Nebula.app` + DMG on macOS, and `nebula`/`nebulad`
+packages (with the libkrun fork) on Linux and Windows.
+**[Nebula-slim](slim/README.md)**, the embeddable Rust engine, is validated on
+the same three.
+
+Remaining stretch tracks — games (sommelier), hosted Nebula — are tracked in the
 plan as Phase 11.
 
 License: MIT
