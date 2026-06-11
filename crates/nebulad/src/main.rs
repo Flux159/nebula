@@ -6,6 +6,7 @@
 mod api;
 mod balloon;
 mod config;
+mod images;
 mod net;
 mod paths;
 mod server;

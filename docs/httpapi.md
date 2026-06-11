@@ -54,15 +54,20 @@ The CLI and these endpoints share one implementation (`nebula_core::vessels`).
 | method & path | does |
 |---|---|
 | `GET /v1alpha1/vessels` | list (name, running, cpus, mem, gpu, backend) |
-| `POST /v1alpha1/vessels` | create + boot: `{"name":"a","cpus":2,"mem_mib":2048,"data_gib":16,"backend":"krun","volumes":["scratch:8"],"no_start":false}` (all but `name` optional) |
+| `POST /v1alpha1/vessels` | create + boot: `{"name":"a","cpus":2,"mem_mib":2048,"data_gib":16,"backend":"krun","volumes":["scratch:8"],"no_start":false}` (all but `name` optional). Add `"from_image":"alpine:latest"` (+optional `rootfs_mb`) to build the rootfs from a docker image — pulled into the engine via its Docker API, assembled in-guest; or `"rootfs_img":"/path/file.img"` for a prebuilt raw image |
 | `GET /v1alpha1/vessels/{name}` | one vessel's summary |
 | `DELETE /v1alpha1/vessels/{name}?force=true` | remove (force stops it first) |
 | `POST .../{name}/start` · `POST .../{name}/stop` | lifecycle |
 | `POST .../{name}/exec` | `{"cmd":"sh","args":["-c","..."]}` in that vessel |
+| `GET .../{name}/console?tail=N` | last N bytes of the boot/console log |
 | `GET /POST .../{name}/snapshots` | list / take (`{"label":"s1","mode":"auto\|memory\|disk"}`) |
 | `DELETE .../{name}/snapshots/{label}` | drop a snapshot |
 | `POST .../{name}/restore` | `{"label":"s1"}` — live-resumes memory snapshots |
 | `POST .../{name}/branch` | `{"new_name":"agent","label":"s1","count":8}` (max 64) |
+
+Not exposed (yet): `convert-image` and `reset` (CLI-only), gzip'd
+`rootfs_img` (send the raw image), and interactive `shell` (WebSocket,
+planned — `exec` covers non-interactive use).
 
 Branching is the embedding primitive to know: a memory snapshot fans out
 into N live **mid-execution** clones — copy-on-write RAM on macOS/Linux —

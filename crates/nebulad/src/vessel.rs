@@ -153,6 +153,16 @@ impl Vessel {
         self.agent_request_with_timeout(req, None)
     }
 
+    /// Agent request with a caller-chosen read timeout (image builds run
+    /// multi-minute scripts in the guest).
+    pub fn agent_request_long(
+        &self,
+        req: &AgentRequest,
+        timeout: Duration,
+    ) -> anyhow::Result<AgentResponse> {
+        self.agent_request_with_timeout(req, Some(timeout))
+    }
+
     fn agent_request_with_timeout(
         &self,
         req: &AgentRequest,

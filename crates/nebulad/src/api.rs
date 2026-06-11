@@ -239,8 +239,8 @@ async fn route(ctx: Arc<Ctx>, req: Request<Incoming>) -> Result<Resp, hyper::Err
 
     if let Some(rest) = path.strip_prefix("/v1alpha1/vessels") {
         let rest = rest.trim_start_matches('/').to_string();
-        let force = req.uri().query().is_some_and(|q| q.contains("force=true"));
-        return vessels_route(method, rest, force, req).await;
+        let query = req.uri().query().unwrap_or_default().to_string();
+        return vessels_route(ctx.clone(), method, rest, query, req).await;
     }
 
     match (method, path.as_str()) {
@@ -464,12 +464,15 @@ where
 /// Routes under /v1alpha1/vessels. `rest` is the path after the prefix with
 /// the leading slash stripped: "", "<name>", or "<name>/<action>[/<label>]".
 async fn vessels_route(
+    ctx: Arc<Ctx>,
     method: Method,
     rest: String,
-    force: bool,
+    query: String,
     req: Request<Incoming>,
 ) -> Result<Resp, hyper::Error> {
     use nebula_core::vessels as v;
+
+    let force = query.split('&').any(|kv| kv == "force=true");
 
     let segs: Vec<String> = if rest.is_empty() {
         vec![]
@@ -509,6 +512,17 @@ async fn vessels_route(
                 /// "name:GiB" strings, same shape as the CLI's --volume.
                 #[serde(default)]
                 volumes: Vec<String>,
+                /// Build the rootfs from a docker image ref (pulled into the
+                /// engine if absent) — `vessels new --from-image` over HTTP.
+                #[serde(default)]
+                from_image: Option<String>,
+                /// Clone the rootfs from a raw .img file on the HOST (made by
+                /// `vessels convert-image`). Not gzip — send the raw image.
+                #[serde(default)]
+                rootfs_img: Option<String>,
+                /// Rootfs size in MiB when building from an image.
+                #[serde(default = "d_rootfs_mb")]
+                rootfs_mb: u64,
                 /// Create only — don't boot it.
                 #[serde(default)]
                 no_start: bool,
@@ -522,6 +536,9 @@ async fn vessels_route(
             fn d_disk() -> u64 {
                 16
             }
+            fn d_rootfs_mb() -> u64 {
+                4096
+            }
             fn d_backend() -> String {
                 "krun".into()
             }
@@ -532,6 +549,66 @@ async fn vessels_route(
                 Ok(b) => b,
                 Err(e) => return Ok(err_json(400, e)),
             };
+            if body.from_image.is_some() && body.rootfs_img.is_some() {
+                return Ok(err_json(
+                    400,
+                    "from_image and rootfs_img are mutually exclusive",
+                ));
+            }
+
+            let dir = match v::dir_of(&body.name) {
+                Ok(d) => d,
+                Err(e) => return Ok(err_json(400, format!("{e:#}"))),
+            };
+            if dir.exists() {
+                return Ok(err_json(
+                    409,
+                    format!("vessel `{}` already exists", body.name),
+                ));
+            }
+
+            // Engine-built rootfs (async docker REST + in-engine mkfs) before
+            // the blocking create.
+            let rootfs = if let Some(image) = body.from_image.clone() {
+                if std::fs::create_dir_all(&dir).is_err() {
+                    return Ok(err_json(500, "cannot create vessel dir"));
+                }
+                let built = crate::images::build_rootfs_from_image(
+                    ctx.vessel.clone(),
+                    ctx.docker_sock.clone(),
+                    image,
+                    body.name.clone(),
+                    dir.clone(),
+                    body.rootfs_mb,
+                    body.data_gib,
+                )
+                .await;
+                if let Err(e) = built {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return Ok(err_json(409, format!("{e:#}")));
+                }
+                v::Rootfs::Prepared
+            } else if let Some(src) = body.rootfs_img.clone() {
+                let src = std::path::PathBuf::from(src);
+                if !src.is_file() {
+                    return Ok(err_json(
+                        400,
+                        format!("no rootfs image at {}", src.display()),
+                    ));
+                }
+                if std::fs::create_dir_all(&dir).is_err() {
+                    return Ok(err_json(500, "cannot create vessel dir"));
+                }
+                let dst = dir.join("rootfs.img");
+                if let Err(e) = v::clone_file(&src, &dst) {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return Ok(err_json(409, format!("{e:#}")));
+                }
+                v::Rootfs::Prepared
+            } else {
+                v::Rootfs::BaseImage
+            };
+
             blocking!((|| -> anyhow::Result<serde_json::Value> {
                 let volumes = v::parse_volumes(&body.volumes)?;
                 let opts = v::CreateOpts {
@@ -543,9 +620,7 @@ async fn vessels_route(
                     backend: body.backend.clone(),
                     volumes,
                 };
-                let dir = v::dir_of(&body.name)?;
-                anyhow::ensure!(!dir.exists(), "vessel `{}` already exists", body.name);
-                let created = v::create(&opts, v::Rootfs::BaseImage);
+                let created = v::create(&opts, rootfs);
                 if created.is_err() {
                     let _ = std::fs::remove_dir_all(&dir);
                 }
@@ -555,6 +630,22 @@ async fn vessels_route(
                 }
                 let started = v::start(&body.name)?;
                 Ok(serde_json::json!({"created": body.name, "start": started}))
+            })())
+        }
+        (Method::GET, [name, action]) if action == "console" => {
+            let name = name.clone();
+            let tail: u64 = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("tail="))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(16 * 1024);
+            blocking!((|| -> anyhow::Result<serde_json::Value> {
+                let dir = v::dir_of(&name)?;
+                let log = std::fs::read(dir.join("console.log")).unwrap_or_default();
+                let start = log.len().saturating_sub(tail as usize);
+                Ok(serde_json::json!({
+                    "console": String::from_utf8_lossy(&log[start..]),
+                }))
             })())
         }
         (Method::GET, [name]) => {

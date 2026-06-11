@@ -28,7 +28,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
 # REST API server (nebulad): hyper directly — smaller than axum, same tokio
 # core, and our routing is a dozen fixed paths plus a raw docker proxy.
-tokio = { version = "1", features = ["rt", "net", "io-util", "time"] }
+tokio = { version = "1", features = ["rt", "net", "io-util", "time", "fs"] }
 hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
