@@ -30,14 +30,24 @@ impl Engine {
         Ok(id)
     }
 
-    pub fn exec_start(self: &Arc<Self>, exec_id: &str, start: &ExecStartConfig, ctx: &mut Ctx) -> io::Result<()> {
+    pub fn exec_start(
+        self: &Arc<Self>,
+        exec_id: &str,
+        start: &ExecStartConfig,
+        ctx: &mut Ctx,
+    ) -> io::Result<()> {
         let session = self
             .execs
             .lock()
             .unwrap()
             .get(exec_id)
             .cloned()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("No such exec instance: {exec_id}")))?;
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("No such exec instance: {exec_id}"),
+                )
+            })?;
         let entry = self.get_entry(&session.container_id)?;
         let target_pid = {
             let c = entry.c.lock().unwrap();
@@ -56,8 +66,9 @@ impl Engine {
             tty: cfg.tty,
             open_stdin: cfg.attach_stdin,
         };
-        let handle = slim_runtime::exec_in_container_cg(target_pid, &spec, Some(&session.container_id))
-            .map_err(|e| io::Error::other(format!("exec failed: {e}")))?;
+        let handle =
+            slim_runtime::exec_in_container_cg(target_pid, &spec, Some(&session.container_id))
+                .map_err(|e| io::Error::other(format!("exec failed: {e}")))?;
         *session.pid.lock().unwrap() = handle.pid;
         *session.running.lock().unwrap() = true;
 
@@ -91,7 +102,12 @@ impl Engine {
             .unwrap()
             .get(exec_id)
             .cloned()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("No such exec instance: {exec_id}")))?;
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("No such exec instance: {exec_id}"),
+                )
+            })?;
         let running = *session.running.lock().unwrap();
         let exit_code = session.exit_code.lock().unwrap().map(|c| c as i64);
         let pid = *session.pid.lock().unwrap() as i64;
@@ -119,7 +135,12 @@ impl ExecSession {
 }
 
 /// Bidirectional copy between the hijacked socket and an exec process.
-fn pump_exec(handle: slim_runtime::Handle, sock: std::os::unix::net::UnixStream, tty: bool, stdin: bool) {
+fn pump_exec(
+    handle: slim_runtime::Handle,
+    sock: std::os::unix::net::UnixStream,
+    tty: bool,
+    stdin: bool,
+) {
     let mut joins = Vec::new();
 
     if tty {

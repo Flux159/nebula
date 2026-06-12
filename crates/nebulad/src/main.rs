@@ -87,6 +87,28 @@ fn main() -> anyhow::Result<()> {
         }
     }
     let _ = Args::parse();
+
+    // Raise the fd soft limit to the hard cap (what dockerd's systemd unit
+    // does). The docker proxy legitimately holds a connection pair per
+    // streaming endpoint; the macOS default soft cap of 256–1024 turned that
+    // into a ~500-container wall in the battle-test sweeps.
+    #[cfg(unix)]
+    unsafe {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) == 0 && lim.rlim_cur < lim.rlim_max {
+            lim.rlim_cur = lim.rlim_max;
+            // macOS: the kernel caps the soft limit at kern.maxfilesperproc
+            // even when rlim_max reports unlimited; retry with that.
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) != 0 {
+                lim.rlim_cur = 10240;
+                let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+            }
+        }
+    }
+
     let paths = paths::Paths::new()?;
     paths.ensure_dirs()?;
 

@@ -12,6 +12,19 @@ use std::net::TcpListener;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
 
+/// Spawn a per-connection handler thread that won't take the listener down with
+/// it. `std::thread::spawn` panics on resource exhaustion (EAGAIN/ENOMEM) — in
+/// an accept loop that panic kills the listener and drops the apiserver socket
+/// (EOF) for every client at once. Builder::spawn returns Err instead; on
+/// failure we refuse this one connection and keep serving. Pairs with the
+/// process-wide RLIMIT_NOFILE raise at startup (see slim_http::raise_open_file_limit).
+pub(crate) fn spawn_conn<F: FnOnce() + Send + 'static>(name: &str, f: F) {
+    if let Err(e) = std::thread::Builder::new().name(name.into()).spawn(f) {
+        eprintln!("slim-kubeapi: refusing connection — thread spawn failed ({name}): {e} (raw {:?})", e.raw_os_error());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 /// A served connection. WebSocket exec needs a second, independent reader to
 /// carry stdin/resize frames while the main thread writes output frames;
 /// `dup_reader` provides one where the transport supports it (unix/tcp). TLS
@@ -72,7 +85,7 @@ impl ApiServer {
         for conn in listener.incoming() {
             let Ok(conn) = conn else { continue };
             let me = self.clone();
-            std::thread::spawn(move || {
+            spawn_conn("kubeapi-tcp", move || {
                 let _ = me.handle_conn(conn);
             });
         }
@@ -91,7 +104,7 @@ impl ApiServer {
         for conn in listener.incoming() {
             let Ok(conn) = conn else { continue };
             let me = self.clone();
-            std::thread::spawn(move || {
+            spawn_conn("kubeapi-unix", move || {
                 let _ = me.handle_conn(conn);
             });
         }

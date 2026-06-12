@@ -10,7 +10,10 @@ pub struct VolumeCreateRequest {
     pub name: String,
     #[serde(rename = "Driver")]
     pub driver: String,
-    #[serde(rename = "Labels", deserialize_with = "crate::container::null_to_default")]
+    #[serde(
+        rename = "Labels",
+        deserialize_with = "crate::container::null_to_default"
+    )]
     pub labels: BTreeMap<String, String>,
 }
 

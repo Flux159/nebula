@@ -98,7 +98,11 @@ impl Ctx {
                 let _ = self.stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
             }
         }
-        BodyReader { ctx: self, chunk_left: 0, chunked_done: false }
+        BodyReader {
+            ctx: self,
+            chunk_left: 0,
+            chunked_done: false,
+        }
     }
 
     fn drain_body(&mut self) {
@@ -120,7 +124,12 @@ impl Ctx {
         struct E {
             message: String,
         }
-        self.respond_json(status, &E { message: msg.into() })
+        self.respond_json(
+            status,
+            &E {
+                message: msg.into(),
+            },
+        )
     }
 
     pub fn respond_empty(&mut self, status: u16) -> io::Result<()> {
@@ -133,6 +142,25 @@ impl Ctx {
         self.drain_body();
         self.responded = true;
         self.stream.try_clone()
+    }
+
+    /// Has the client hung up? Non-blocking orderly-shutdown probe (MSG_PEEK)
+    /// for long-held endpoints like /wait — docker `run -d` opens /wait and
+    /// exits without ever reading the body, so without this every running
+    /// container pinned a connection (plus a proxied fd pair in nebulad)
+    /// until container exit: the 500-container wall the battle-test found.
+    pub fn client_gone(&self) -> bool {
+        use std::os::unix::io::AsRawFd;
+        let mut b = [0u8; 1];
+        let n = unsafe {
+            libc::recv(
+                self.stream.as_raw_fd(),
+                b.as_mut_ptr() as *mut libc::c_void,
+                1,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
+        };
+        n == 0 // 0 = peer closed; -1 (EWOULDBLOCK) or pending data = alive
     }
 
     pub fn respond_bytes(&mut self, status: u16, ctype: &str, body: &[u8]) -> io::Result<()> {
@@ -169,7 +197,10 @@ impl Ctx {
         );
         self.stream.write_all(head.as_bytes())?;
         self.stream.flush()?;
-        Ok(ChunkedWriter { stream: self.stream.try_clone()?, done: false })
+        Ok(ChunkedWriter {
+            stream: self.stream.try_clone()?,
+            done: false,
+        })
     }
 
     /// Take over the raw socket for exec/attach. Replies 101 (if the client
@@ -318,9 +349,37 @@ impl Drop for ChunkedWriter {
     }
 }
 
+/// Raise this process's open-file limit (RLIMIT_NOFILE) soft cap up to the hard
+/// cap, like dockerd/containerd do at startup. Each running container holds a
+/// few persistent fds (stdout/stderr pipes, log file, ns handles), so the
+/// default 1024 soft limit walls density at only a few hundred containers — and
+/// hitting it turns benign operations (accept, file open, thread spawn) into
+/// hard failures. Best-effort: returns the resulting soft limit, or the error.
+pub fn raise_open_file_limit() -> io::Result<u64> {
+    // SAFETY: plain libc getrlimit/setrlimit on a zeroed rlimit struct.
+    unsafe {
+        let mut lim: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if lim.rlim_cur < lim.rlim_max {
+            lim.rlim_cur = lim.rlim_max;
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(lim.rlim_cur as u64)
+    }
+}
+
 /// Serve forever: one thread per connection, keep-alive within a connection.
 /// The handler must terminal-respond on every request (the server 500s if it
 /// forgets, and catches panics so a bad request can't kill the daemon).
+///
+/// Robustness: the accept loop must never die. Under fd/thread exhaustion,
+/// `accept()` returns EMFILE/ENFILE and thread spawning fails — we degrade
+/// (back off briefly, refuse the one connection) instead of crashing the whole
+/// listener, which would drop the socket (EOF) for every client at once.
 pub fn serve<F>(path: &Path, handler: F) -> io::Result<()>
 where
     F: Fn(&mut Ctx) + Send + Sync + 'static,
@@ -331,16 +390,43 @@ where
     }
     let listener = UnixListener::bind(path)?;
     let handler = Arc::new(handler);
-    for conn in listener.incoming() {
-        let Ok(conn) = conn else { continue };
+    loop {
+        let conn = match listener.accept() {
+            Ok((conn, _)) => conn,
+            Err(e) => {
+                // Transient fd exhaustion: don't break the loop (that would kill
+                // the daemon) and don't busy-spin on the still-pending backlog.
+                if matches!(e.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE)) {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                continue;
+            }
+        };
         let handler = handler.clone();
-        std::thread::spawn(move || handle_conn(conn, &*handler));
+        // Builder::spawn returns Err on resource exhaustion instead of
+        // panicking (which std::thread::spawn does, taking the listener with
+        // it). On failure, reject this one connection and keep serving — and
+        // log the errno loudly, since this is the likely culprit behind the
+        // "socket dies at ~500 containers" wall (EAGAIN = thread/pids cap) and
+        // the panic message would otherwise be lost to a tmpfs log.
+        if let Err(e) = std::thread::Builder::new()
+            .name("slim-conn".into())
+            .spawn(move || handle_conn(conn, &*handler))
+        {
+            eprintln!(
+                "slimd: refusing connection — thread spawn failed: {e} (raw {:?})",
+                e.raw_os_error()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            continue;
+        }
     }
-    Ok(())
 }
 
 fn handle_conn<F: Fn(&mut Ctx)>(stream: UnixStream, handler: &F) {
-    let Ok(rstream) = stream.try_clone() else { return };
+    let Ok(rstream) = stream.try_clone() else {
+        return;
+    };
     let mut reader = BufReader::with_capacity(64 * 1024, rstream);
     loop {
         let head = match read_head(&mut reader) {
@@ -352,8 +438,12 @@ fn handle_conn<F: Fn(&mut Ctx)>(stream: UnixStream, handler: &F) {
             .header("Connection")
             .map(|v| !v.eq_ignore_ascii_case("close"))
             .unwrap_or(true);
-        let Ok(wstream) = stream.try_clone() else { return };
-        let Ok(rs2) = reader.get_ref().try_clone() else { return };
+        let Ok(wstream) = stream.try_clone() else {
+            return;
+        };
+        let Ok(rs2) = reader.get_ref().try_clone() else {
+            return;
+        };
         let mut ctx = Ctx {
             stream: wstream,
             reader: std::mem::replace(&mut reader, BufReader::new(rs2)),
@@ -410,7 +500,12 @@ fn read_head(reader: &mut BufReader<UnixStream>) -> io::Result<Option<RequestHea
         headers: req
             .headers
             .iter()
-            .map(|h| (h.name.to_string(), String::from_utf8_lossy(h.value).into_owned()))
+            .map(|h| {
+                (
+                    h.name.to_string(),
+                    String::from_utf8_lossy(h.value).into_owned(),
+                )
+            })
             .collect(),
     }))
 }
@@ -427,7 +522,10 @@ fn body_len(head: &RequestHead) -> BodyLen {
     {
         return BodyLen::Chunked;
     }
-    match head.header("Content-Length").and_then(|v| v.trim().parse::<u64>().ok()) {
+    match head
+        .header("Content-Length")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
         Some(0) | None => BodyLen::None,
         Some(n) => BodyLen::Len(n),
     }

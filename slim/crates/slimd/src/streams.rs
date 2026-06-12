@@ -43,7 +43,11 @@ pub fn pump_output_to_socket(
                 if !want {
                     continue;
                 }
-                let bytes = if multiplexed { frame(stream, &chunk) } else { chunk };
+                let bytes = if multiplexed {
+                    frame(stream, &chunk)
+                } else {
+                    chunk
+                };
                 if sock.write_all(&bytes).is_err() || sock.flush().is_err() {
                     break;
                 }

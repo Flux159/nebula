@@ -26,7 +26,10 @@ impl VolumeManager {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
-        Ok(Self { root: root.to_path_buf(), index: Mutex::new(index) })
+        Ok(Self {
+            root: root.to_path_buf(),
+            index: Mutex::new(index),
+        })
     }
 
     fn save(&self, idx: &BTreeMap<String, VolMeta>) {
@@ -40,7 +43,11 @@ impl VolumeManager {
     }
 
     pub fn create(&self, name: &str, labels: BTreeMap<String, String>) -> io::Result<Volume> {
-        let name = if name.is_empty() { slim_net::rand_id() } else { name.to_string() };
+        let name = if name.is_empty() {
+            slim_net::rand_id()
+        } else {
+            name.to_string()
+        };
         std::fs::create_dir_all(self.data_path(&name))?;
         let mut idx = self.index.lock().unwrap();
         idx.entry(name.clone()).or_insert_with(|| VolMeta {
@@ -62,7 +69,11 @@ impl VolumeManager {
     }
 
     pub fn get(&self, name: &str) -> Option<Volume> {
-        self.index.lock().unwrap().get(name).map(|m| self.to_api(name, m))
+        self.index
+            .lock()
+            .unwrap()
+            .get(name)
+            .map(|m| self.to_api(name, m))
     }
 
     pub fn list(&self) -> Vec<Volume> {
@@ -73,7 +84,10 @@ impl VolumeManager {
     pub fn remove(&self, name: &str, force: bool) -> io::Result<()> {
         let mut idx = self.index.lock().unwrap();
         if idx.remove(name).is_none() && !force {
-            return Err(io::Error::new(io::ErrorKind::NotFound, format!("no such volume: {name}")));
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no such volume: {name}"),
+            ));
         }
         let _ = std::fs::remove_dir_all(self.root.join(name));
         self.save(&idx);

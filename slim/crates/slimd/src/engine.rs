@@ -45,6 +45,21 @@ fn conflict(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::AlreadyExists, msg.into())
 }
 
+/// Spawn a fire-and-forget worker thread without panicking on resource
+/// exhaustion. Each running container holds ~3 of these (2 log pumps + 1
+/// waiter), so they're the threads that scale with density — when a thread/pids
+/// cap is hit, `std::thread::spawn` would panic; here we log the errno loudly
+/// (the panic message would otherwise be lost to a tmpfs log) and degrade.
+/// EAGAIN here is the smoking gun for the per-container density wall.
+fn spawn_worker<F: FnOnce() + Send + 'static>(name: &str, f: F) {
+    if let Err(e) = std::thread::Builder::new().name(name.into()).spawn(f) {
+        eprintln!(
+            "slimd: worker thread spawn failed ({name}): {e} (raw {:?})",
+            e.raw_os_error()
+        );
+    }
+}
+
 impl Engine {
     pub fn open(data: &Path) -> io::Result<EngineRef> {
         let paths = Paths {
@@ -53,9 +68,13 @@ impl Engine {
             // NEBULA_IMAGES_DIR points the image/layer store at a shared, persistent
             // location so multiple engines reuse one cache (pull-once, reuse-many,
             // offline after warm-up). Must be a real (non-overlay) filesystem.
-            images: std::env::var("NEBULA_IMAGES_DIR").map(PathBuf::from).unwrap_or_else(|_| data.join("images")),
+            images: std::env::var("NEBULA_IMAGES_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| data.join("images")),
             volumes: data.join("volumes"),
-            run: PathBuf::from(std::env::var("SLIM_RUN_DIR").unwrap_or_else(|_| "/run/slim".into())),
+            run: PathBuf::from(
+                std::env::var("SLIM_RUN_DIR").unwrap_or_else(|_| "/run/slim".into()),
+            ),
         };
         for d in [&paths.state, &paths.images, &paths.volumes, &paths.run] {
             std::fs::create_dir_all(d)?;
@@ -109,11 +128,17 @@ impl Engine {
     }
 
     fn load_containers(self: &EngineRef) {
-        let Ok(rd) = std::fs::read_dir(&self.paths.state) else { return };
+        let Ok(rd) = std::fs::read_dir(&self.paths.state) else {
+            return;
+        };
         for e in rd.flatten() {
             let cfg = e.path().join("config.json");
-            let Ok(bytes) = std::fs::read(&cfg) else { continue };
-            let Ok(mut c) = serde_json::from_slice::<Container>(&bytes) else { continue };
+            let Ok(bytes) = std::fs::read(&cfg) else {
+                continue;
+            };
+            let Ok(mut c) = serde_json::from_slice::<Container>(&bytes) else {
+                continue;
+            };
             // Anything not cleanly running is marked exited on load.
             if c.state.status == "running" {
                 c.state.status = "exited".into();
@@ -289,8 +314,14 @@ impl Engine {
                 .values()
                 .flat_map(|e| e.aliases.iter().cloned())
                 .collect(),
-            state: State { status: "created".into(), ..Default::default() },
-            log_path: dir.join("container-json.log").to_string_lossy().into_owned(),
+            state: State {
+                status: "created".into(),
+                ..Default::default()
+            },
+            log_path: dir
+                .join("container-json.log")
+                .to_string_lossy()
+                .into_owned(),
             rootfs_base: dir.join("rootfs").to_string_lossy().into_owned(),
         };
         self.persist(&c);
@@ -342,19 +373,20 @@ impl Engine {
         // container:<id> network mode (pod sandbox): join the target's netns by
         // pointing at /proc/<target-pid>/ns/net. The target (pod sandbox holder)
         // must be running; we inherit its IP for status and skip our own veth.
-        let shared_netns: Option<(PathBuf, String)> = if let Some(tid) = c.network.strip_prefix("container:") {
-            let te = self.get_entry(tid)?;
-            let (tpid, tip) = {
-                let tc = te.c.lock().unwrap();
-                (tc.state.pid, tc.ip.clone())
+        let shared_netns: Option<(PathBuf, String)> =
+            if let Some(tid) = c.network.strip_prefix("container:") {
+                let te = self.get_entry(tid)?;
+                let (tpid, tip) = {
+                    let tc = te.c.lock().unwrap();
+                    (tc.state.pid, tc.ip.clone())
+                };
+                if tpid <= 0 {
+                    return Err(conflict(format!("network container {tid} is not running")));
+                }
+                Some((PathBuf::from(format!("/proc/{tpid}/ns/net")), tip))
+            } else {
+                None
             };
-            if tpid <= 0 {
-                return Err(conflict(format!("network container {tid} is not running")));
-            }
-            Some((PathBuf::from(format!("/proc/{tpid}/ns/net")), tip))
-        } else {
-            None
-        };
 
         let spec = slim_runtime::ContainerSpec {
             id: c.id.clone(),
@@ -431,7 +463,10 @@ impl Engine {
                 hosts_file(&c.hostname, &c.ip, &extra, &c.host_config.extra_hosts),
             );
             if c.network != "none" {
-                let _ = std::fs::write(etc.join("resolv.conf"), resolv_conf(&gw, &c.host_config.dns));
+                let _ = std::fs::write(
+                    etc.join("resolv.conf"),
+                    resolv_conf(&gw, &c.host_config.dns),
+                );
             }
         }
 
@@ -489,7 +524,11 @@ impl Engine {
                 // named volume
                 self.volumes.ensure(&src)?
             };
-            out.push(slim_runtime::BindMount { source, target: dst, read_only: ro });
+            out.push(slim_runtime::BindMount {
+                source,
+                target: dst,
+                read_only: ro,
+            });
         }
         // --mount specs.
         for m in &c.host_config.mounts {
@@ -534,10 +573,12 @@ impl Engine {
         let mut writer = LogWriter::open(Path::new(log_path)).ok();
         if tty {
             // Single stream: read pty master, label as stdout.
-            let Some(pty) = rt.pty.as_ref().map(|m| m.lock().unwrap().try_clone()) else { return };
+            let Some(pty) = rt.pty.as_ref().map(|m| m.lock().unwrap().try_clone()) else {
+                return;
+            };
             let Ok(mut pty) = pty else { return };
             let entry = entry.clone();
-            std::thread::spawn(move || {
+            spawn_worker("slim-pump-tty", move || {
                 let mut buf = [0u8; 8192];
                 loop {
                     match pty.read(&mut buf) {
@@ -562,8 +603,12 @@ impl Engine {
                 let Some(mut file) = file else { continue };
                 let entry = entry.clone();
                 let writer = writer.clone();
-                let sname = if stream == STREAM_STDOUT { "stdout" } else { "stderr" };
-                std::thread::spawn(move || {
+                let sname = if stream == STREAM_STDOUT {
+                    "stdout"
+                } else {
+                    "stderr"
+                };
+                spawn_worker("slim-pump", move || {
                     let mut buf = [0u8; 8192];
                     loop {
                         match file.read(&mut buf) {
@@ -584,7 +629,7 @@ impl Engine {
 
     fn spawn_waiter(self: &Arc<Self>, entry: Arc<Entry>, rt: Arc<Runtime>, base: PathBuf) {
         let engine = self.clone();
-        std::thread::spawn(move || {
+        spawn_worker("slim-waiter", move || {
             let pid = { entry.c.lock().unwrap().state.pid };
             let status = slim_runtime::wait_pid(pid).unwrap_or(slim_runtime::ExitStatus {
                 code: 255,
@@ -682,8 +727,8 @@ impl Engine {
         self.mark_stopping(&entry);
         let _ = slim_runtime::signal_pid(pid, signal);
         // Wait up to timeout, then SIGKILL.
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_secs(timeout_secs.max(0) as u64);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(0) as u64);
         while std::time::Instant::now() < deadline {
             if !entry.c.lock().unwrap().running() {
                 self.emit_event("container", "stop", &id, BTreeMap::new());
@@ -773,7 +818,42 @@ impl Engine {
         Ok(guard.unwrap_or(0))
     }
 
-    pub fn remove(self: &Arc<Self>, name_or_id: &str, force: bool, remove_volumes: bool) -> io::Result<()> {
+    /// One bounded round of wait(): Some(exit code) if the container has
+    /// exited, None after ~1s otherwise — so callers holding a connection
+    /// open (the /wait endpoint) can check for a hung-up client between
+    /// rounds instead of pinning the socket until container exit.
+    pub fn wait_step(&self, name_or_id: &str) -> io::Result<Option<i32>> {
+        let entry = self.get_entry(name_or_id)?;
+        {
+            let c = entry.c.lock().unwrap();
+            if c.state.status == "exited" {
+                return Ok(Some(c.state.exit_code));
+            }
+        }
+        let rt = entry.rt.lock().unwrap().clone();
+        let (lock, cv) = &*rt.exited;
+        let guard = lock.lock().unwrap();
+        if let Some(code) = *guard {
+            return Ok(Some(code));
+        }
+        let (guard, _timeout) = cv
+            .wait_timeout(guard, std::time::Duration::from_secs(1))
+            .unwrap();
+        if let Some(code) = *guard {
+            return Ok(Some(code));
+        }
+        if entry.c.lock().unwrap().state.status == "exited" {
+            return Ok(Some(entry.c.lock().unwrap().state.exit_code));
+        }
+        Ok(None)
+    }
+
+    pub fn remove(
+        self: &Arc<Self>,
+        name_or_id: &str,
+        force: bool,
+        remove_volumes: bool,
+    ) -> io::Result<()> {
         let entry = self.get_entry(name_or_id)?;
         let id = {
             let c = entry.c.lock().unwrap();
@@ -843,18 +923,28 @@ impl Engine {
         if typ == "container" {
             if let Ok(e) = self.get_entry(id) {
                 let c = e.c.lock().unwrap();
-                attributes.entry("name".into()).or_insert_with(|| c.name.clone());
-                attributes.entry("image".into()).or_insert_with(|| c.image_ref.clone());
+                attributes
+                    .entry("name".into())
+                    .or_insert_with(|| c.name.clone());
+                attributes
+                    .entry("image".into())
+                    .or_insert_with(|| c.image_ref.clone());
             }
         }
         let msg = slim_api::EventMessage {
             typ: typ.to_string(),
             action: action.to_string(),
-            actor: slim_api::EventActor { id: id.to_string(), attributes },
+            actor: slim_api::EventActor {
+                id: id.to_string(),
+                attributes,
+            },
             time: now.as_secs() as i64,
             time_nano: now.as_nanos() as i64,
         };
-        self.events.lock().unwrap().retain(|tx| tx.send(msg.clone()).is_ok());
+        self.events
+            .lock()
+            .unwrap()
+            .retain(|tx| tx.send(msg.clone()).is_ok());
     }
 }
 
@@ -873,10 +963,14 @@ fn make_runtime(handle: slim_runtime::Handle) -> Runtime {
 
 impl Runtime {
     fn stdout_clone(&self) -> Option<std::fs::File> {
-        self.stdout.as_ref().and_then(|m| m.lock().unwrap().try_clone().ok())
+        self.stdout
+            .as_ref()
+            .and_then(|m| m.lock().unwrap().try_clone().ok())
     }
     fn stderr_clone(&self) -> Option<std::fs::File> {
-        self.stderr.as_ref().and_then(|m| m.lock().unwrap().try_clone().ok())
+        self.stderr
+            .as_ref()
+            .and_then(|m| m.lock().unwrap().try_clone().ok())
     }
 }
 

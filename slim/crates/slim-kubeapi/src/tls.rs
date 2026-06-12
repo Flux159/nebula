@@ -75,7 +75,7 @@ impl TlsIdentity {
             let Ok(conn) = conn else { continue };
             let cfg = self.config.clone();
             let api = api.clone();
-            std::thread::spawn(move || {
+            crate::server::spawn_conn("kubeapi-tls", move || {
                 match rustls::ServerConnection::new(cfg) {
                     Ok(sc) => {
                         let tls = rustls::StreamOwned::new(sc, conn);

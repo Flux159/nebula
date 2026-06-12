@@ -45,17 +45,29 @@ fn route(engine: &EngineRef, ctx: &mut Ctx, method: &str, segs: &[&str]) -> R {
             ctx.respond_empty(204)
         }
         ("POST", ["containers", id, "stop"]) => {
-            let t = ctx.head.query_str("t").and_then(|s| s.parse().ok()).unwrap_or(10);
+            let t = ctx
+                .head
+                .query_str("t")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10);
             engine.stop(id, t)?;
             ctx.respond_empty(204)
         }
         ("POST", ["containers", id, "restart"]) => {
-            let t = ctx.head.query_str("t").and_then(|s| s.parse().ok()).unwrap_or(10);
+            let t = ctx
+                .head
+                .query_str("t")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10);
             engine.restart(id, t)?;
             ctx.respond_empty(204)
         }
         ("POST", ["containers", id, "kill"]) => {
-            let sig = ctx.head.query_str("signal").unwrap_or("SIGKILL").to_string();
+            let sig = ctx
+                .head
+                .query_str("signal")
+                .unwrap_or("SIGKILL")
+                .to_string();
             engine.kill(id, &sig)?;
             ctx.respond_empty(204)
         }
@@ -112,9 +124,10 @@ fn route(engine: &EngineRef, ctx: &mut Ctx, method: &str, segs: &[&str]) -> R {
             let name = rest.join("/");
             delete_image(engine, ctx, &name)
         }
-        ("POST", ["images", "prune"]) => {
-            ctx.respond_json(200, &serde_json::json!({"ImagesDeleted": [], "SpaceReclaimed": 0}))
-        }
+        ("POST", ["images", "prune"]) => ctx.respond_json(
+            200,
+            &serde_json::json!({"ImagesDeleted": [], "SpaceReclaimed": 0}),
+        ),
         ("POST", ["build"]) => build::handle(engine, ctx),
         ("POST", ["commit"]) => ctx.respond_error(501, "commit is not yet supported in slim"),
 
@@ -122,7 +135,10 @@ fn route(engine: &EngineRef, ctx: &mut Ctx, method: &str, segs: &[&str]) -> R {
         ("GET", ["networks"]) => list_networks(engine, ctx),
         ("POST", ["networks", "create"]) => create_network(engine, ctx),
         ("GET", ["networks", id]) => {
-            let n = engine.net.get(id).ok_or_else(|| not_found(format!("network {id} not found")))?;
+            let n = engine
+                .net
+                .get(id)
+                .ok_or_else(|| not_found(format!("network {id} not found")))?;
             ctx.respond_json(200, &inspect::network(engine, &n))
         }
         ("DELETE", ["networks", id]) => {
@@ -138,7 +154,13 @@ fn route(engine: &EngineRef, ctx: &mut Ctx, method: &str, segs: &[&str]) -> R {
         // ----- volumes -----
         ("GET", ["volumes"]) => {
             let vols = engine.volumes.list();
-            ctx.respond_json(200, &slim_api::volume::VolumeListResponse { volumes: vols, warnings: vec![] })
+            ctx.respond_json(
+                200,
+                &slim_api::volume::VolumeListResponse {
+                    volumes: vols,
+                    warnings: vec![],
+                },
+            )
         }
         ("POST", ["volumes", "create"]) => {
             let req: slim_api::volume::VolumeCreateRequest = ctx.body_json()?;
@@ -146,26 +168,34 @@ fn route(engine: &EngineRef, ctx: &mut Ctx, method: &str, segs: &[&str]) -> R {
             ctx.respond_json(201, &v)
         }
         ("GET", ["volumes", name]) => {
-            let v = engine.volumes.get(name).ok_or_else(|| not_found(format!("no such volume: {name}")))?;
+            let v = engine
+                .volumes
+                .get(name)
+                .ok_or_else(|| not_found(format!("no such volume: {name}")))?;
             ctx.respond_json(200, &v)
         }
         ("DELETE", ["volumes", name]) => {
             engine.volumes.remove(name, ctx.head.query_bool("force"))?;
             ctx.respond_empty(204)
         }
-        ("POST", ["volumes", "prune"]) => {
-            ctx.respond_json(200, &serde_json::json!({"VolumesDeleted": [], "SpaceReclaimed": 0}))
-        }
+        ("POST", ["volumes", "prune"]) => ctx.respond_json(
+            200,
+            &serde_json::json!({"VolumesDeleted": [], "SpaceReclaimed": 0}),
+        ),
 
         // ----- system -----
         ("GET", ["system", "df"]) => ctx.respond_json(200, &inspect::system_df(engine)),
-        ("POST", ["system", "prune"]) => {
-            ctx.respond_json(200, &serde_json::json!({"ContainersDeleted":[],"ImagesDeleted":[],"SpaceReclaimed":0}))
-        }
+        ("POST", ["system", "prune"]) => ctx.respond_json(
+            200,
+            &serde_json::json!({"ContainersDeleted":[],"ImagesDeleted":[],"SpaceReclaimed":0}),
+        ),
 
         _ => ctx.respond_error(
             501,
-            format!("slim does not implement {} {}", ctx.head.method, ctx.head.path),
+            format!(
+                "slim does not implement {} {}",
+                ctx.head.method, ctx.head.path
+            ),
         ),
     }
 }
@@ -224,7 +254,10 @@ fn events(engine: &EngineRef, ctx: &mut Ctx) -> R {
 fn list_containers(engine: &EngineRef, ctx: &mut Ctx) -> R {
     let all = ctx.head.query_bool("all");
     let containers = engine.list(all);
-    let summaries: Vec<_> = containers.iter().map(|c| inspect::summary(engine, c)).collect();
+    let summaries: Vec<_> = containers
+        .iter()
+        .map(|c| inspect::summary(engine, c))
+        .collect();
     // Apply name/status/label filters if present (lenient).
     let filtered = inspect::apply_container_filters(summaries, ctx.head.query_str("filters"));
     ctx.respond_json(200, &filtered)
@@ -234,7 +267,13 @@ fn create_container(engine: &EngineRef, ctx: &mut Ctx) -> R {
     let name = ctx.head.query_str("name").map(|s| s.to_string());
     let req: slim_api::container::ContainerCreateRequest = ctx.body_json()?;
     let id = engine.create(&req, name.as_deref())?;
-    ctx.respond_json(201, &slim_api::container::ContainerCreateResponse { id, warnings: vec![] })
+    ctx.respond_json(
+        201,
+        &slim_api::container::ContainerCreateResponse {
+            id,
+            warnings: vec![],
+        },
+    )
 }
 
 /// `/wait` must send the 200 response HEADERS immediately, then the
@@ -245,7 +284,19 @@ fn wait_container(engine: &EngineRef, ctx: &mut Ctx, id: &str) -> R {
     // Resolve up front so a missing container is a clean 404 (before headers).
     let _ = engine.get_entry(id)?;
     let mut w = ctx.stream(200, "application/json")?;
-    let code = engine.wait(id).unwrap_or(-1);
+    // Bounded rounds + hang-up probe instead of a blocking wait: see
+    // Ctx::client_gone for why (fd-per-running-container otherwise).
+    let code = loop {
+        match engine.wait_step(id) {
+            Ok(Some(code)) => break code,
+            Ok(None) => {
+                if ctx.client_gone() {
+                    return Ok(());
+                }
+            }
+            Err(_) => break -1,
+        }
+    };
     let body = serde_json::to_vec(&slim_api::container::WaitResponse {
         status_code: code as i64,
         error: None,
@@ -264,7 +315,10 @@ fn prune_containers(engine: &EngineRef, ctx: &mut Ctx) -> R {
             }
         }
     }
-    ctx.respond_json(200, &serde_json::json!({"ContainersDeleted": deleted, "SpaceReclaimed": 0}))
+    ctx.respond_json(
+        200,
+        &serde_json::json!({"ContainersDeleted": deleted, "SpaceReclaimed": 0}),
+    )
 }
 
 fn logs(engine: &EngineRef, ctx: &mut Ctx, id: &str) -> R {
@@ -274,21 +328,41 @@ fn logs(engine: &EngineRef, ctx: &mut Ctx, id: &str) -> R {
         (c.log_path.clone(), c.config.tty)
     };
     let follow = ctx.head.query_bool("follow");
-    let stdout = ctx.head.query_str("stdout").map(|v| v == "1" || v == "true").unwrap_or(true);
-    let stderr = ctx.head.query_str("stderr").map(|v| v == "1" || v == "true").unwrap_or(true);
+    let stdout = ctx
+        .head
+        .query_str("stdout")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(true);
+    let stderr = ctx
+        .head
+        .query_str("stderr")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(true);
     let timestamps = ctx.head.query_bool("timestamps");
     let tail = match ctx.head.query_str("tail") {
         Some("all") | None => None,
         Some(n) => n.parse::<usize>().ok(),
     };
-    let opts = slim_runtime::jsonlog::LogReadOpts { stdout, stderr, tail, since: None, until: None, timestamps };
+    let opts = slim_runtime::jsonlog::LogReadOpts {
+        stdout,
+        stderr,
+        tail,
+        since: None,
+        until: None,
+        timestamps,
+    };
 
     let mut w = ctx.stream(200, "application/vnd.docker.raw-stream")?;
     let mut pos = 0u64;
-    pos = slim_runtime::jsonlog::read_log(std::path::Path::new(&log_path), &opts, pos, |stream, bytes| {
-        let s = if stream == "stderr" { 2 } else { 1 };
-        let _ = write_log_frame(&mut w, tty, s, bytes);
-    })
+    pos = slim_runtime::jsonlog::read_log(
+        std::path::Path::new(&log_path),
+        &opts,
+        pos,
+        |stream, bytes| {
+            let s = if stream == "stderr" { 2 } else { 1 };
+            let _ = write_log_frame(&mut w, tty, s, bytes);
+        },
+    )
     .unwrap_or(pos);
 
     if !follow {
@@ -335,14 +409,24 @@ fn attach(engine: &EngineRef, ctx: &mut Ctx, id: &str) -> R {
     let rt = entry.rt.lock().unwrap().clone();
     let tty = rt.tty;
     let want_stdin = ctx.head.query_bool("stdin");
-    let want_stdout = ctx.head.query_str("stdout").map(|v| v == "1" || v == "true").unwrap_or(true);
-    let want_stderr = ctx.head.query_str("stderr").map(|v| v == "1" || v == "true").unwrap_or(true);
+    let want_stdout = ctx
+        .head
+        .query_str("stdout")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(true);
+    let want_stderr = ctx
+        .head
+        .query_str("stderr")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(true);
 
     let (sock, _buffered) = ctx.hijack(!tty)?;
     let sock_in = sock.try_clone()?;
     let rt2 = rt.clone();
     let in_thread = if want_stdin {
-        Some(std::thread::spawn(move || streams::pump_socket_to_stdin(&rt2, sock_in)))
+        Some(std::thread::spawn(move || {
+            streams::pump_socket_to_stdin(&rt2, sock_in)
+        }))
     } else {
         None
     };
@@ -358,7 +442,11 @@ fn attach(engine: &EngineRef, ctx: &mut Ctx, id: &str) -> R {
 
 fn stats(engine: &EngineRef, ctx: &mut Ctx, id: &str) -> R {
     let entry = engine.get_entry(id)?;
-    let stream = ctx.head.query_str("stream").map(|v| v == "1" || v == "true").unwrap_or(true);
+    let stream = ctx
+        .head
+        .query_str("stream")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(true);
     if stream {
         let mut w = ctx.stream(200, "application/json")?;
         loop {
@@ -404,8 +492,16 @@ fn exec_inspect(engine: &EngineRef, ctx: &mut Ctx, id: &str) -> R {
 }
 
 fn exec_resize(engine: &EngineRef, ctx: &mut Ctx, id: &str) -> R {
-    let w = ctx.head.query_str("w").and_then(|s| s.parse().ok()).unwrap_or(80);
-    let h = ctx.head.query_str("h").and_then(|s| s.parse().ok()).unwrap_or(24);
+    let w = ctx
+        .head
+        .query_str("w")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(80);
+    let h = ctx
+        .head
+        .query_str("h")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(24);
     engine.exec_resize(id, w, h);
     ctx.respond_empty(200)
 }
@@ -414,7 +510,10 @@ fn exec_resize(engine: &EngineRef, ctx: &mut Ctx, id: &str) -> R {
 
 fn list_images(engine: &EngineRef, ctx: &mut Ctx) -> R {
     let imgs = engine.store.list();
-    let summaries: Vec<_> = imgs.iter().map(|i| inspect::image_summary(engine, i)).collect();
+    let summaries: Vec<_> = imgs
+        .iter()
+        .map(|i| inspect::image_summary(engine, i))
+        .collect();
     ctx.respond_json(200, &summaries)
 }
 
@@ -451,8 +550,16 @@ fn pull_image(engine: &EngineRef, ctx: &mut Ctx) -> R {
 
 fn pull_event_to_json(ev: slim_image::PullEvent) -> slim_api::ProgressMessage {
     match ev {
-        slim_image::PullEvent::Status(s) => slim_api::ProgressMessage { status: Some(s), ..Default::default() },
-        slim_image::PullEvent::LayerStatus { id, status, current, total } => slim_api::ProgressMessage {
+        slim_image::PullEvent::Status(s) => slim_api::ProgressMessage {
+            status: Some(s),
+            ..Default::default()
+        },
+        slim_image::PullEvent::LayerStatus {
+            id,
+            status,
+            current,
+            total,
+        } => slim_api::ProgressMessage {
             id: Some(id),
             status: Some(status),
             progress_detail: Some(slim_api::ProgressDetail {
@@ -465,14 +572,21 @@ fn pull_event_to_json(ev: slim_image::PullEvent) -> slim_api::ProgressMessage {
 }
 
 fn image_inspect(engine: &EngineRef, ctx: &mut Ctx, name: &str) -> R {
-    let rec = engine.store.resolve(name).ok_or_else(|| not_found(format!("No such image: {name}")))?;
+    let rec = engine
+        .store
+        .resolve(name)
+        .ok_or_else(|| not_found(format!("No such image: {name}")))?;
     ctx.respond_json(200, &inspect::image_inspect(engine, &rec))
 }
 
 fn tag_image(engine: &EngineRef, ctx: &mut Ctx, name: &str) -> R {
     let repo = ctx.head.query_str("repo").unwrap_or("");
     let tag = ctx.head.query_str("tag").unwrap_or("latest");
-    let target = if tag.is_empty() { repo.to_string() } else { format!("{repo}:{tag}") };
+    let target = if tag.is_empty() {
+        repo.to_string()
+    } else {
+        format!("{repo}:{tag}")
+    };
     engine.store.tag(name, &target)?;
     ctx.respond_empty(201)
 }
@@ -494,7 +608,12 @@ fn delete_image(engine: &EngineRef, ctx: &mut Ctx, name: &str) -> R {
 // ---------- networks ----------
 
 fn list_networks(engine: &EngineRef, ctx: &mut Ctx) -> R {
-    let nets: Vec<_> = engine.net.list().iter().map(|n| inspect::network(engine, n)).collect();
+    let nets: Vec<_> = engine
+        .net
+        .list()
+        .iter()
+        .map(|n| inspect::network(engine, n))
+        .collect();
     ctx.respond_json(200, &nets)
 }
 
@@ -505,7 +624,10 @@ fn create_network(engine: &EngineRef, ctx: &mut Ctx) -> R {
     engine.dns.listen(&rec.gateway());
     ctx.respond_json(
         201,
-        &slim_api::network::NetworkCreateResponse { id: rec.id, warning: String::new() },
+        &slim_api::network::NetworkCreateResponse {
+            id: rec.id,
+            warning: String::new(),
+        },
     )
 }
 
@@ -513,7 +635,10 @@ fn network_connect(engine: &EngineRef, ctx: &mut Ctx, id: &str, connect: bool) -
     let req: slim_api::network::NetworkConnectRequest = ctx.body_json()?;
     let entry = engine.get_entry(&req.container)?;
     let c = entry.snapshot();
-    let net = engine.net.get(id).ok_or_else(|| not_found(format!("network {id} not found")))?;
+    let net = engine
+        .net
+        .get(id)
+        .ok_or_else(|| not_found(format!("network {id} not found")))?;
     if connect {
         if c.running() {
             let aliases = req
@@ -521,7 +646,9 @@ fn network_connect(engine: &EngineRef, ctx: &mut Ctx, id: &str, connect: bool) -
                 .as_ref()
                 .map(|e| e.aliases.clone())
                 .unwrap_or_default();
-            engine.net.connect(&net.name, &c.id, &c.name, c.state.pid, &aliases)?;
+            engine
+                .net
+                .connect(&net.name, &c.id, &c.name, c.state.pid, &aliases)?;
         }
     } else {
         engine.net.disconnect(&net.name, &c.id);
@@ -551,7 +678,10 @@ fn registry_auth(ctx: &Ctx) -> Option<slim_image::registry::BasicAuth> {
     if cfg.username.is_empty() {
         return None;
     }
-    Some(slim_image::registry::BasicAuth { username: cfg.username, password: cfg.password })
+    Some(slim_image::registry::BasicAuth {
+        username: cfg.username,
+        password: cfg.password,
+    })
 }
 
 fn not_found(msg: String) -> std::io::Error {

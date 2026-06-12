@@ -12,7 +12,10 @@ pub struct NetworkCreateRequest {
     pub driver: String, // "" | bridge
     #[serde(rename = "Internal")]
     pub internal: bool,
-    #[serde(rename = "Labels", deserialize_with = "crate::container::null_to_default")]
+    #[serde(
+        rename = "Labels",
+        deserialize_with = "crate::container::null_to_default"
+    )]
     pub labels: BTreeMap<String, String>,
     #[serde(rename = "IPAM", skip_serializing_if = "Option::is_none")]
     pub ipam: Option<Ipam>,
@@ -23,7 +26,10 @@ pub struct NetworkCreateRequest {
 pub struct Ipam {
     #[serde(rename = "Driver")]
     pub driver: String,
-    #[serde(rename = "Config", deserialize_with = "crate::container::null_to_default")]
+    #[serde(
+        rename = "Config",
+        deserialize_with = "crate::container::null_to_default"
+    )]
     pub config: Vec<IpamConfig>,
 }
 

@@ -15,13 +15,36 @@ limitations; routine TODOs live in code.)
   created, ~5 alive); re-run the hog line after the fix. **Being fixed by a
   separate agent (Suyog dispatched).**
 
-- **(2026-06-12, slim) slimd drops its API socket (EOF) at ~500 containers.**
-  Density points end with connection EOF rather than dockerd-style graceful
-  slowdown: idle@4GiB wedged at 507 created / 500 running, nginx@4GiB at
-  285/280. Cause unknown (panic? thread/fd exhaustion? — nofile is 1M now);
-  /var/log/slimd.log is tmpfs so it needs a live session to catch. Density
-  itself is BETTER than full (nginx 280 vs 158 at 4 GiB) — only the failure
-  mode is worse.
+- **(2026-06-12, slim) RESOLVED: the "slimd 500-container wall" was fd math
+  in NEBULAD, not slimd.** Root cause chain, proven by live probes: docker
+  `run` opens `POST /containers/<id>/wait` and (for `-d`) exits without
+  reading the body; slimd's wait handler blocked until container exit,
+  pinning one proxied connection per running container; nebulad's docker
+  proxy correctly keeps half-closed pairs alive (needed for logs -f), so each
+  running container held **2 unix fds in nebulad**; nebulad ran at the macOS
+  default soft limit of 1024 → (1024 − ~20 base) / 2 ≈ **502** = the
+  observed "FAILED at 503", RAM-independent. Disproven along the way:
+  thread/pids caps (guest allows 127k, slimd uses 4 threads/container ≈ 2k),
+  IP pool (/24 per network yet 500 ran — idle containers aren't wired into
+  the bridge), fd limits in the guest (1M). Fixes: slimd wait handler now
+  polls `wait_step` + `client_gone()` (MSG_PEEK EOF probe) and frees the
+  connection when the client hangs up; nebulad raises NOFILE soft→hard at
+  startup (dockerd-systemd parity); plus the other agent's crash→degrade
+  spawn hardening in slimd. Verified live: nebulad fds flat (~16–30) from 0
+  to **620 running containers**, slimd alive throughout (old wall: 503).
+  Build-system gotcha found en route: nebula/slim and ~/Projects/nebula-slim
+  are SEPARATE checkouts and build-rootfs.sh defaults SLIMD_BIN to the
+  latter — two "fixed" rootfs builds silently shipped a Jun-11 slimd (docker
+  layer cache even kept the old mtime). Pass SLIMD_BIN explicitly when
+  building from nebula/slim. Slim density matrix still needs its clean
+  re-run for the report (also: /dev/shm fix pending from the other agent).
+
+- **(2026-06-12, slim) slim's next density wall: the per-network /24 IP pool
+  (252 addresses).** At ~250 networked containers `slimd: network connect
+  failed: network address pool exhausted` — but containers still START and
+  run network-less (warn-and-continue). Lenient-by-design or a bug? Decide:
+  fail the create (docker behavior), or document. This is also why 500
+  containers "worked" on a 252-IP subnet during the wall hunt.
 
 - **(2026-06-12) Mass VM churn exhausts the macOS bootpd DHCP pool — and the
   engine vessel was burning one lease per restart.** After the vessel sweep

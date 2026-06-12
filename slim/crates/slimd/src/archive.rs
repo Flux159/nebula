@@ -45,7 +45,10 @@ pub fn get(engine: &EngineRef, ctx: &mut Ctx, id: &str, head_only: bool) -> R {
     let target = join_secure(&root, &path);
     if !target.exists() {
         cleanup(engine, mount);
-        return ctx.respond_error(404, format!("Could not find the file {path} in container {id}"));
+        return ctx.respond_error(
+            404,
+            format!("Could not find the file {path} in container {id}"),
+        );
     }
     // Stat header (docker cp reads this).
     let stat = stat_header(&target, &path);
@@ -134,7 +137,10 @@ fn stat_header(target: &Path, path: &str) -> String {
             m.mode()
         })
         .unwrap_or(0);
-    let name = Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let name = Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
     let json = serde_json::json!({
         "name": name,
         "size": size,

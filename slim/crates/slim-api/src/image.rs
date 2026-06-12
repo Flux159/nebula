@@ -24,7 +24,10 @@ pub struct ImageSummary {
     pub virtual_size: i64,
     #[serde(rename = "SharedSize")]
     pub shared_size: i64,
-    #[serde(rename = "Labels", deserialize_with = "crate::container::null_to_default")]
+    #[serde(
+        rename = "Labels",
+        deserialize_with = "crate::container::null_to_default"
+    )]
     pub labels: BTreeMap<String, String>,
     #[serde(rename = "Containers")]
     pub containers: i64,
@@ -83,7 +86,10 @@ pub struct ImageConfig {
     pub volumes: Option<BTreeMap<String, serde_json::Value>>,
     #[serde(rename = "WorkingDir")]
     pub working_dir: String,
-    #[serde(rename = "Labels", deserialize_with = "crate::container::null_to_default")]
+    #[serde(
+        rename = "Labels",
+        deserialize_with = "crate::container::null_to_default"
+    )]
     pub labels: BTreeMap<String, String>,
     #[serde(rename = "StopSignal", skip_serializing_if = "Option::is_none")]
     pub stop_signal: Option<String>,
@@ -115,8 +121,7 @@ pub struct OciRootFs {
 
 // ---- distribution (manifest) types ----
 
-pub const MT_MANIFEST_LIST_V2: &str =
-    "application/vnd.docker.distribution.manifest.list.v2+json";
+pub const MT_MANIFEST_LIST_V2: &str = "application/vnd.docker.distribution.manifest.list.v2+json";
 pub const MT_MANIFEST_V2: &str = "application/vnd.docker.distribution.manifest.v2+json";
 pub const MT_OCI_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 pub const MT_OCI_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";

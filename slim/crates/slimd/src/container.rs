@@ -176,7 +176,11 @@ pub fn status_string(state: &State) -> String {
     match state.status.as_str() {
         "running" => format!("Up {}", since(&state.started_at)),
         "created" => "Created".to_string(),
-        "exited" => format!("Exited ({}) {} ago", state.exit_code, since(&state.finished_at)),
+        "exited" => format!(
+            "Exited ({}) {} ago",
+            state.exit_code,
+            since(&state.finished_at)
+        ),
         other => other.to_string(),
     }
 }
@@ -202,7 +206,12 @@ fn since(rfc3339: &str) -> String {
 }
 
 /// Build the container's /etc/hosts content.
-pub fn hosts_file(hostname: &str, ip: &str, extra: &[(String, Vec<String>)], extra_hosts: &[String]) -> String {
+pub fn hosts_file(
+    hostname: &str,
+    ip: &str,
+    extra: &[(String, Vec<String>)],
+    extra_hosts: &[String],
+) -> String {
     let mut s = String::from("127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n");
     if !ip.is_empty() && !hostname.is_empty() {
         s.push_str(&format!("{ip}\t{hostname}\n"));
@@ -220,15 +229,16 @@ pub fn hosts_file(hostname: &str, ip: &str, extra: &[(String, Vec<String>)], ext
 
 pub fn resolv_conf(nameserver: &str, dns_override: &[String]) -> String {
     if !dns_override.is_empty() {
-        return dns_override.iter().map(|d| format!("nameserver {d}\n")).collect();
+        return dns_override
+            .iter()
+            .map(|d| format!("nameserver {d}\n"))
+            .collect();
     }
     format!("nameserver {nameserver}\noptions ndots:0\n")
 }
 
 /// Parse a port spec map from HostConfig.PortBindings + image ExposedPorts.
-pub fn collect_ports(
-    bindings: &BTreeMap<String, Vec<PortBinding>>,
-) -> Vec<(String, u16, u16)> {
+pub fn collect_ports(bindings: &BTreeMap<String, Vec<PortBinding>>) -> Vec<(String, u16, u16)> {
     // returns (proto, host_port, container_port)
     let mut out = Vec::new();
     for (key, binds) in bindings {
@@ -236,7 +246,9 @@ pub fn collect_ports(
             Some((p, pr)) => (p, pr),
             None => (key.as_str(), "tcp"),
         };
-        let Ok(cport) = port.parse::<u16>() else { continue };
+        let Ok(cport) = port.parse::<u16>() else {
+            continue;
+        };
         for b in binds {
             let hport = b.host_port.parse::<u16>().unwrap_or(cport);
             out.push((proto.to_string(), hport, cport));

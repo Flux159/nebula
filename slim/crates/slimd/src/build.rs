@@ -11,14 +11,25 @@ type R = io::Result<()>;
 pub fn handle(engine: &EngineRef, ctx: &mut Ctx) -> R {
     // Query params (docker build sends most config here).
     let tag = ctx.head.query_str("t").map(|s| s.to_string());
-    let dockerfile = ctx.head.query_str("dockerfile").unwrap_or("Dockerfile").to_string();
-    let target = ctx.head.query_str("target").filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let dockerfile = ctx
+        .head
+        .query_str("dockerfile")
+        .unwrap_or("Dockerfile")
+        .to_string();
+    let target = ctx
+        .head
+        .query_str("target")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
     let nocache = ctx.head.query_bool("nocache");
     let build_args = parse_json_map(ctx.head.query_str("buildargs"));
     let labels = parse_json_map(ctx.head.query_str("labels"));
 
     // Read + unpack the context to a temp dir.
-    let ctx_dir = engine.paths.run.join(format!("build-ctx-{}", slim_net::rand_id()));
+    let ctx_dir = engine
+        .paths
+        .run
+        .join(format!("build-ctx-{}", slim_net::rand_id()));
     if let Err(e) = std::fs::create_dir_all(&ctx_dir) {
         return ctx.respond_error(500, format!("mkdir build context: {e}"));
     }
@@ -39,7 +50,10 @@ pub fn handle(engine: &EngineRef, ctx: &mut Ctx) -> R {
 
     let mut w = ctx.stream(200, "application/json")?;
     let mut emit = |line: &str| {
-        let msg = slim_api::ProgressMessage { stream: Some(line.to_string()), ..Default::default() };
+        let msg = slim_api::ProgressMessage {
+            stream: Some(line.to_string()),
+            ..Default::default()
+        };
         if let Ok(mut b) = serde_json::to_vec(&msg) {
             b.push(b'\n');
             let _ = w.write_all(&b);
@@ -47,7 +61,9 @@ pub fn handle(engine: &EngineRef, ctx: &mut Ctx) -> R {
     };
 
     let engine2 = engine.clone();
-    let mut ensure = move |reference: &str, prog: &mut slim_build::Progress| -> Result<slim_image::ImageRecord, slim_build::BuildError> {
+    let mut ensure = move |reference: &str,
+                           prog: &mut slim_build::Progress|
+          -> Result<slim_image::ImageRecord, slim_build::BuildError> {
         prog(&format!("Pulling {reference}...\n"));
         engine2
             .ensure_image(reference)
@@ -102,5 +118,6 @@ fn flate2_decoder(body: &[u8]) -> flate2::read::GzDecoder<&[u8]> {
 }
 
 fn parse_json_map(s: Option<&str>) -> BTreeMap<String, String> {
-    s.and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default()
+    s.and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default()
 }

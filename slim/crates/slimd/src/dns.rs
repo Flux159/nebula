@@ -18,8 +18,12 @@ pub struct DnsServer {
 
 impl DnsServer {
     pub fn new() -> Self {
-        let upstream = std::env::var("NEBULA_DNS_UPSTREAM").unwrap_or_else(|_| "127.0.0.1:53".into());
-        Self { names: Arc::new(Mutex::new(BTreeMap::new())), upstream }
+        let upstream =
+            std::env::var("NEBULA_DNS_UPSTREAM").unwrap_or_else(|_| "127.0.0.1:53".into());
+        Self {
+            names: Arc::new(Mutex::new(BTreeMap::new())),
+            upstream,
+        }
     }
 
     /// Bind a listener on `gateway_ip:53` (best-effort; logs on failure).
@@ -38,7 +42,10 @@ impl DnsServer {
     }
 
     pub fn set(&self, name: &str, ip: &str) {
-        self.names.lock().unwrap().insert(name.to_ascii_lowercase(), ip.to_string());
+        self.names
+            .lock()
+            .unwrap()
+            .insert(name.to_ascii_lowercase(), ip.to_string());
     }
 
     pub fn remove_ip(&self, ip: &str) {
@@ -56,12 +63,19 @@ fn serve(sock: UdpSocket, names: NameTable, upstream: String) {
     let up = UdpSocket::bind("0.0.0.0:0").ok();
     let mut buf = [0u8; 1500];
     loop {
-        let Ok((n, peer)) = sock.recv_from(&mut buf) else { continue };
+        let Ok((n, peer)) = sock.recv_from(&mut buf) else {
+            continue;
+        };
         let query = buf[..n].to_vec();
         if let Some((name, qtype)) = parse_question(&query) {
             if qtype == 1 {
                 // A
-                if let Some(ip) = names.lock().unwrap().get(&name.to_ascii_lowercase()).cloned() {
+                if let Some(ip) = names
+                    .lock()
+                    .unwrap()
+                    .get(&name.to_ascii_lowercase())
+                    .cloned()
+                {
                     if let Some(resp) = build_a_response(&query, &ip) {
                         let _ = sock.send_to(&resp, peer);
                         continue;
@@ -72,7 +86,8 @@ fn serve(sock: UdpSocket, names: NameTable, upstream: String) {
         // Forward upstream.
         if let Some(up) = &up {
             if up.send_to(&query, &upstream).is_ok() {
-                up.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+                up.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .ok();
                 let mut rbuf = [0u8; 1500];
                 if let Ok((rn, _)) = up.recv_from(&mut rbuf) {
                     let _ = sock.send_to(&rbuf[..rn], peer);

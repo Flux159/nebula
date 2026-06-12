@@ -54,10 +54,19 @@ pub fn start(engine: &EngineRef, api_addr: &str) -> SharedStore {
         .get(slim_net::DEFAULT_NETWORK)
         .map(|n| n.gateway())
         .unwrap_or_else(|| "10.88.0.1".to_string());
-    let port: u16 = api_addr.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(6443);
+    let port: u16 = api_addr
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(6443);
 
     // Serve pods/{}/log and pods/{}/exec from the in-process engine.
-    let api = ApiServer::with_proxy(store.clone(), Arc::new(EngineProxy { engine: engine.clone() }));
+    let api = ApiServer::with_proxy(
+        store.clone(),
+        Arc::new(EngineProxy {
+            engine: engine.clone(),
+        }),
+    );
     let addr = api_addr.to_string();
     // TLS so in-cluster operators (always HTTPS) can connect; the CA is
     // projected into pods. Falls back to plain HTTP if cert generation fails.
@@ -150,7 +159,12 @@ fn register_kubernetes_service(store: &SharedStore, engine: &EngineRef, ctx: &Br
             true,
         );
     }
-    for name in ["kubernetes.default.svc.cluster.local", "kubernetes.default.svc", "kubernetes.default", "kubernetes"] {
+    for name in [
+        "kubernetes.default.svc.cluster.local",
+        "kubernetes.default.svc",
+        "kubernetes.default",
+        "kubernetes",
+    ] {
         engine.dns.set(name, &ctx.kube_host);
     }
 }
@@ -184,7 +198,14 @@ impl EngineProxy {
 }
 
 impl PodProxy for EngineProxy {
-    fn logs(&self, ns: &str, pod: &str, container: &str, opts: &LogOpts, w: &mut dyn Write) -> std::io::Result<()> {
+    fn logs(
+        &self,
+        ns: &str,
+        pod: &str,
+        container: &str,
+        opts: &LogOpts,
+        w: &mut dyn Write,
+    ) -> std::io::Result<()> {
         let cname = self.cname_for(ns, pod, container);
         let entry = self.engine.get_entry(&cname)?;
         let log_path = entry.c.lock().unwrap().log_path.clone();
@@ -203,7 +224,10 @@ impl PodProxy for EngineProxy {
         if !opts.follow {
             return Ok(());
         }
-        let fopts = slim_runtime::jsonlog::LogReadOpts { tail: None, ..ropts };
+        let fopts = slim_runtime::jsonlog::LogReadOpts {
+            tail: None,
+            ..ropts
+        };
         loop {
             let running = entry.c.lock().unwrap().running();
             let mut wrote = false;
@@ -221,7 +245,15 @@ impl PodProxy for EngineProxy {
         Ok(())
     }
 
-    fn exec_start(&self, ns: &str, pod: &str, container: &str, cmd: &[String], tty: bool, stdin: bool) -> std::io::Result<ExecHandle> {
+    fn exec_start(
+        &self,
+        ns: &str,
+        pod: &str,
+        container: &str,
+        cmd: &[String],
+        tty: bool,
+        stdin: bool,
+    ) -> std::io::Result<ExecHandle> {
         let cname = self.cname_for(ns, pod, container);
         let entry = self.engine.get_entry(&cname)?;
         let pid = {
@@ -263,7 +295,13 @@ impl PodProxy for EngineProxy {
 fn seed_cluster(store: &SharedStore) {
     let ns = |name: &str| {
         let info = store.lookup("", "namespaces").unwrap();
-        store.put(&info, json!({"metadata":{"name":name}, "spec":{}, "status":{"phase":"Active"}}), "", name, true);
+        store.put(
+            &info,
+            json!({"metadata":{"name":name}, "spec":{}, "status":{"phase":"Active"}}),
+            "",
+            name,
+            true,
+        );
     };
     for n in ["default", "kube-system", "kube-public"] {
         ns(n);
@@ -326,12 +364,19 @@ impl Desired {
     }
     /// Engine container name for init container index `i`.
     fn init_cname(&self, i: usize) -> String {
-        format!("{}.init.{}", self.holder_cname, cspec_name(&self.init_containers[i]))
+        format!(
+            "{}.init.{}",
+            self.holder_cname,
+            cspec_name(&self.init_containers[i])
+        )
     }
 }
 
 fn cspec_name(c: &Value) -> String {
-    c.get("name").and_then(|v| v.as_str()).unwrap_or("main").to_string()
+    c.get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("main")
+        .to_string()
 }
 
 fn reconcile_once(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx) -> std::io::Result<()> {
@@ -354,7 +399,10 @@ fn reconcile_once(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx) -> s
     // Bare Pods (not owned by us — avoid double-managing the pods we synthesize).
     if let Some(info) = store.lookup("", "pods") {
         for p in store.list(&info, None, &[]).0 {
-            let managed = p.pointer("/metadata/labels").and_then(|l| l.get(MANAGED)).is_some();
+            let managed = p
+                .pointer("/metadata/labels")
+                .and_then(|l| l.get(MANAGED))
+                .is_some();
             if managed {
                 continue;
             }
@@ -380,10 +428,19 @@ fn reconcile_once(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx) -> s
         }
     }
     for c in engine.list(true) {
-        if c.config.labels.get(MANAGED).map(|v| v == "true").unwrap_or(false)
+        if c.config
+            .labels
+            .get(MANAGED)
+            .map(|v| v == "true")
+            .unwrap_or(false)
             && !desired_cnames.contains(&c.name)
         {
-            let is_holder = c.config.labels.get(POD_HOLDER).map(|h| *h == c.name).unwrap_or(false);
+            let is_holder = c
+                .config
+                .labels
+                .get(POD_HOLDER)
+                .map(|h| *h == c.name)
+                .unwrap_or(false);
             let _ = engine.remove(&c.name, true, false);
             if is_holder {
                 if let Some(pod) = c.config.labels.get(POD_OF) {
@@ -400,26 +457,54 @@ fn reconcile_once(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx) -> s
 }
 
 fn collect_workload(obj: &Value, out: &mut BTreeMap<String, Desired>, restart: &'static str) {
-    let kind = obj.get("kind").and_then(|v| v.as_str()).unwrap_or("Deployment").to_string();
-    let name = obj.pointer("/metadata/name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let ns = obj.pointer("/metadata/namespace").and_then(|v| v.as_str()).unwrap_or("default").to_string();
+    let kind = obj
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Deployment")
+        .to_string();
+    let name = obj
+        .pointer("/metadata/name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let ns = obj
+        .pointer("/metadata/namespace")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default")
+        .to_string();
     if name.is_empty() {
         return;
     }
     let replicas = if restart == "no" {
         1
     } else {
-        obj.pointer("/spec/replicas").and_then(|v| v.as_i64()).unwrap_or(1).max(0)
+        obj.pointer("/spec/replicas")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1)
+            .max(0)
     };
-    let template = obj.pointer("/spec/template/spec").cloned().unwrap_or(Value::Null);
-    let labels = obj.pointer("/spec/template/metadata/labels").cloned()
+    let template = obj
+        .pointer("/spec/template/spec")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let labels = obj
+        .pointer("/spec/template/metadata/labels")
+        .cloned()
         .or_else(|| obj.pointer("/spec/selector/matchLabels").cloned())
         .unwrap_or(json!({}));
-    let containers = template.get("containers").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+    let containers = template
+        .get("containers")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
     if containers.is_empty() {
         return;
     }
-    let init_containers = template.get("initContainers").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+    let init_containers = template
+        .get("initContainers")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
     for i in 0..replicas {
         let pod_name = format!("{name}-{i}");
         let holder_cname = format!("{ns}_{pod_name}");
@@ -441,20 +526,44 @@ fn collect_workload(obj: &Value, out: &mut BTreeMap<String, Desired>, restart: &
 }
 
 fn collect_bare_pod(obj: &Value, out: &mut BTreeMap<String, Desired>) {
-    let name = obj.pointer("/metadata/name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let ns = obj.pointer("/metadata/namespace").and_then(|v| v.as_str()).unwrap_or("default").to_string();
+    let name = obj
+        .pointer("/metadata/name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let ns = obj
+        .pointer("/metadata/namespace")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default")
+        .to_string();
     if name.is_empty() {
         return;
     }
     let template = obj.pointer("/spec").cloned().unwrap_or(Value::Null);
-    let containers = template.get("containers").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+    let containers = template
+        .get("containers")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
     if containers.is_empty() {
         return;
     }
-    let init_containers = template.get("initContainers").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+    let init_containers = template
+        .get("initContainers")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
     let holder_cname = format!("{ns}_{name}");
-    let restart = obj.pointer("/spec/restartPolicy").and_then(|v| v.as_str())
-        .map(|p| if p == "Never" || p == "OnFailure" { "no" } else { "always" })
+    let restart = obj
+        .pointer("/spec/restartPolicy")
+        .and_then(|v| v.as_str())
+        .map(|p| {
+            if p == "Never" || p == "OnFailure" {
+                "no"
+            } else {
+                "always"
+            }
+        })
         .unwrap_or("always");
     out.insert(
         holder_cname.clone(),
@@ -464,7 +573,10 @@ fn collect_bare_pod(obj: &Value, out: &mut BTreeMap<String, Desired>) {
             holder_cname,
             owner: format!("Pod/{ns}/{name}"),
             template,
-            labels: obj.pointer("/metadata/labels").cloned().unwrap_or(json!({})),
+            labels: obj
+                .pointer("/metadata/labels")
+                .cloned()
+                .unwrap_or(json!({})),
             restart,
             init_containers,
             containers,
@@ -498,14 +610,21 @@ fn ensure_pod(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: &Desi
         }
     }
     // Everything below joins the sandbox netns, so it must be running first.
-    let sandbox_up = engine.get_entry(&sandbox).map(|e| e.c.lock().unwrap().running()).unwrap_or(false);
+    let sandbox_up = engine
+        .get_entry(&sandbox)
+        .map(|e| e.c.lock().unwrap().running())
+        .unwrap_or(false);
     if !sandbox_up {
         sync_pod_status(engine, store, ctx, d, 0);
         return;
     }
 
     // 2. Init containers (joined to the sandbox netns), sequential to exit-0.
-    let init_restart = if d.restart == "no" { "no" } else { "on-failure" };
+    let init_restart = if d.restart == "no" {
+        "no"
+    } else {
+        "on-failure"
+    };
     let mut init_done = 0usize;
     let mut initializing = false;
     for (i, ispec) in d.init_containers.iter().enumerate() {
@@ -521,7 +640,8 @@ fn ensure_pod(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: &Desi
                 break;
             }
             Err(_) => {
-                if let Some(req) = build_create_req(store, ctx, d, ispec, &net, init_restart, false) {
+                if let Some(req) = build_create_req(store, ctx, d, ispec, &net, init_restart, false)
+                {
                     let image = req.config.image.clone();
                     if engine.store.resolve(&image).is_none() {
                         let _ = engine.ensure_image(&image);
@@ -548,7 +668,9 @@ fn ensure_pod(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: &Desi
             if engine.get_entry(&cname).is_ok() {
                 continue;
             }
-            let Some(req) = build_create_req(store, ctx, d, cspec, &net, d.restart, false) else { continue };
+            let Some(req) = build_create_req(store, ctx, d, cspec, &net, d.restart, false) else {
+                continue;
+            };
             let image = req.config.image.clone();
             if engine.store.resolve(&image).is_none() {
                 let _ = engine.ensure_image(&image);
@@ -569,14 +691,24 @@ fn ensure_pod(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: &Desi
 /// Build aggregated Pod status (init + main containerStatuses) and store it.
 /// While init containers are still running the main containers report
 /// `PodInitializing` and the pod stays `Pending`.
-fn sync_pod_status(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: &Desired, init_done: usize) {
+fn sync_pod_status(
+    engine: &EngineRef,
+    store: &SharedStore,
+    ctx: &BridgeCtx,
+    d: &Desired,
+    init_done: usize,
+) {
     let total_init = d.init_containers.len();
     let initializing = init_done < total_init;
 
     let mut init_statuses = Vec::with_capacity(total_init);
     for (i, ispec) in d.init_containers.iter().enumerate() {
         let name = cspec_name(ispec);
-        let image = ispec.get("image").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let image = ispec
+            .get("image")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         match engine.get_entry(&d.init_cname(i)) {
             Ok(e) => {
                 let c = e.c.lock().unwrap();
@@ -591,7 +723,11 @@ fn sync_pod_status(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: 
     for (i, cspec) in d.containers.iter().enumerate() {
         total += 1;
         let name = cspec_name(cspec);
-        let image = cspec.get("image").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let image = cspec
+            .get("image")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if initializing {
             cstatuses.push(waiting_status(&name, &image, "PodInitializing"));
             continue;
@@ -606,7 +742,13 @@ fn sync_pod_status(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: 
                     _ => {}
                 }
                 let ready_override = ctx.readiness.lock().unwrap().get(&d.cname(i)).copied();
-                cstatuses.push(container_status(&name, &image, &c.id, &c.state, ready_override));
+                cstatuses.push(container_status(
+                    &name,
+                    &image,
+                    &c.id,
+                    &c.state,
+                    ready_override,
+                ));
             }
             Err(_) => cstatuses.push(waiting_status(&name, &image, "ContainerCreating")),
         }
@@ -634,7 +776,13 @@ fn sync_pod_status(engine: &EngineRef, store: &SharedStore, ctx: &BridgeCtx, d: 
 
 /// Build a k8s containerStatus from a live engine container State. `ready_override`
 /// is the prober verdict when a readiness probe exists (None = ready when running).
-fn container_status(name: &str, image: &str, id: &str, st: &State, ready_override: Option<bool>) -> Value {
+fn container_status(
+    name: &str,
+    image: &str,
+    id: &str,
+    st: &State,
+    ready_override: Option<bool>,
+) -> Value {
     let state_obj = match st.status.as_str() {
         "running" => json!({"running": {"startedAt": st.started_at}}),
         "exited" | "dead" => json!({"terminated": {
@@ -687,8 +835,16 @@ fn build_create_req(
     env.push(format!("KUBERNETES_SERVICE_HOST={}", ctx.kube_host));
     env.push(format!("KUBERNETES_SERVICE_PORT={}", ctx.kube_port));
     env.push(format!("KUBERNETES_SERVICE_PORT_HTTPS={}", ctx.kube_port));
-    env.push(format!("KUBERNETES_PORT=tcp://{}:{}", ctx.kube_host, ctx.kube_port));
-    for ef in cspec.get("envFrom").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+    env.push(format!(
+        "KUBERNETES_PORT=tcp://{}:{}",
+        ctx.kube_host, ctx.kube_port
+    ));
+    for ef in cspec
+        .get("envFrom")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+    {
         if let Some(n) = ef.pointer("/configMapRef/name").and_then(|v| v.as_str()) {
             for (k, v) in config_data(store, "configmaps", &d.pod_ns, n) {
                 env.push(format!("{k}={v}"));
@@ -700,19 +856,34 @@ fn build_create_req(
             }
         }
     }
-    for e in cspec.get("env").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
-        let name = e.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    for e in cspec
+        .get("env")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+    {
+        let name = e
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if name.is_empty() {
             continue;
         }
         if let Some(v) = e.get("value").and_then(|v| v.as_str()) {
             env.push(format!("{name}={v}"));
         } else if let Some(r) = e.get("valueFrom") {
-            if let (Some(cm), Some(key)) = (r.pointer("/configMapKeyRef/name").and_then(|v| v.as_str()), r.pointer("/configMapKeyRef/key").and_then(|v| v.as_str())) {
+            if let (Some(cm), Some(key)) = (
+                r.pointer("/configMapKeyRef/name").and_then(|v| v.as_str()),
+                r.pointer("/configMapKeyRef/key").and_then(|v| v.as_str()),
+            ) {
                 if let Some(v) = config_data(store, "configmaps", &d.pod_ns, cm).get(key) {
                     env.push(format!("{name}={v}"));
                 }
-            } else if let (Some(s), Some(key)) = (r.pointer("/secretKeyRef/name").and_then(|v| v.as_str()), r.pointer("/secretKeyRef/key").and_then(|v| v.as_str())) {
+            } else if let (Some(s), Some(key)) = (
+                r.pointer("/secretKeyRef/name").and_then(|v| v.as_str()),
+                r.pointer("/secretKeyRef/key").and_then(|v| v.as_str()),
+            ) {
                 if let Some(v) = config_data(store, "secrets", &d.pod_ns, s).get(key) {
                     env.push(format!("{name}={}", decode_secret(v)));
                 }
@@ -737,7 +908,13 @@ fn build_create_req(
         }
     }
 
-    let mut config = slim_api::container::ContainerConfig { image, cmd, env, labels, ..Default::default() };
+    let mut config = slim_api::container::ContainerConfig {
+        image,
+        cmd,
+        env,
+        labels,
+        ..Default::default()
+    };
     if !entrypoint.is_empty() {
         config.entrypoint = Some(entrypoint);
     }
@@ -745,12 +922,18 @@ fn build_create_req(
     // Binds: ServiceAccount projection (every container) + emptyDir mounts.
     let mut binds = Vec::new();
     if let Some(sa_dir) = ensure_sa(ctx, &d.pod_ns) {
-        binds.push(format!("{}:/var/run/secrets/kubernetes.io/serviceaccount:ro", sa_dir.display()));
+        binds.push(format!(
+            "{}:/var/run/secrets/kubernetes.io/serviceaccount:ro",
+            sa_dir.display()
+        ));
     }
     binds.extend(volume_binds(ctx, store, d, cspec));
 
     let host_config = slim_api::container::HostConfig {
-        restart_policy: slim_api::container::RestartPolicy { name: restart.to_string(), maximum_retry_count: 0 },
+        restart_policy: slim_api::container::RestartPolicy {
+            name: restart.to_string(),
+            maximum_retry_count: 0,
+        },
         network_mode: network_mode.to_string(),
         binds,
         ..Default::default()
@@ -762,13 +945,21 @@ fn build_create_req(
         if let Some(app) = d.labels.get("app").and_then(|v| v.as_str()) {
             aliases.push(app.to_string());
         }
-        endpoints.insert("bridge".to_string(), slim_api::container::EndpointSettings { aliases, ..Default::default() });
+        endpoints.insert(
+            "bridge".to_string(),
+            slim_api::container::EndpointSettings {
+                aliases,
+                ..Default::default()
+            },
+        );
     }
 
     Some(slim_api::container::ContainerCreateRequest {
         config,
         host_config,
-        networking_config: slim_api::container::NetworkingConfig { endpoints_config: endpoints },
+        networking_config: slim_api::container::NetworkingConfig {
+            endpoints_config: endpoints,
+        },
     })
 }
 
@@ -776,11 +967,18 @@ fn build_create_req(
 /// pod's whole life. Uses the built-in `nebula/pause` image (a tiny static
 /// binary, no pull, works for any pod incl. distroless); falls back to
 /// container-0's image running `sleep` if the pause image isn't registered.
-fn build_sandbox_req(ctx: &BridgeCtx, d: &Desired) -> Option<slim_api::container::ContainerCreateRequest> {
+fn build_sandbox_req(
+    ctx: &BridgeCtx,
+    d: &Desired,
+) -> Option<slim_api::container::ContainerCreateRequest> {
     let (image, entrypoint) = match &ctx.pause_image {
         Some(img) => (img.clone(), None), // image's own /pause entrypoint
         None => (
-            d.containers.first()?.get("image").and_then(|v| v.as_str())?.to_string(),
+            d.containers
+                .first()?
+                .get("image")
+                .and_then(|v| v.as_str())?
+                .to_string(),
             Some(vec!["sleep".to_string(), "2147483647".to_string()]),
         ),
     };
@@ -798,7 +996,10 @@ fn build_sandbox_req(ctx: &BridgeCtx, d: &Desired) -> Option<slim_api::container
     };
     let host_config = slim_api::container::HostConfig {
         // The sandbox must persist for the pod's whole life.
-        restart_policy: slim_api::container::RestartPolicy { name: "always".to_string(), maximum_retry_count: 0 },
+        restart_policy: slim_api::container::RestartPolicy {
+            name: "always".to_string(),
+            maximum_retry_count: 0,
+        },
         network_mode: "bridge".to_string(),
         ..Default::default()
     };
@@ -808,11 +1009,19 @@ fn build_sandbox_req(ctx: &BridgeCtx, d: &Desired) -> Option<slim_api::container
         aliases.push(app.to_string());
     }
     let mut endpoints = std::collections::BTreeMap::new();
-    endpoints.insert("bridge".to_string(), slim_api::container::EndpointSettings { aliases, ..Default::default() });
+    endpoints.insert(
+        "bridge".to_string(),
+        slim_api::container::EndpointSettings {
+            aliases,
+            ..Default::default()
+        },
+    );
     Some(slim_api::container::ContainerCreateRequest {
         config,
         host_config,
-        networking_config: slim_api::container::NetworkingConfig { endpoints_config: endpoints },
+        networking_config: slim_api::container::NetworkingConfig {
+            endpoints_config: endpoints,
+        },
     })
 }
 
@@ -861,7 +1070,10 @@ fn register_pause_image(engine: &EngineRef) -> Option<String> {
         os: "linux".to_string(),
         config,
     };
-    engine.store.insert_local(&config_raw, record, Some(PAUSE_IMAGE)).ok()?;
+    engine
+        .store
+        .insert_local(&config_raw, record, Some(PAUSE_IMAGE))
+        .ok()?;
     println!("slimd: registered built-in pod sandbox image {PAUSE_IMAGE}");
     Some(PAUSE_IMAGE.to_string())
 }
@@ -890,7 +1102,10 @@ fn find_pause_binary() -> Option<Vec<u8>> {
 }
 
 fn hex_sha(data: &[u8]) -> String {
-    slim_image::sha256(data).iter().map(|b| format!("{b:02x}")).collect()
+    slim_image::sha256(data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Resolve a container's volumeMounts against the pod's volumes into host binds.
@@ -899,20 +1114,33 @@ fn hex_sha(data: &[u8]) -> String {
 /// honored. Other volume types (downwardAPI/projected/csi/...) are skipped.
 fn volume_binds(ctx: &BridgeCtx, store: &SharedStore, d: &Desired, cspec: &Value) -> Vec<String> {
     let mut by_name: BTreeMap<String, Value> = BTreeMap::new();
-    for v in d.template.get("volumes").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+    for v in d
+        .template
+        .get("volumes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+    {
         if let Some(n) = v.get("name").and_then(|x| x.as_str()) {
             by_name.insert(n.to_string(), v);
         }
     }
     let mut out = Vec::new();
-    for m in cspec.get("volumeMounts").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+    for m in cspec
+        .get("volumeMounts")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+    {
         let (Some(name), Some(mount_path)) = (
             m.get("name").and_then(|v| v.as_str()),
             m.get("mountPath").and_then(|v| v.as_str()),
         ) else {
             continue;
         };
-        let Some(vol) = by_name.get(name) else { continue };
+        let Some(vol) = by_name.get(name) else {
+            continue;
+        };
         let sub = m.get("subPath").and_then(|v| v.as_str());
         let ro = m.get("readOnly").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -927,13 +1155,29 @@ fn volume_binds(ctx: &BridgeCtx, store: &SharedStore, d: &Desired, cspec: &Value
         } else if let Some(cm) = vol.get("configMap") {
             let cmname = cm.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let data = config_data(store, "configmaps", &d.pod_ns, cmname);
-            if let Some(b) = materialize_bind(ctx, d, &format!("cm-{name}"), &data, cm.get("items"), mount_path, sub) {
+            if let Some(b) = materialize_bind(
+                ctx,
+                d,
+                &format!("cm-{name}"),
+                &data,
+                cm.get("items"),
+                mount_path,
+                sub,
+            ) {
                 out.push(b);
             }
         } else if let Some(sec) = vol.get("secret") {
             let sname = sec.get("secretName").and_then(|v| v.as_str()).unwrap_or("");
             let data = secret_files(store, &d.pod_ns, sname);
-            if let Some(b) = materialize_bind(ctx, d, &format!("sec-{name}"), &data, sec.get("items"), mount_path, sub) {
+            if let Some(b) = materialize_bind(
+                ctx,
+                d,
+                &format!("sec-{name}"),
+                &data,
+                sec.get("items"),
+                mount_path,
+                sub,
+            ) {
                 out.push(b);
             }
         } else if let Some(hp) = vol.get("hostPath") {
@@ -1001,8 +1245,12 @@ fn materialize_bind(
 
 /// Secret data decoded to plaintext: base64 `.data` values + plaintext `.stringData`.
 fn secret_files(store: &SharedStore, ns: &str, name: &str) -> BTreeMap<String, String> {
-    let Some(info) = store.lookup("", "secrets") else { return BTreeMap::new() };
-    let Some(obj) = store.get(&info, ns, name) else { return BTreeMap::new() };
+    let Some(info) = store.lookup("", "secrets") else {
+        return BTreeMap::new();
+    };
+    let Some(obj) = store.get(&info, ns, name) else {
+        return BTreeMap::new();
+    };
     let mut out = BTreeMap::new();
     if let Some(m) = obj.get("data").and_then(|d| d.as_object()) {
         for (k, v) in m {
@@ -1041,9 +1289,18 @@ fn ensure_sa(ctx: &BridgeCtx, ns: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
-fn config_data(store: &SharedStore, resource: &str, ns: &str, name: &str) -> BTreeMap<String, String> {
-    let Some(info) = store.lookup("", resource) else { return BTreeMap::new() };
-    let Some(obj) = store.get(&info, ns, name) else { return BTreeMap::new() };
+fn config_data(
+    store: &SharedStore,
+    resource: &str,
+    ns: &str,
+    name: &str,
+) -> BTreeMap<String, String> {
+    let Some(info) = store.lookup("", resource) else {
+        return BTreeMap::new();
+    };
+    let Some(obj) = store.get(&info, ns, name) else {
+        return BTreeMap::new();
+    };
     let mut out = BTreeMap::new();
     if let Some(m) = obj.get("data").and_then(|d| d.as_object()) {
         for (k, v) in m {
@@ -1095,23 +1352,40 @@ fn decode_secret(v: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| v.to_string())
 }
 
-fn sync_pod(store: &SharedStore, d: &Desired, phase: &str, ip: &str, msg: &str, cstatuses: &[Value], init_statuses: &[Value]) {
-    let Some(info) = store.lookup("", "pods") else { return };
+fn sync_pod(
+    store: &SharedStore,
+    d: &Desired,
+    phase: &str,
+    ip: &str,
+    msg: &str,
+    cstatuses: &[Value],
+    init_statuses: &[Value],
+) {
+    let Some(info) = store.lookup("", "pods") else {
+        return;
+    };
     let mut labels = d.labels.clone();
     if let Some(o) = labels.as_object_mut() {
         o.insert(MANAGED.to_string(), json!("true"));
     }
     let (owner_kind, owner_name) = {
         let mut it = d.owner.splitn(3, '/');
-        (it.next().unwrap_or("").to_string(), { it.next(); it.next().unwrap_or("").to_string() })
+        (it.next().unwrap_or("").to_string(), {
+            it.next();
+            it.next().unwrap_or("").to_string()
+        })
     };
     // Pod is Ready iff every main container reports ready.
     let all_ready = !cstatuses.is_empty()
-        && cstatuses.iter().all(|c| c.get("ready").and_then(|r| r.as_bool()).unwrap_or(false));
+        && cstatuses
+            .iter()
+            .all(|c| c.get("ready").and_then(|r| r.as_bool()).unwrap_or(false));
     // Initialized iff every init container has terminated successfully.
-    let initialized = init_statuses
-        .iter()
-        .all(|c| c.pointer("/state/terminated/exitCode").and_then(|v| v.as_i64()) == Some(0));
+    let initialized = init_statuses.iter().all(|c| {
+        c.pointer("/state/terminated/exitCode")
+            .and_then(|v| v.as_i64())
+            == Some(0)
+    });
     let yn = |b: bool| if b { "True" } else { "False" };
     let pod = json!({
         "apiVersion": "v1",
@@ -1143,7 +1417,11 @@ fn sync_pod(store: &SharedStore, d: &Desired, phase: &str, ip: &str, msg: &str, 
 
 fn strs(v: Option<&Value>) -> Vec<String> {
     v.and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -1177,7 +1455,11 @@ struct ProbeTrack {
 /// running pods. Readiness feeds `readiness` (→ pod status); liveness failure
 /// kills the container so restart supervision recreates it. One thread, serial —
 /// fine at embedding scale; a slow exec/HTTP probe only delays the next tick.
-fn probe_loop(engine: &EngineRef, store: &SharedStore, readiness: &Arc<Mutex<HashMap<String, bool>>>) {
+fn probe_loop(
+    engine: &EngineRef,
+    store: &SharedStore,
+    readiness: &Arc<Mutex<HashMap<String, bool>>>,
+) {
     let mut tracks: HashMap<(String, &'static str), ProbeTrack> = HashMap::new();
     loop {
         probe_tick(engine, store, readiness, &mut tracks);
@@ -1191,26 +1473,49 @@ fn probe_tick(
     readiness: &Arc<Mutex<HashMap<String, bool>>>,
     tracks: &mut HashMap<(String, &'static str), ProbeTrack>,
 ) {
-    let Some(info) = store.lookup("", "pods") else { return };
+    let Some(info) = store.lookup("", "pods") else {
+        return;
+    };
     let pods = store.list(&info, None, &[]).0;
     let mut live: HashSet<String> = HashSet::new();
     for pod in pods {
-        if pod.pointer("/metadata/labels").and_then(|l| l.get(MANAGED)).is_none() {
+        if pod
+            .pointer("/metadata/labels")
+            .and_then(|l| l.get(MANAGED))
+            .is_none()
+        {
             continue;
         }
-        let ns = pod.pointer("/metadata/namespace").and_then(|v| v.as_str()).unwrap_or("default");
-        let name = pod.pointer("/metadata/name").and_then(|v| v.as_str()).unwrap_or("");
+        let ns = pod
+            .pointer("/metadata/namespace")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+        let name = pod
+            .pointer("/metadata/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if name.is_empty() {
             continue;
         }
         let cname = format!("{ns}_{name}");
-        let pod_ip = pod.pointer("/status/podIP").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let pod_ip = pod
+            .pointer("/status/podIP")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let c0 = pod.pointer("/spec/containers/0");
-        let readiness_probe = c0.and_then(|c| c.get("readinessProbe")).and_then(parse_probe);
-        let liveness_probe = c0.and_then(|c| c.get("livenessProbe")).and_then(parse_probe);
+        let readiness_probe = c0
+            .and_then(|c| c.get("readinessProbe"))
+            .and_then(parse_probe);
+        let liveness_probe = c0
+            .and_then(|c| c.get("livenessProbe"))
+            .and_then(parse_probe);
         live.insert(cname.clone());
 
-        let running = engine.get_entry(&cname).map(|e| e.c.lock().unwrap().running()).unwrap_or(false);
+        let running = engine
+            .get_entry(&cname)
+            .map(|e| e.c.lock().unwrap().running())
+            .unwrap_or(false);
         if !running {
             // Not running (or restarting): drop tracks so probing restarts clean.
             if readiness_probe.is_some() {
@@ -1276,7 +1581,10 @@ fn eval_probe(
     if now.duration_since(t.first_seen.unwrap()).as_secs() < p.initial_delay {
         return kind != "readiness"; // not ready yet; liveness healthy during grace
     }
-    let due = t.last_run.map(|l| now.duration_since(l).as_secs() >= p.period).unwrap_or(true);
+    let due = t
+        .last_run
+        .map(|l| now.duration_since(l).as_secs() >= p.period)
+        .unwrap_or(true);
     if due {
         t.last_run = Some(now);
         if run_probe(engine, cname, pod_ip, p) {
@@ -1313,7 +1621,11 @@ fn tcp_ok(ip: &str, port: u16, timeout: u64) -> bool {
     if ip.is_empty() {
         return false;
     }
-    match format!("{ip}:{port}").to_socket_addrs().ok().and_then(|mut a| a.next()) {
+    match format!("{ip}:{port}")
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next())
+    {
         Some(sa) => std::net::TcpStream::connect_timeout(&sa, Duration::from_secs(timeout)).is_ok(),
         None => false,
     }
@@ -1325,11 +1637,23 @@ fn http_ok(ip: &str, port: u16, path: &str, timeout: u64) -> bool {
     if ip.is_empty() {
         return false;
     }
-    let Some(sa) = format!("{ip}:{port}").to_socket_addrs().ok().and_then(|mut a| a.next()) else { return false };
-    let Ok(mut s) = std::net::TcpStream::connect_timeout(&sa, Duration::from_secs(timeout)) else { return false };
+    let Some(sa) = format!("{ip}:{port}")
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next())
+    else {
+        return false;
+    };
+    let Ok(mut s) = std::net::TcpStream::connect_timeout(&sa, Duration::from_secs(timeout)) else {
+        return false;
+    };
     let _ = s.set_read_timeout(Some(Duration::from_secs(timeout)));
     let _ = s.set_write_timeout(Some(Duration::from_secs(timeout)));
-    let path = if path.starts_with('/') { path.to_string() } else { format!("/{path}") };
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
     let req = format!("GET {path} HTTP/1.0\r\nHost: {ip}\r\nConnection: close\r\n\r\n");
     if s.write_all(req.as_bytes()).is_err() {
         return false;
@@ -1348,7 +1672,9 @@ fn http_ok(ip: &str, port: u16, path: &str, timeout: u64) -> bool {
 }
 
 fn exec_ok(engine: &EngineRef, cname: &str, cmd: &[String]) -> bool {
-    let Ok(entry) = engine.get_entry(cname) else { return false };
+    let Ok(entry) = engine.get_entry(cname) else {
+        return false;
+    };
     let pid = {
         let c = entry.c.lock().unwrap();
         if !c.running() {
@@ -1365,7 +1691,9 @@ fn exec_ok(engine: &EngineRef, cname: &str, cmd: &[String]) -> bool {
         open_stdin: false,
     };
     match slim_runtime::exec_in_container_cg(pid, &spec, Some(cname)) {
-        Ok(h) => slim_runtime::wait_pid(h.pid).map(|s| s.code == 0).unwrap_or(false),
+        Ok(h) => slim_runtime::wait_pid(h.pid)
+            .map(|s| s.code == 0)
+            .unwrap_or(false),
         Err(_) => false,
     }
 }
@@ -1374,11 +1702,17 @@ fn parse_probe(v: &Value) -> Option<Probe> {
     let u = |k: &str, d: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d);
     let kind = if let Some(h) = v.get("httpGet") {
         ProbeKind::Http {
-            path: h.get("path").and_then(|x| x.as_str()).unwrap_or("/").to_string(),
+            path: h
+                .get("path")
+                .and_then(|x| x.as_str())
+                .unwrap_or("/")
+                .to_string(),
             port: probe_port(h.get("port"))?,
         }
     } else if let Some(t) = v.get("tcpSocket") {
-        ProbeKind::Tcp { port: probe_port(t.get("port"))? }
+        ProbeKind::Tcp {
+            port: probe_port(t.get("port"))?,
+        }
     } else if let Some(e) = v.get("exec") {
         let cmd = strs(e.get("command"));
         if cmd.is_empty() {
@@ -1401,5 +1735,7 @@ fn parse_probe(v: &Value) -> Option<Probe> {
 /// Probe port as an integer (named ports aren't resolved — a slim liberty).
 fn probe_port(v: Option<&Value>) -> Option<u16> {
     let v = v?;
-    v.as_u64().map(|n| n as u16).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    v.as_u64()
+        .map(|n| n as u16)
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }

@@ -21,7 +21,9 @@ pub fn version() -> VersionResponse {
         arch: arch(),
         kernel_version: kernel_version(),
         build_time: "2026-06-10T00:00:00.000000000Z".into(),
-        platform: PlatformName { name: "nebula-slim".into() },
+        platform: PlatformName {
+            name: "nebula-slim".into(),
+        },
         components: vec![ComponentVersion {
             name: "Engine".into(),
             version: "slim-0.1.0".into(),
@@ -71,7 +73,11 @@ pub fn summary(engine: &Engine, c: &Container) -> ContainerSummary {
         EndpointSettings {
             network_id: engine.net.get(&c.network).map(|n| n.id).unwrap_or_default(),
             ip_address: c.ip.clone(),
-            gateway: engine.net.get(&c.network).map(|n| n.gateway()).unwrap_or_default(),
+            gateway: engine
+                .net
+                .get(&c.network)
+                .map(|n| n.gateway())
+                .unwrap_or_default(),
             mac_address: c.mac.clone(),
             ..Default::default()
         },
@@ -152,14 +158,23 @@ fn port_summaries(_engine: &Engine, c: &Container) -> Vec<PortSummary> {
         let (port, proto) = split_port(key);
         for b in binds {
             out.push(PortSummary {
-                ip: if b.host_ip.is_empty() { "0.0.0.0".into() } else { b.host_ip.clone() },
+                ip: if b.host_ip.is_empty() {
+                    "0.0.0.0".into()
+                } else {
+                    b.host_ip.clone()
+                },
                 private_port: port,
                 public_port: b.host_port.parse().unwrap_or(port),
                 typ: proto.clone(),
             });
         }
         if binds.is_empty() {
-            out.push(PortSummary { ip: String::new(), private_port: port, public_port: 0, typ: proto });
+            out.push(PortSummary {
+                ip: String::new(),
+                private_port: port,
+                public_port: 0,
+                typ: proto,
+            });
         }
     }
     out
@@ -168,14 +183,22 @@ fn port_summaries(_engine: &Engine, c: &Container) -> Vec<PortSummary> {
 fn port_map(_engine: &Engine, c: &Container) -> BTreeMap<String, Option<Vec<PortBinding>>> {
     let mut m = BTreeMap::new();
     for (key, binds) in &c.host_config.port_bindings {
-        let norm = if key.contains('/') { key.clone() } else { format!("{key}/tcp") };
+        let norm = if key.contains('/') {
+            key.clone()
+        } else {
+            format!("{key}/tcp")
+        };
         if binds.is_empty() {
             m.insert(norm, None);
         } else {
             let mapped = binds
                 .iter()
                 .map(|b| PortBinding {
-                    host_ip: if b.host_ip.is_empty() { "0.0.0.0".into() } else { b.host_ip.clone() },
+                    host_ip: if b.host_ip.is_empty() {
+                        "0.0.0.0".into()
+                    } else {
+                        b.host_ip.clone()
+                    },
                     host_port: b.host_port.clone(),
                 })
                 .collect();
@@ -195,8 +218,16 @@ fn mount_points(c: &Container) -> Vec<MountPoint> {
         let src = parts[0];
         let is_volume = !src.starts_with('/');
         out.push(MountPoint {
-            typ: if is_volume { "volume".into() } else { "bind".into() },
-            name: if is_volume { src.to_string() } else { String::new() },
+            typ: if is_volume {
+                "volume".into()
+            } else {
+                "bind".into()
+            },
+            name: if is_volume {
+                src.to_string()
+            } else {
+                String::new()
+            },
             source: src.to_string(),
             destination: parts[1].to_string(),
             mode: parts.get(2).map(|s| s.to_string()).unwrap_or_default(),
@@ -212,7 +243,11 @@ pub fn image_summary(engine: &Engine, i: &StoreImage) -> slim_api::image::ImageS
         parent_id: String::new(),
         repo_tags: {
             let t = engine.store.repo_tags(&i.id);
-            if t.is_empty() { vec!["<none>:<none>".into()] } else { t }
+            if t.is_empty() {
+                vec!["<none>:<none>".into()]
+            } else {
+                t
+            }
         },
         repo_digests: engine.store.repo_digests(&i.id),
         created: parse_created(&i.created),
@@ -280,18 +315,29 @@ pub fn stats(_engine: &Engine, entry: &Arc<Entry>) -> StatsResponse {
     } else {
         slim_runtime::CgroupStats::default()
     };
-    let limit = if cg.memory_limit > 0 { cg.memory_limit } else { mem_total() as u64 };
+    let limit = if cg.memory_limit > 0 {
+        cg.memory_limit
+    } else {
+        mem_total() as u64
+    };
     StatsResponse {
         read: slim_runtime::jsonlog::rfc3339_now(),
         preread: "0001-01-01T00:00:00Z".into(),
-        pids_stats: PidsStats { current: cg.pids_current },
+        pids_stats: PidsStats {
+            current: cg.pids_current,
+        },
         cpu_stats: CpuStats {
-            cpu_usage: CpuUsage { total_usage: cg.cpu_usage_usec * 1000 },
+            cpu_usage: CpuUsage {
+                total_usage: cg.cpu_usage_usec * 1000,
+            },
             system_cpu_usage: 0,
             online_cpus: num_cpus() as u32,
         },
         precpu_stats: CpuStats::default(),
-        memory_stats: MemoryStats { usage: cg.memory_current, limit },
+        memory_stats: MemoryStats {
+            usage: cg.memory_current,
+            limit,
+        },
         name: c.slash_name(),
         id: c.id.clone(),
         networks: BTreeMap::new(),
@@ -325,7 +371,11 @@ pub fn apply_container_filters(
             for (key, vals) in &map {
                 match key.as_str() {
                     "name" => {
-                        if !vals.iter().any(|v| s.names.iter().any(|n| n.contains(v.trim_start_matches('/')))) {
+                        if !vals.iter().any(|v| {
+                            s.names
+                                .iter()
+                                .any(|n| n.contains(v.trim_start_matches('/')))
+                        }) {
                             return false;
                         }
                     }
@@ -366,7 +416,11 @@ fn split_port(key: &str) -> (u16, String) {
 }
 
 fn nonempty_time(s: &str) -> String {
-    if s.is_empty() { "0001-01-01T00:00:00Z".into() } else { s.to_string() }
+    if s.is_empty() {
+        "0001-01-01T00:00:00Z".into()
+    } else {
+        s.to_string()
+    }
 }
 
 fn parse_created(rfc3339: &str) -> i64 {
@@ -375,7 +429,11 @@ fn parse_created(rfc3339: &str) -> i64 {
 
 fn num_cpus() -> i64 {
     let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-    if n > 0 { n } else { 1 }
+    if n > 0 {
+        n
+    } else {
+        1
+    }
 }
 
 fn mem_total() -> i64 {
@@ -384,7 +442,11 @@ fn mem_total() -> i64 {
         if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
             for line in s.lines() {
                 if let Some(kb) = line.strip_prefix("MemTotal:") {
-                    if let Some(v) = kb.trim().strip_suffix(" kB").and_then(|n| n.trim().parse::<i64>().ok()) {
+                    if let Some(v) = kb
+                        .trim()
+                        .strip_suffix(" kB")
+                        .and_then(|n| n.trim().parse::<i64>().ok())
+                    {
                         return v * 1024;
                     }
                 }
