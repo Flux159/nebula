@@ -21,9 +21,11 @@ steps. Components may assume the standard scaffold layout (AGENTS.md).
 
 ## Catalog
 
-- **model-config** (first official component, in progress): connect a local
-  llama.cpp server or a cloud API key — a Rust API base layer + a settings
-  UI. The canonical example of the shape; coming from the galaxy app.
+- **model-config** (first official component): cloud API keys + local
+  llama.cpp/LM Studio endpoints — settings store (SQLite, write-only
+  secrets), Tauri commands for THIS template (hyper routes for headless),
+  transport-agnostic settings UI, and a deterministic mock model server
+  for key-free e2e testing. Extracted from the galaxy app.
 
 More planned: secrets vault, agent terminal (xterm.js over vessel exec),
 OAuth broker, scheduled/headless runner. See tasks/writedocumentation.md
