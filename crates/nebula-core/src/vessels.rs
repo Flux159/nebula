@@ -222,7 +222,7 @@ fn vz_machine_id() -> Option<String> {
     None
 }
 
-fn random_mac() -> anyhow::Result<String> {
+pub fn random_mac() -> anyhow::Result<String> {
     use std::io::Read;
     let mut b = [0u8; 5];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut b)?;

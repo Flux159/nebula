@@ -70,8 +70,30 @@ pub struct ProgressMessage {
     pub stream: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Modern docker CLIs key stream failure on `errorDetail` and ignore the
+    /// deprecated `error` string — without this a failed pull renders as a
+    /// blank line and the CLI exits 0 (found by the battle-test sweeps).
+    #[serde(rename = "errorDetail", skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<ErrorDetail>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aux: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ErrorDetail {
+    pub message: String,
+}
+
+impl ProgressMessage {
+    /// An error line that both old and new docker CLIs recognize.
+    pub fn from_error(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        Self {
+            error: Some(msg.clone()),
+            error_detail: Some(ErrorDetail { message: msg }),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

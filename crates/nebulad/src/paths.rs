@@ -66,6 +66,10 @@ impl Paths {
     pub fn kernel_image(&self) -> PathBuf {
         self.kernel_dir().join("Image")
     }
+    /// Engine vessel's persistent MAC (DHCP-lease stability across restarts).
+    pub fn engine_mac_file(&self) -> PathBuf {
+        self.root.join("engine.mac")
+    }
 
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
         for d in [

@@ -6,6 +6,20 @@ limitations; routine TODOs live in code.)
 
 ## Open (being worked / next phase)
 
+- **(2026-06-12) Mass VM churn exhausts the macOS bootpd DHCP pool — and the
+  engine vessel was burning one lease per restart.** After the vessel sweep
+  (~750 VMs with random MACs), /var/db/dhcpd_leases hit 253/253 and every new
+  vz VM booted with NO IPv4 (bootpd stops answering when the /24 is full).
+  This cascaded into a red-herring slim-sweep failure (pulls "succeeding"
+  with no network). Fixes landed: (a) the engine vessel now mints its MAC
+  once and persists it in ~/.nebula/engine.mac — same contract named vessels
+  already had; (b) found+fixed in the same hunt: slimd's pull/build error
+  lines lacked `errorDetail`, so modern docker CLIs rendered failures as a
+  blank line and exited 0. Remaining: stale leases only age out (86400 s), so
+  after heavy vessel churn run `sudo rm /var/db/dhcpd_leases`. Future option
+  if churn-heavy workflows matter: derive vessel MACs deterministically from
+  the vessel name so name-reuse reuses leases.
+
 - **(2026-06-12) macOS hypervisor caps concurrent VMs at 128 system-wide
   (`kern.hv.max_address_spaces`).** Vessel-scale broke at exactly n_max=124
   bt-vessels for both 1 GiB and 2 GiB vz points — with the engine vessel,

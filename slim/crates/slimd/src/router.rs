@@ -440,7 +440,7 @@ fn pull_image(engine: &EngineRef, ctx: &mut Ctx) -> R {
     match engine.pull(&reference, auth, &mut emit) {
         Ok(_) => Ok(()),
         Err(e) => {
-            let err = slim_api::ProgressMessage { error: Some(e.to_string()), ..Default::default() };
+            let err = slim_api::ProgressMessage::from_error(e.to_string());
             let mut line = serde_json::to_vec(&err).unwrap_or_default();
             line.push(b'\n');
             let _ = w.write_all(&line);

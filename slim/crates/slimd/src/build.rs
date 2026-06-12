@@ -72,10 +72,7 @@ pub fn handle(engine: &EngineRef, ctx: &mut Ctx) -> R {
         }
         Err(e) => {
             // Stream the error in-band (docker shows the errorDetail).
-            let msg = slim_api::ProgressMessage {
-                error: Some(e.to_string()),
-                ..Default::default()
-            };
+            let msg = slim_api::ProgressMessage::from_error(e.to_string());
             if let Ok(mut b) = serde_json::to_vec(&msg) {
                 b.push(b'\n');
                 let _ = w.write_all(&b);

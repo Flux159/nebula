@@ -97,7 +97,15 @@ impl Vessel {
             restore_path: None,
             vsock_ports,
             backend: None,
-            mac: None,
+            // DHCP-lease stability: a fresh random MAC every boot leaks one
+            // bootpd lease per restart — the battle-test sweeps exhausted the
+            // VZ NAT /24 in a day (tasks/issues.md 2026-06-12). Mint once,
+            // persist, reuse forever.
+            mac: if macos {
+                Some(load_or_create_mac(&paths.engine_mac_file())?)
+            } else {
+                None
+            },
             machine_id: None,
         };
 
@@ -216,6 +224,20 @@ impl Vessel {
         vm.wait_for(VmState::Stopped, Duration::from_secs(10))?;
         Ok(())
     }
+}
+
+/// The engine vessel's MAC, minted once and persisted — same contract as
+/// named vessels (vessels.rs), so the bootpd lease is reused across restarts.
+fn load_or_create_mac(path: &std::path::Path) -> anyhow::Result<String> {
+    if let Ok(s) = std::fs::read_to_string(path) {
+        let s = s.trim().to_string();
+        if !s.is_empty() {
+            return Ok(s);
+        }
+    }
+    let mac = nebula_core::vessels::random_mac()?;
+    std::fs::write(path, &mac)?;
+    Ok(mac)
 }
 
 /// Share the user's home directory into the Vessel at the same path, so bind
