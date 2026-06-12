@@ -6,6 +6,23 @@ limitations; routine TODOs live in code.)
 
 ## Open (being worked / next phase)
 
+- **(2026-06-12, slim) slimd never mounts /dev/shm in containers.** It
+  parses/records HostConfig.ShmSize faithfully but the container mount set
+  lacks the tmpfs — `dd of=/dev/shm/h` fails ENOENT. Real dockerd mounts
+  /dev/shm (sized by ShmSize, default 64M) in every container. Repro:
+  `docker run --shm-size=300m alpine sh -c 'dd if=/dev/zero of=/dev/shm/h
+  bs=1M count=256'`. Made the slim hog:256 sweep points garbage (1500
+  created, ~5 alive); re-run the hog line after the fix. **Being fixed by a
+  separate agent (Suyog dispatched).**
+
+- **(2026-06-12, slim) slimd drops its API socket (EOF) at ~500 containers.**
+  Density points end with connection EOF rather than dockerd-style graceful
+  slowdown: idle@4GiB wedged at 507 created / 500 running, nginx@4GiB at
+  285/280. Cause unknown (panic? thread/fd exhaustion? — nofile is 1M now);
+  /var/log/slimd.log is tmpfs so it needs a live session to catch. Density
+  itself is BETTER than full (nginx 280 vs 158 at 4 GiB) — only the failure
+  mode is worse.
+
 - **(2026-06-12) Mass VM churn exhausts the macOS bootpd DHCP pool — and the
   engine vessel was burning one lease per restart.** After the vessel sweep
   (~750 VMs with random MACs), /var/db/dhcpd_leases hit 253/253 and every new
