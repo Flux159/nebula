@@ -425,6 +425,17 @@ name = "nebula-balloon"
 version = "0.1.0"
 
 [[package]]
+name = "nebula-battletest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "nebula-cli"
 version = "0.1.0"
 dependencies = [

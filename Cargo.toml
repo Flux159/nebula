@@ -6,6 +6,7 @@ members = [
     "crates/nebula-cli",
     "crates/nebulad",
     "crates/nebula-balloon",
+    "crates/nebula-battletest",
     "crates/vessel-agent",
     "crates/vessel-init",
 ]
