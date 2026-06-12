@@ -1,0 +1,42 @@
+[
+  {
+    "max_ram_mib": 8192,
+    "workload": "idle",
+    "flavor": "full",
+    "n_started": 1027,
+    "n_running_final": 1022,
+    "container_errors": 5,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125): docker: Error response from daemon: failed to set up container networking: failed to create endpoint bt-c-8192-idle-1027 on network bridge: adding interface veth7bd5d42 to bridge docker0 failed: exchange full.",
+    "duration_s": 636.171806584
+  },
+  {
+    "max_ram_mib": 8192,
+    "workload": "nginx",
+    "flavor": "full",
+    "n_started": 397,
+    "n_running_final": 390,
+    "container_errors": 1,
+    "stop_reason": "timeout: docker run #397",
+    "duration_s": 354.639287667
+  },
+  {
+    "max_ram_mib": 16384,
+    "workload": "idle",
+    "flavor": "full",
+    "n_started": 1027,
+    "n_running_final": 1022,
+    "container_errors": 5,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125): docker: Error response from daemon: failed to set up container networking: failed to create endpoint bt-c-16384-idle-1027 on network bridge: adding interface veth636b6c4 to bridge docker0 failed: exchange full.",
+    "duration_s": 634.96450825
+  },
+  {
+    "max_ram_mib": 16384,
+    "workload": "nginx",
+    "flavor": "full",
+    "n_started": 820,
+    "n_running_final": 810,
+    "container_errors": 1,
+    "stop_reason": "timeout: docker run #820",
+    "duration_s": 673.196746917
+  }
+]

@@ -6,6 +6,18 @@ limitations; routine TODOs live in code.)
 
 ## Open (being worked / next phase)
 
+- **(2026-06-12) After the fd fix: kernel bridge port limit caps a single
+  docker0 at ~1022 containers.** Post-nofile-fix re-run reached 1022 running
+  idle containers at 8 GiB, then `veth → docker0: exchange full` (EXFULL) —
+  the kernel's BR_MAX_PORTS = 1024 per bridge, a hardcoded constant. This is
+  the real single-network density ceiling. **Decision (Suyog, 2026-06-12):
+  accept + document — do NOT patch BR_PORT_BITS** (it narrows the 802.1D STP
+  port-id priority field; not worth the compat risk). When 256GiB+ hosts make
+  >1k containers real (Galaxy fan-out against a local LLM), the fix is
+  multiple docker bridge networks (each bridge gets its own 1023 veths,
+  userland-only, dockerd default-address-pools handles subnetting) or
+  ipvlan/macvlan. Re-evaluate then.
+
 - **(2026-06-12) dockerd fd limit caps idle-container density at ~680,
   before memory does (container-scale sweep).** At 8 GiB max, container #685
   failed with `pipe2: too many open files` inside dockerd's iptables setup

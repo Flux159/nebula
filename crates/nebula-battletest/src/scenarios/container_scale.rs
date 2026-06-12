@@ -74,7 +74,10 @@ pub fn run(neb: &Nebula, out_root: &Path, a: Args) -> anyhow::Result<i32> {
                 sampler.set_phase(&format!("maxram={mr}/{w}"));
                 neb.fresh_up()
                     .with_context(|| format!("fresh up @ {mr} MiB"))?;
-                neb.wait_docker(Duration::from_secs(60))?;
+                // Generous: after a wedged 1000-container point, dockerd
+                // spends minutes recovering dead containers before it binds
+                // the socket.
+                neb.wait_docker(Duration::from_secs(600))?;
                 // Now that the engine is fresh and answering, purge whatever
                 // the previous (possibly wedged) point left on the data disk.
                 neb.purge_containers_verified("bt-c", Duration::from_secs(300))?;
