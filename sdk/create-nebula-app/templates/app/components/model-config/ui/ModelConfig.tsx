@@ -1,13 +1,9 @@
 // Model & connections settings section — pairs with src/routes.rs (HTTP)
 // or src/tauri_commands.rs (Tauri). Tailwind, dark theme.
 //
-// Transport-agnostic: default is fetch against /api/settings; Tauri apps
-// pass the invoke transport instead:
-//   import { invoke } from '@tauri-apps/api/core';
-//   <ModelConfig transport={{
-//     get: () => invoke('get_settings'),
-//     patch: (body) => invoke('patch_settings', { body }),
-//   }} />
+// Talks fetch to /api/settings on the app's hyper server. From the vite
+// dev server pass apiBase (e.g. `http://127.0.0.1:${appPort}`); packaged
+// same-origin needs nothing. The Transport prop overrides for tests.
 //
 // Conventions encoded (COMPONENT.md): secrets are write-only (status pill +
 // last-4 hint come back, never the value); every key row says what it

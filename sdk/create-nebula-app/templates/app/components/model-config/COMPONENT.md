@@ -15,12 +15,11 @@ tests. Everything here is read-copy-adapt (components/README.md contract).
 src/settings.rs    SQLite-backed store: secret keys (never echoed back;
                    last-4 hint) + plain settings, with a connections list
                    describing what each key unlocks
-src/routes.rs      hyper 1.x handlers: GET /api/settings, PATCH /api/settings
-                   — for HEADLESS/HTTP apps. hyper is the component
-                   standard for Rust HTTP (axum hosts can mount these too)
-src/tauri_commands.rs  the SAME two operations as #[tauri::command]s — for
-                   the default Tauri app template, where the UI calls Rust
-                   via invoke() and there is no HTTP server
+src/routes.rs      hyper 1.x handlers: GET /api/settings (bulk: connections
+                   with set/hint/unlocks + plain settings), PATCH
+                   /api/settings — both templates serve plain HTTP from
+                   Rust (src-tauri/src/server.rs in the app template), so
+                   these wire straight in; hyper is the component standard
 src/mock_model.rs  `mock-model` subcommand: OpenAI-compatible
                    /v1/chat/completions (stream + non-stream); the reply is
                    deterministic, and `[[reply:XYZ]]` anywhere in the last
@@ -28,10 +27,10 @@ src/mock_model.rs  `mock-model` subcommand: OpenAI-compatible
                    drive exact agent behavior with zero tokens
 ui/ModelConfig.tsx React settings page section: connection rows (status
                    pill, what-it-unlocks, save) + model-provider picker
-                   (cloud vs local endpoint) — Tailwind, dark theme.
-                   Transport-agnostic: default fetch; Tauri apps pass
-                   { get: () => invoke('get_settings'),
-                     patch: (b) => invoke('patch_settings', { body: b }) }
+                   (cloud vs local endpoint) — Tailwind, dark theme. Talks
+                   fetch to /api/settings (pass apiBase
+                   `http://127.0.0.1:<appPort>` from the vite dev server);
+                   a Transport prop overrides for tests
 ```
 
 ## Hard-won conventions (bake these in, they all cost a debugging session)
@@ -60,22 +59,31 @@ ui/ModelConfig.tsx React settings page section: connection rows (status
 
 ## Wiring steps (for a coding agent)
 
-**Tauri app template (default):**
+**App template (src-tauri/src/server.rs):**
 
-1. Copy `src/settings.rs` + `src/tauri_commands.rs` into
-   `src-tauri/src/model_config/` (add a `mod.rs` declaring both); add deps:
-   `rusqlite = { version = "0.32", features = ["bundled"] }`, `serde_json`.
-2. Edit the `KEYS`/`PLAIN` tables in `settings.rs` for your app.
-3. In your builder: `.manage(model_config::tauri_commands::Db::open(path)?)`
-   and add `get_settings` + `patch_settings` to `generate_handler![…]`.
-4. Drop `ui/ModelConfig.tsx` into `src/`; render it with the invoke
-   transport (header comment shows the exact snippet).
+1. Copy `src/settings.rs` + `src/routes.rs` into
+   `src-tauri/src/model_config/` (add a `mod.rs` declaring both). The
+   scaffold already has rusqlite + serde_json + hyper.
+2. Edit the `KEYS`/`PLAIN` tables in `settings.rs` for your app. The
+   scaffold's `db.rs` already gives the config-file overlay
+   (`~/.<app>/config` beats the DB) — `settings.rs::get` here is the plain
+   DB accessor; route reads through your `Db::get_setting` if you want the
+   overlay (recommended; one-line swap in routes.rs).
+3. In server.rs `route()`, add two match arms before the per-key settings
+   routes (the component responses use `Full<Bytes>`; the scaffold uses
+   BoxBody — map with `.map(|b| b.map_err(|n| match n {}).boxed())`):
+   ```rust
+   (Method::GET, "/api/settings") => { /* call model_config::routes::get_settings */ }
+   (Method::PATCH, "/api/settings") => { /* …patch_settings(conn, &body) */ }
+   ```
+4. Drop `ui/ModelConfig.tsx` into `src/`; render with
+   `<ModelConfig apiBase={`http://127.0.0.1:${appPort}`} />`.
 5. Consume via `settings::model_invocation(&conn)` wherever you launch
-   model work (step 4 below explains the two variants).
+   model work.
 
-**Headless / HTTP apps:**
+**Headless / other HTTP apps:**
 
-1. Copy `src/*.rs` (minus tauri_commands.rs) into your Rust crate; add deps:
+1. Copy `src/*.rs` into your Rust crate; add deps:
    `hyper = { version = "1", features = ["full"] }`, `http-body-util`,
    `hyper-util = { version = "0.1", features = ["tokio"] }` (server I/O adapter), `rusqlite` (bundled), `serde_json`, `tokio`.
 2. Edit the `KEYS` table at the top of `settings.rs`: one row per secret
