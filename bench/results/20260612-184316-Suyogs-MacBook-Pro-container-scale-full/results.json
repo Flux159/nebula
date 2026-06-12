@@ -1,0 +1,152 @@
+[
+  {
+    "max_ram_mib": 4096,
+    "workload": "idle",
+    "flavor": "full",
+    "n_started": 482,
+    "n_running_final": 480,
+    "container_errors": 1,
+    "stop_reason": "timeout: docker run #482",
+    "duration_s": 396.26774875
+  },
+  {
+    "max_ram_mib": 4096,
+    "workload": "nginx",
+    "flavor": "full",
+    "n_started": 159,
+    "n_running_final": 158,
+    "container_errors": 1,
+    "stop_reason": "timeout: docker run #159",
+    "duration_s": 164.587888
+  },
+  {
+    "max_ram_mib": 4096,
+    "workload": "hog:256",
+    "flavor": "full",
+    "n_started": 19,
+    "n_running_final": 10,
+    "container_errors": 5,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125): docker: error during connect: Head \"http://%2FUsers%2Fsuyogsonwalkar%2F.nebula%2Frun%2Fdocker.sock/_ping\": EOF. | See 'docker run --help'.",
+    "duration_s": 8.303856166
+  },
+  {
+    "max_ram_mib": 8192,
+    "workload": "idle",
+    "flavor": "full",
+    "n_started": 685,
+    "n_running_final": 676,
+    "container_errors": 9,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125): docker: Error response from daemon: failed to set up container networking: failed to create endpoint bt-c-8192-idle-685 on network bridge: Unable to enable DIRECT ACCESS FILTERING - DROP rule:  (iptables failed: iptables --wait -t raw -A PREROUTING -d 172.17.2.167 ! -i docker0 -j DROP:  (pipe2: too many open files)).",
+    "duration_s": 414.702300292
+  },
+  {
+    "max_ram_mib": 8192,
+    "workload": "nginx",
+    "flavor": "full",
+    "n_started": 374,
+    "n_running_final": 370,
+    "container_errors": 1,
+    "stop_reason": "timeout: docker run #374",
+    "duration_s": 337.574126583
+  },
+  {
+    "max_ram_mib": 8192,
+    "workload": "hog:256",
+    "flavor": "full",
+    "n_started": 30,
+    "n_running_final": 20,
+    "container_errors": 2,
+    "stop_reason": "guest_oom: 16 new kills",
+    "duration_s": 74.242762458
+  },
+  {
+    "max_ram_mib": 16384,
+    "workload": "idle",
+    "flavor": "full",
+    "n_started": 685,
+    "n_running_final": 676,
+    "container_errors": 9,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125): docker: Error response from daemon: failed to set up container networking: failed to create endpoint bt-c-16384-idle-685 on network bridge: Unable to enable DIRECT ACCESS FILTERING - DROP rule:  (iptables failed: iptables --wait -t raw -A PREROUTING -d 172.17.2.167 ! -i docker0 -j DROP:  (pipe2: too many open files)).",
+    "duration_s": 408.242457708
+  },
+  {
+    "max_ram_mib": 16384,
+    "workload": "nginx",
+    "flavor": "full",
+    "n_started": 670,
+    "n_running_final": 665,
+    "container_errors": 5,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125): docker: Error response from daemon: failed to create a netlink handle: too many open files.",
+    "duration_s": 411.9671595
+  },
+  {
+    "max_ram_mib": 16384,
+    "workload": "hog:256",
+    "flavor": "full",
+    "n_started": 60,
+    "n_running_final": 50,
+    "container_errors": 3,
+    "stop_reason": "guest_oom: 10 new kills",
+    "duration_s": 41.711192459
+  },
+  {
+    "max_ram_mib": 32768,
+    "workload": "idle",
+    "flavor": "full",
+    "n_started": 685,
+    "n_running_final": 676,
+    "container_errors": 9,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125): docker: Error response from daemon: failed to create a netlink handle: too many open files.",
+    "duration_s": 411.388014708
+  },
+  {
+    "max_ram_mib": 32768,
+    "workload": "nginx",
+    "flavor": "full",
+    "n_started": 670,
+    "n_running_final": 665,
+    "container_errors": 5,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125): docker: Error response from daemon: failed to create a netlink handle: could not get current namespace while creating netlink socket: too many open files.",
+    "duration_s": 410.641547042
+  },
+  {
+    "max_ram_mib": 32768,
+    "workload": "hog:256",
+    "flavor": "full",
+    "n_started": 120,
+    "n_running_final": 119,
+    "container_errors": 1,
+    "stop_reason": "guest_oom: 9 new kills",
+    "duration_s": 134.547006334
+  },
+  {
+    "max_ram_mib": 65536,
+    "workload": "idle",
+    "flavor": "full",
+    "n_started": 685,
+    "n_running_final": 676,
+    "container_errors": 9,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125): docker: Error response from daemon: failed to set up container networking: failed to create endpoint bt-c-65536-idle-685 on network bridge: Unable to enable DIRECT ACCESS FILTERING - DROP rule:  (iptables failed: iptables --wait -t raw -A PREROUTING -d 172.17.2.167 ! -i docker0 -j DROP:  (pipe2: too many open files)).",
+    "duration_s": 409.079001917
+  },
+  {
+    "max_ram_mib": 65536,
+    "workload": "nginx",
+    "flavor": "full",
+    "n_started": 670,
+    "n_running_final": 665,
+    "container_errors": 5,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125): docker: Error response from daemon: failed to create a netlink handle: could not get current namespace while creating netlink socket: too many open files.",
+    "duration_s": 399.00021175
+  },
+  {
+    "max_ram_mib": 65536,
+    "workload": "hog:256",
+    "flavor": "full",
+    "n_started": 240,
+    "n_running_final": 230,
+    "container_errors": 0,
+    "stop_reason": "guest_oom: 5 new kills",
+    "duration_s": 173.816449666
+  }
+]
