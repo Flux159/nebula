@@ -1,0 +1,25 @@
+{
+  "host": {
+    "arch": "aarch64",
+    "chip": "Apple M3 Max",
+    "host_total_mib": 131072,
+    "hostname": "Suyogs-MacBook-Pro",
+    "nebula_git_sha": "c54ece3a",
+    "os": "macOS 26.5.1"
+  },
+  "params": {
+    "backends": [
+      "vz",
+      "krun"
+    ],
+    "disk_gib": 4,
+    "limit": 200,
+    "mems": [
+      1024,
+      2048,
+      4096
+    ]
+  },
+  "scenario": "vessel-scale",
+  "started_unix": 1781302057
+}

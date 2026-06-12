@@ -1,0 +1,68 @@
+[
+  {
+    "backend": "vz",
+    "mem_mib": 1024,
+    "n_max": 124,
+    "stop_reason": "cmd_error: vessels new bt-v124: exit Some(1): Error: vessel `bt-v124` did not become healthy within 20s — see /Users/suyogsonwalkar/.nebula/vessels/bt-v124/console.log",
+    "boot_ms_first": 354.64079100000004,
+    "boot_ms_last": 410.41054199999996,
+    "boot_ms_median": 353.60012500000005,
+    "host_cost_per_vessel_mib": 53.96774193548387,
+    "duration_s": 75.966516875
+  },
+  {
+    "backend": "vz",
+    "mem_mib": 2048,
+    "n_max": 124,
+    "stop_reason": "cmd_error: vessels new bt-v124: exit Some(1): Error: vessel `bt-v124` did not become healthy within 20s — see /Users/suyogsonwalkar/.nebula/vessels/bt-v124/console.log",
+    "boot_ms_first": 340.181542,
+    "boot_ms_last": 370.991833,
+    "boot_ms_median": 353.327396,
+    "host_cost_per_vessel_mib": 59.016129032258064,
+    "duration_s": 74.430550167
+  },
+  {
+    "backend": "vz",
+    "mem_mib": 4096,
+    "n_max": 124,
+    "stop_reason": "cmd_error: vessels new bt-v124: exit Some(1): Error: vessel `bt-v124` did not become healthy within 20s — see /Users/suyogsonwalkar/.nebula/vessels/bt-v124/console.log",
+    "boot_ms_first": 345.393125,
+    "boot_ms_last": 356.807917,
+    "boot_ms_median": 358.97837499999997,
+    "host_cost_per_vessel_mib": 87.86290322580645,
+    "duration_s": 75.434452208
+  },
+  {
+    "backend": "krun",
+    "mem_mib": 1024,
+    "n_max": 124,
+    "stop_reason": "cmd_error: vessels new bt-v124: exit Some(1): Error: vessel `bt-v124` did not become healthy within 20s — see /Users/suyogsonwalkar/.nebula/vessels/bt-v124/console.log",
+    "boot_ms_first": 141.276083,
+    "boot_ms_last": 119.455958,
+    "boot_ms_median": 120.39964549999999,
+    "host_cost_per_vessel_mib": 59.13709677419355,
+    "duration_s": 43.209315333
+  },
+  {
+    "backend": "krun",
+    "mem_mib": 2048,
+    "n_max": 124,
+    "stop_reason": "cmd_error: vessels new bt-v124: exit Some(1): Error: vessel `bt-v124` did not become healthy within 20s — see /Users/suyogsonwalkar/.nebula/vessels/bt-v124/console.log",
+    "boot_ms_first": 5267.916458000001,
+    "boot_ms_last": 5251.124583,
+    "boot_ms_median": 120.3521455,
+    "host_cost_per_vessel_mib": 48.846774193548384,
+    "duration_s": 74.8750075
+  },
+  {
+    "backend": "krun",
+    "mem_mib": 4096,
+    "n_max": 124,
+    "stop_reason": "cmd_error: vessels new bt-v124: exit Some(1): Error: vessel `bt-v124` did not become healthy within 20s — see /Users/suyogsonwalkar/.nebula/vessels/bt-v124/console.log",
+    "boot_ms_first": 113.601292,
+    "boot_ms_last": 240.714709,
+    "boot_ms_median": 223.5758955,
+    "host_cost_per_vessel_mib": 108.14516129032258,
+    "duration_s": 135.556507291
+  }
+]

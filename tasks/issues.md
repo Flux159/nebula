@@ -6,6 +6,24 @@ limitations; routine TODOs live in code.)
 
 ## Open (being worked / next phase)
 
+- **(2026-06-12) macOS hypervisor caps concurrent VMs at 128 system-wide
+  (`kern.hv.max_address_spaces`).** Vessel-scale broke at exactly n_max=124
+  bt-vessels for both 1 GiB and 2 GiB vz points — with the engine vessel,
+  galaxy-vtest, and a stale second nebulad's VM alive, that's the 128
+  address-space ceiling. Per-vessel RAM is irrelevant (ballooning holds idle
+  cost at ~80 MiB/vessel regardless of --mem; boot stays ~350 ms flat all the
+  way up). Not configurable; an OS constant like the bridge-port limit. The
+  failure mode is graceful (vessel N+1 fails healthy-check; existing vessels
+  unaffected) but the error message should say "hypervisor VM limit reached"
+  instead of a generic 20s timeout — worth a friendly detect+message in
+  vessels new. **Confirmed shared pool:** krun breaks at the same n_max=124
+  (it sits on Hypervisor.framework too). krun boots 114–140 ms vs vz ~350 ms.
+  One anomaly understood: the krun@2048 point showed uniform ~5.3 s boots —
+  re-tested on an idle host at 105 ms; the slowdown was macOS reclaiming the
+  ~500 GB of address space freed by the preceding 124-vessel vz teardown, not
+  a krun/mem issue. Boot latency is reclaim-pressure-sensitive after mass
+  teardown; fine in practice.
+
 - **(2026-06-12) After the fd fix: kernel bridge port limit caps a single
   docker0 at ~1022 containers.** Post-nofile-fix re-run reached 1022 running
   idle containers at 8 GiB, then `veth → docker0: exchange full` (EXFULL) —
