@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 // create-nebula-app: scaffold a local-first app on the Nebula engine.
 //
-//   npx create-nebula-app my-app            # nebula-slim engine (default)
-//   npx create-nebula-app my-app --full     # full engine (dockerd + k3s)
+//   npm create @nebula-vm/app my-app        # nebula-slim engine (default)
+//   npm create @nebula-vm/app my-app --full  # full engine (dockerd + k3s)
+//
+// (the unscoped npm name `create-nebula-app` is squatted by an abandoned
+// 2021 package — dispute filed-able; the bin keeps the familiar name)
 //
 // The scaffold is deliberately tiny, dependency-free, and written to be
 // extended by a coding agent: see AGENTS.md inside the generated app.
