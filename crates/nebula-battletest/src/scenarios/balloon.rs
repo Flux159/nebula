@@ -281,13 +281,17 @@ fn run_checks(
 
     println!("-- check 5: pressure at the ceiling (~95% of available)");
     sampler.set_phase("hog-ceiling");
-    let avail = neb.stats()?.guest_avail_mib();
+    // Re-settle first: "available" right after check 4 depends on whether the
+    // balloon has re-inflated yet, which made the hog size run-to-run flaky.
+    let (_, settled16) = settle(neb, 120)?;
+    let avail = settled16.guest_avail_mib();
     let hog_mib = avail * 95 / 100;
     println!("    guest avail {avail} MiB -> hog {hog_mib} MiB");
     let oom0 = neb.oom_count();
     let o = neb.docker(&hog_args(HOG_NAME, hog_mib, 5), Duration::from_secs(300))?;
     let hog_survived = o.ok();
-    rec.m("ceiling.hog_mib", hog_mib as f64);
+    // info.* = run inputs, excluded from baseline comparison.
+    rec.m("info.ceiling.hog_mib", hog_mib as f64);
     rec.m("ceiling.hog_survived", if hog_survived { 1.0 } else { 0.0 });
     rec.m(
         "ceiling.oom_kills",
@@ -331,8 +335,8 @@ fn run_checks(
     }
     let saw_cycles = saw.join().unwrap_or(0).max(1);
     let resizes = targets.windows(2).filter(|w| w[0] != w[1]).count();
-    rec.m("sawtooth.cycles", saw_cycles as f64);
-    rec.m("sawtooth.resizes", resizes as f64);
+    rec.m("info.sawtooth.cycles", saw_cycles as f64);
+    rec.m("info.sawtooth.resizes", resizes as f64);
     rec.m(
         "sawtooth.resizes_per_cycle",
         resizes as f64 / saw_cycles as f64,
@@ -445,14 +449,22 @@ fn settle(neb: &Nebula, timeout_s: u64) -> anyhow::Result<(f64, crate::api::Stat
 fn compare_baseline(path: &Path, metrics: &BTreeMap<String, f64>) -> anyhow::Result<Vec<String>> {
     let base: BTreeMap<String, f64> =
         serde_json::from_str(&std::fs::read_to_string(path).context("read baseline")?)?;
+    Ok(diff_metrics(&base, metrics))
+}
+
+/// `info.*` keys are run inputs (hog sizes, cycle counts) — recorded for
+/// context, never compared. Small numbers get an absolute band (rel-diff on
+/// ~0 is noise); everything else ±15%.
+fn diff_metrics(base: &BTreeMap<String, f64>, metrics: &BTreeMap<String, f64>) -> Vec<String> {
     let mut regressions = Vec::new();
-    for (k, bv) in &base {
+    for (k, bv) in base {
+        if k.starts_with("info.") {
+            continue;
+        }
         let Some(nv) = metrics.get(k) else {
             regressions.push(format!("{k}: missing from this run (baseline {bv:.1})"));
             continue;
         };
-        // Small numbers get an absolute band (rel-diff on ~0 is noise);
-        // everything else ±15%.
         let ok = if bv.abs() < 5.0 {
             (nv - bv).abs() <= 2.0
         } else {
@@ -462,5 +474,37 @@ fn compare_baseline(path: &Path, metrics: &BTreeMap<String, f64>) -> anyhow::Res
             regressions.push(format!("{k}: {nv:.1} vs baseline {bv:.1}"));
         }
     }
-    Ok(regressions)
+    regressions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn baseline_diff_bands() {
+        let base = m(&[
+            ("idle.held_mib", 29678.0),
+            ("ceiling.oom_kills", 0.0),
+            ("info.ceiling.hog_mib", 8865.0),
+        ]);
+        // Within ±15% / absolute band, info.* wildly different: no regressions.
+        let good = m(&[
+            ("idle.held_mib", 28000.0),
+            ("ceiling.oom_kills", 1.0),
+            ("info.ceiling.hog_mib", 14248.0),
+        ]);
+        assert!(diff_metrics(&base, &good).is_empty());
+
+        // Out of band + missing key: both flagged.
+        let bad = m(&[("idle.held_mib", 20000.0)]);
+        let r = diff_metrics(&base, &bad);
+        assert_eq!(r.len(), 2);
+        assert!(r.iter().any(|s| s.starts_with("idle.held_mib")));
+        assert!(r.iter().any(|s| s.contains("missing")));
+    }
 }

@@ -1,0 +1,18 @@
+{
+  "ceiling.hog_mib": 8865.0,
+  "ceiling.hog_survived": 1.0,
+  "ceiling.oom_kills": 0.0,
+  "concurrent.min_held_mib": 5619.0,
+  "drift.held_degrade_pct": 0.05343835915982615,
+  "drift.reinflate_median_s": 56.393290479,
+  "hog.min_held_mib": 20408.0,
+  "hog.peak_fp_mib": 7998.0,
+  "hog.reinflate_s": 36.19181175,
+  "hog.settled_fp_mib": 8006.0,
+  "idle.fp_mib": 2198.0,
+  "idle.held_mib": 29678.0,
+  "idle.settle_s": 64.4161225,
+  "sawtooth.cycles": 10.0,
+  "sawtooth.resizes": 7.0,
+  "sawtooth.resizes_per_cycle": 0.7
+}

@@ -1,0 +1,16 @@
+{
+  "host": {
+    "arch": "aarch64",
+    "chip": "Apple M3 Max",
+    "host_total_mib": 131072,
+    "hostname": "Suyogs-MacBook-Pro",
+    "nebula_git_sha": "89a38232",
+    "os": "macOS 26.5.1"
+  },
+  "params": {
+    "cycles": 10,
+    "quick": false
+  },
+  "scenario": "balloon",
+  "started_unix": 1781286746
+}

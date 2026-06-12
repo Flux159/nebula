@@ -1,6 +1,9 @@
 # Battle-testing Nebula: scale limits + balloon regression harness
 
-Status: **plan, awaiting review** (2026-06-12). Nothing here is implemented yet.
+Status: **implemented** (2026-06-12) — `crates/nebula-battletest`, entry points
+`scripts/battletest.{sh,ps1}`. Quick balloon suite passed end-to-end on the
+128 GiB M-series Mac (all 6 checks); full runs + sweeps in `bench/results/`,
+baseline in `bench/baselines/`. Open question defaults below were approved.
 
 ## Goal
 
