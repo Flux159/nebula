@@ -106,8 +106,15 @@ Measured on an M-series MacBook Pro (16 cores), release build, 2026-06:
 | virtiofs small files (1000 creates) | 0.30 s |
 | virtio-blk (data disk) direct write | ~276 MB/s |
 | 50 concurrent containers started | 14–20 s |
+| Max containers in one vessel (kernel 1024-ports-per-bridge bound) | **1,022** |
+| Container density, 256 MiB workloads | memory-linear: 10 / 20 / 50 / 119 / 230 @ 4–64 GiB max |
+| Concurrent vessels (macOS hypervisor cap: 128 VMs system-wide) | **124** |
+| Idle host cost per extra vessel (any `--mem`, ballooned) | ~50–90 MiB |
+| Balloon contract suite (idle reclaim, hogs, drift, sawtooth) | 19/19 checks pass |
 
-Reproduce with `scripts/test-phase*.sh`; details in `tasks/spike-notes.md`.
+Reproduce with `scripts/test-phase*.sh` and `scripts/battletest.sh` (raw data
++ charts in [`bench/report/`](bench/report/report.md)); details in
+`tasks/spike-notes.md` and `tasks/nebulabattletest.md`.
 
 ## How installs bootstrap (no Docker required)
 

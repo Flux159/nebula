@@ -69,6 +69,18 @@ fn scenario_of(r: &Run) -> &str {
         .unwrap_or("")
 }
 
+/// Stop reasons embed full CLI error output; keep tables scannable. The
+/// complete string stays in results.json.
+fn short_reason(s: &str) -> String {
+    let s = s.replace('|', "/").replace('\n', " ");
+    if s.chars().count() <= 90 {
+        s
+    } else {
+        let cut: String = s.chars().take(90).collect();
+        format!("{cut}…")
+    }
+}
+
 /// All points of a scenario merged across runs, newest run winning per point
 /// key — partial re-runs (e.g. just the idle line after an engine fix) then
 /// supersede only the points they re-measured. Run dirs sort by timestamp.
@@ -108,7 +120,7 @@ fn container_section(runs: &[Run], out: &Path, md: &mut String) -> anyhow::Resul
         let _ = writeln!(
             md,
             "| {flavor} | {workload} | {mr:.0} | {n:.0} | {} | {} |",
-            p["stop_reason"].as_str().unwrap_or("?"),
+            short_reason(p["stop_reason"].as_str().unwrap_or("?")),
             p["container_errors"].as_u64().unwrap_or(0),
         );
         series
@@ -154,7 +166,7 @@ fn vessel_section(runs: &[Run], out: &Path, md: &mut String) -> anyhow::Result<(
         let _ = writeln!(
             md,
             "| {backend} | {mem:.0} | {n:.0} | {} | {:.0}→{:.0} | {:.0} |",
-            p["stop_reason"].as_str().unwrap_or("?"),
+            short_reason(p["stop_reason"].as_str().unwrap_or("?")),
             p["boot_ms_first"].as_f64().unwrap_or(0.0),
             p["boot_ms_last"].as_f64().unwrap_or(0.0),
             p["host_cost_per_vessel_mib"].as_f64().unwrap_or(0.0),
