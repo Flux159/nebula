@@ -77,7 +77,7 @@ export default function App() {
       <section style={card}>
         <h3 style={{ marginTop: 0 }}>app persistence (sqlite)</h3>
         <p>
-          Stored via <code>PUT /api/settings/note</code> → rusqlite in <code>data/app.db</code> —
+          Stored via <code>PUT /api/settings/note</code> → rusqlite in the OS app-data dir —
           the same table components like model-config keep API keys in.
         </p>
         <input

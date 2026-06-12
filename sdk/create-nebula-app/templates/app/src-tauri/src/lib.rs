@@ -11,6 +11,7 @@ mod nebula;
 mod server;
 
 use std::sync::Arc;
+use tauri::Manager;
 
 pub fn run() {
     // nebula.config.json is the single source of truth (engine.mjs, the
@@ -20,24 +21,31 @@ pub fn run() {
     let api_port = cfg["apiPort"].as_u64().unwrap_or(7461) as u16;
     let app_port = cfg["appPort"].as_u64().unwrap_or(7470) as u16;
 
-    // App data (sqlite) lives beside the project in data/, NOT under the
-    // disposable .nebula/ engine home. Packaged apps should move this to
-    // the OS app-data dir (tauri's path resolver).
-    let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(|p| p.join("data"))
-        .expect("data dir");
-    let db = db::Db::open(&data_dir).expect("open app.db");
-
-    server::start(
-        Arc::new(server::Ctx {
-            nebula: nebula::Nebula::new(api_port),
-            db,
-        }),
-        app_port,
-    );
-
     tauri::Builder::default()
+        .setup(move |app| {
+            // App data (sqlite) lives in the OS-standard application data
+            // dir, keyed by the bundle identifier in tauri.conf.json:
+            //   macOS    ~/Library/Application Support/<identifier>/
+            //   Linux    $XDG_DATA_HOME/<identifier>/ (~/.local/share/…)
+            //   Windows  %APPDATA%\<identifier>\
+            // NOT under .nebula/ — app data survives engine factory-resets.
+            // NEBULA_APP_DATA overrides (tests, portable installs).
+            let data_dir = match std::env::var_os("NEBULA_APP_DATA") {
+                Some(d) => std::path::PathBuf::from(d),
+                None => app.path().app_data_dir()?,
+            };
+            println!("app data: {}", data_dir.display());
+            let db = db::Db::open(&data_dir)?;
+
+            server::start(
+                Arc::new(server::Ctx {
+                    nebula: nebula::Nebula::new(api_port),
+                    db,
+                }),
+                app_port,
+            );
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

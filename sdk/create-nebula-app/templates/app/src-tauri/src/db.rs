@@ -2,8 +2,9 @@
 //!
 //! The starter schema is a settings key-value table; add your domain tables
 //! in `migrate`. Components (model-config stores API keys/model endpoints
-//! here) follow the same pattern. The db lives in data/app.db beside the
-//! project — NOT under .nebula/, which is the disposable engine home.
+//! here) follow the same pattern. The db lives at app.db in the OS-standard
+//! application-data dir (see lib.rs) — NOT under .nebula/, which is the
+//! disposable engine home.
 
 use rusqlite::Connection;
 use std::path::Path;

@@ -20,8 +20,11 @@ src-tauri/            the Rust side (Tauri 2)
   src/nebula.rs       hyper client to the Nebula engine API
   src/lib.rs          wires it: spawn server, open the window
 components/           drop-in feature implementations (components/README.md)
-data/                 app.db (persists across engine resets; gitignored)
 .nebula/              the embedded engine's home (gitignored, disposable)
+(app.db lives in the OS app-data dir — macOS ~/Library/Application Support/
+<identifier>, Linux ~/.local/share/<identifier>, Windows %APPDATA%\
+<identifier> — so app data survives engine factory-resets and git cleans;
+NEBULA_APP_DATA env overrides it)
 ```
 
 `npm run dev` = engine up → vite dev server → Tauri window. The flow is
