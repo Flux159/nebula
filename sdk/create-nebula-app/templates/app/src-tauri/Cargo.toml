@@ -1,0 +1,22 @@
+[package]
+name = "{{APP_CRATE}}"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The app's HTTP base layer to the Nebula engine — the same stack nebulad
+# itself serves with. Components (model-config, …) extend src/nebula.rs.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+
+[lib]
+name = "{{APP_CRATE}}_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
