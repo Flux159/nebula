@@ -182,6 +182,36 @@ impl Nebula {
         }
     }
 
+    /// Cleanup with verification: `rm -f` against a wedged engine fails
+    /// silently, and containers persist across engine restarts on the data
+    /// disk — so loop until `ps -a` actually comes back empty.
+    pub fn purge_containers_verified(&self, prefix: &str, timeout: Duration) -> anyhow::Result<()> {
+        let t0 = Instant::now();
+        loop {
+            self.cleanup_containers(prefix);
+            let left = self
+                .docker(
+                    &["ps", "-aq", "--filter", &format!("name={prefix}")],
+                    Duration::from_secs(30),
+                )
+                .map(|o| {
+                    if o.ok() {
+                        o.stdout.lines().count()
+                    } else {
+                        usize::MAX
+                    }
+                })
+                .unwrap_or(usize::MAX);
+            if left == 0 {
+                return Ok(());
+            }
+            if t0.elapsed() > timeout {
+                bail!("{left} {prefix}* containers still present after cleanup");
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    }
+
     pub fn vessels<S: AsRef<std::ffi::OsStr>>(
         &self,
         args: &[S],

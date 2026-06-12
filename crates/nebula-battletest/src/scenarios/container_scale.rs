@@ -75,6 +75,9 @@ pub fn run(neb: &Nebula, out_root: &Path, a: Args) -> anyhow::Result<i32> {
                 neb.fresh_up()
                     .with_context(|| format!("fresh up @ {mr} MiB"))?;
                 neb.wait_docker(Duration::from_secs(60))?;
+                // Now that the engine is fresh and answering, purge whatever
+                // the previous (possibly wedged) point left on the data disk.
+                neb.purge_containers_verified("bt-c", Duration::from_secs(300))?;
                 neb.pre_pull(&images_for(w))?;
                 let r = run_point(neb, &a, mr, w, &mut points_csv, &sampler)?;
                 println!(
@@ -160,15 +163,19 @@ fn run_point(
 ) -> anyhow::Result<PointResult> {
     let t0 = Instant::now();
     let oom0 = neb.oom_count();
+    // Per-point name prefix: a name collision with a half-cleaned previous
+    // point must be impossible, not merely unlikely.
+    let prefix = format!("bt-c-{mr}-{}", w.replace([':', '.'], ""));
     let mut n = 0usize;
     let mut errors = 0usize;
+    let mut last_running = 0usize;
     let mut early_medians: Vec<f64> = Vec::new();
     let stop: Brk = 'outer: loop {
         let mut batch_lats: Vec<f64> = Vec::new();
         let mut batch_errs = 0usize;
         for _ in 0..a.batch {
             n += 1;
-            let name = format!("bt-c{n}");
+            let name = format!("{prefix}-{n}");
             let args = workload_args(w, n, &name);
             let t = Instant::now();
             let r = neb.docker(&args, Duration::from_secs(60));
@@ -210,7 +217,8 @@ fn run_point(
             early_medians.push(batch_median);
         }
         let baseline = util::median(&early_medians);
-        let running = neb.bt_containers("bt-c").map(|v| v.len()).unwrap_or(0);
+        let running = neb.bt_containers(&prefix).map(|v| v.len()).unwrap_or(0);
+        last_running = last_running.max(running);
         let s = neb.stats().ok();
         writeln!(
             points_csv,
@@ -240,7 +248,13 @@ fn run_point(
         }
     };
 
-    let n_running_final = neb.bt_containers("bt-c").map(|v| v.len()).unwrap_or(0);
+    // At the break the engine is often wedged and `docker ps` fails too —
+    // fall back to the best per-batch count instead of reporting a bogus 0.
+    let n_running_final = neb
+        .bt_containers(&prefix)
+        .map(|v| v.len())
+        .unwrap_or(last_running)
+        .max(last_running);
     Ok(PointResult {
         max_ram_mib: mr,
         workload: w.to_string(),
