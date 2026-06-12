@@ -8,22 +8,24 @@ the user's machine, no Docker Desktop, no cloud.
 ## Project shape
 
 ```
-nebula.config.json    engine settings (flavor, private ports, RAM ceiling) —
-                      single source of truth: read by engine.mjs, the
-                      frontend, AND compiled into the Rust layer
+nebula.config.json    settings (flavor, ports, RAM ceiling) — single source
+                      of truth: engine.mjs, the frontend AND the Rust binary
 scripts/engine.mjs    engine lifecycle: up / down / status (+ first-run fetch)
-index.html, src/      Vite + React frontend
-  src/nebula.ts       typed client; reads hit the engine API directly,
-                      privileged actions go through Tauri commands
+index.html, src/      Vite + React frontend (plain fetch — runs in the Tauri
+                      webview OR any browser; no invoke() coupling)
 src-tauri/            the Rust side (Tauri 2)
-  src/nebula.rs       hyper client for the engine API — the BASE LAYER that
-                      components and your features extend
-  src/lib.rs          Tauri commands (see fork_demo for the pattern)
+  src/server.rs       THE APP'S OWN API — a hyper server on appPort. Your
+                      features and components are routes here.
+  src/db.rs           sqlite (rusqlite, bundled) — settings + your tables
+  src/nebula.rs       hyper client to the Nebula engine API
+  src/lib.rs          wires it: spawn server, open the window
 components/           drop-in feature implementations (components/README.md)
+data/                 app.db (persists across engine resets; gitignored)
 .nebula/              the embedded engine's home (gitignored, disposable)
 ```
 
-`npm run dev` = engine up → vite dev server → Tauri window.
+`npm run dev` = engine up → vite dev server → Tauri window. The flow is
+React → app server (`/api/...`, port `appPort`) → engine (`apiPort`).
 
 ## The API you build on
 
@@ -39,13 +41,16 @@ when set). Full reference: `docs/httpapi.md` in https://github.com/Flux159/nebul
 
 ## Where code goes
 
-- **Frontend reads** (status, lists, logs): `src/nebula.ts` → fetch directly.
-- **Privileged/multi-step/secret-touching work**: a Tauri command in
-  `src-tauri/src/lib.rs` built on `nebula::Nebula` (hyper). `fork_demo`
-  is the worked example of the whole pattern.
+- **Frontend reads** (status, lists, logs): fetch the engine API directly
+  (`src/nebula.ts` → `nebula.*`).
+- **Your features** (privileged, multi-step, secret-touching, persistent):
+  a route in `src-tauri/src/server.rs` built on `nebula::Nebula` (engine
+  calls) and `db::Db` (sqlite). `POST /api/fork-demo` and the
+  `/api/settings/<key>` pair are the worked examples of the whole pattern.
 - **Components** (model connectors, vaults, terminals): read
   `components/README.md`, copy the component in, follow its COMPONENT.md —
-  they extend exactly the `nebula.rs` + Tauri-command seam.
+  they add server routes + db tables + UI panels along the same seam
+  (model-config stores its API keys via `db.rs`).
 
 ## Rules of the road
 

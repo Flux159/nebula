@@ -6,5 +6,6 @@
   "dnsZone": "{{APP_NAME}}.local",
   "maxRamMib": 8192,
   "cpus": 4,
-  "dataDiskGib": 32
+  "dataDiskGib": 32,
+  "appPort": 7470
 }

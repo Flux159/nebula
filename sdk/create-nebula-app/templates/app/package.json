@@ -13,7 +13,6 @@
     "web:dev": "vite"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2",
     "react": "^18",
     "react-dom": "^18"
   },
