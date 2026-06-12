@@ -69,50 +69,52 @@ fn scenario_of(r: &Run) -> &str {
         .unwrap_or("")
 }
 
-/// Newest run per (scenario, flavor-ish key) — dir names sort by timestamp.
-fn latest<'a>(runs: &'a [Run], scenario: &str) -> Vec<&'a Run> {
-    let mut by_key: BTreeMap<String, &Run> = BTreeMap::new();
+/// All points of a scenario merged across runs, newest run winning per point
+/// key — partial re-runs (e.g. just the idle line after an engine fix) then
+/// supersede only the points they re-measured. Run dirs sort by timestamp.
+fn merged_points(runs: &[Run], scenario: &str, key_of: impl Fn(&Value) -> String) -> Vec<Value> {
+    let mut by_key: BTreeMap<String, Value> = BTreeMap::new();
     for r in runs.iter().filter(|r| scenario_of(r) == scenario) {
-        let flavor = r
-            .meta
-            .get("flavor")
-            .and_then(|f| f.as_str())
-            .unwrap_or("")
-            .to_string();
-        by_key.insert(flavor, r); // later (newer) dirs overwrite
+        if let Some(points) = r.results.as_ref().and_then(|x| x.as_array()) {
+            for p in points {
+                by_key.insert(key_of(p), p.clone()); // later (newer) wins
+            }
+        }
     }
     by_key.into_values().collect()
 }
 
 fn container_section(runs: &[Run], out: &Path, md: &mut String) -> anyhow::Result<()> {
-    let latest_runs = latest(runs, "container-scale");
-    if latest_runs.is_empty() {
+    let points = merged_points(runs, "container-scale", |p| {
+        format!(
+            "{}|{}|{:020}",
+            p["flavor"].as_str().unwrap_or("?"),
+            p["workload"].as_str().unwrap_or("?"),
+            p["max_ram_mib"].as_u64().unwrap_or(0)
+        )
+    });
+    if points.is_empty() {
         return Ok(());
     }
     md.push_str("## Containers in vessel 0 vs max RAM\n\n");
     let mut series: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
     md.push_str("| flavor | workload | max RAM (MiB) | containers | stop reason | errors |\n");
     md.push_str("|---|---|---|---|---|---|\n");
-    for run in &latest_runs {
-        let Some(points) = run.results.as_ref().and_then(|r| r.as_array()) else {
-            continue;
-        };
-        for p in points {
-            let flavor = p["flavor"].as_str().unwrap_or("?");
-            let workload = p["workload"].as_str().unwrap_or("?");
-            let mr = p["max_ram_mib"].as_f64().unwrap_or(0.0);
-            let n = p["n_running_final"].as_f64().unwrap_or(0.0);
-            let _ = writeln!(
-                md,
-                "| {flavor} | {workload} | {mr:.0} | {n:.0} | {} | {} |",
-                p["stop_reason"].as_str().unwrap_or("?"),
-                p["container_errors"].as_u64().unwrap_or(0),
-            );
-            series
-                .entry(format!("{flavor}/{workload}"))
-                .or_default()
-                .push((mr / 1024.0, n));
-        }
+    for p in &points {
+        let flavor = p["flavor"].as_str().unwrap_or("?");
+        let workload = p["workload"].as_str().unwrap_or("?");
+        let mr = p["max_ram_mib"].as_f64().unwrap_or(0.0);
+        let n = p["n_running_final"].as_f64().unwrap_or(0.0);
+        let _ = writeln!(
+            md,
+            "| {flavor} | {workload} | {mr:.0} | {n:.0} | {} | {} |",
+            p["stop_reason"].as_str().unwrap_or("?"),
+            p["container_errors"].as_u64().unwrap_or(0),
+        );
+        series
+            .entry(format!("{flavor}/{workload}"))
+            .or_default()
+            .push((mr / 1024.0, n));
     }
     let chart = line_chart(
         "Containers in vessel 0 vs configured max RAM",
@@ -129,8 +131,14 @@ fn container_section(runs: &[Run], out: &Path, md: &mut String) -> anyhow::Resul
 }
 
 fn vessel_section(runs: &[Run], out: &Path, md: &mut String) -> anyhow::Result<()> {
-    let latest_runs = latest(runs, "vessel-scale");
-    if latest_runs.is_empty() {
+    let points = merged_points(runs, "vessel-scale", |p| {
+        format!(
+            "{}|{:020}",
+            p["backend"].as_str().unwrap_or("?"),
+            p["mem_mib"].as_u64().unwrap_or(0)
+        )
+    });
+    if points.is_empty() {
         return Ok(());
     }
     md.push_str("## Concurrent vessels vs per-vessel RAM\n\n");
@@ -139,27 +147,22 @@ fn vessel_section(runs: &[Run], out: &Path, md: &mut String) -> anyhow::Result<(
         "| backend | mem (MiB) | vessels | stop reason | boot first→last (ms) | host cost/vessel (MiB) |\n",
     );
     md.push_str("|---|---|---|---|---|---|\n");
-    for run in &latest_runs {
-        let Some(points) = run.results.as_ref().and_then(|r| r.as_array()) else {
-            continue;
-        };
-        for p in points {
-            let backend = p["backend"].as_str().unwrap_or("?");
-            let mem = p["mem_mib"].as_f64().unwrap_or(0.0);
-            let n = p["n_max"].as_f64().unwrap_or(0.0);
-            let _ = writeln!(
-                md,
-                "| {backend} | {mem:.0} | {n:.0} | {} | {:.0}→{:.0} | {:.0} |",
-                p["stop_reason"].as_str().unwrap_or("?"),
-                p["boot_ms_first"].as_f64().unwrap_or(0.0),
-                p["boot_ms_last"].as_f64().unwrap_or(0.0),
-                p["host_cost_per_vessel_mib"].as_f64().unwrap_or(0.0),
-            );
-            count_series
-                .entry(backend.to_string())
-                .or_default()
-                .push((mem, n));
-        }
+    for p in &points {
+        let backend = p["backend"].as_str().unwrap_or("?");
+        let mem = p["mem_mib"].as_f64().unwrap_or(0.0);
+        let n = p["n_max"].as_f64().unwrap_or(0.0);
+        let _ = writeln!(
+            md,
+            "| {backend} | {mem:.0} | {n:.0} | {} | {:.0}→{:.0} | {:.0} |",
+            p["stop_reason"].as_str().unwrap_or("?"),
+            p["boot_ms_first"].as_f64().unwrap_or(0.0),
+            p["boot_ms_last"].as_f64().unwrap_or(0.0),
+            p["host_cost_per_vessel_mib"].as_f64().unwrap_or(0.0),
+        );
+        count_series
+            .entry(backend.to_string())
+            .or_default()
+            .push((mem, n));
     }
     let chart = line_chart(
         "Concurrent vessels vs per-vessel max RAM",
