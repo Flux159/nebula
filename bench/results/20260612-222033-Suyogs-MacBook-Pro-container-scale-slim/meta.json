@@ -1,0 +1,29 @@
+{
+  "flavor": "slim",
+  "host": {
+    "arch": "aarch64",
+    "chip": "Apple M3 Max",
+    "host_total_mib": 131072,
+    "hostname": "Suyogs-MacBook-Pro",
+    "nebula_git_sha": "d975a95e",
+    "os": "macOS 26.5.1"
+  },
+  "params": {
+    "batch": 10,
+    "max_n": 1500,
+    "max_ram": [
+      4096,
+      8192,
+      16384,
+      32768,
+      65536
+    ],
+    "workloads": [
+      "idle",
+      "nginx",
+      "hog:256"
+    ]
+  },
+  "scenario": "container-scale",
+  "started_unix": 1781302833
+}

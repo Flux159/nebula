@@ -1,0 +1,12 @@
+[
+  {
+    "max_ram_mib": 4096,
+    "workload": "idle",
+    "flavor": "slim",
+    "n_started": 5,
+    "n_running_final": 0,
+    "container_errors": 5,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125):  | docker: Error response from daemon: No such image: alpine:3.20. | See 'docker run --help'.",
+    "duration_s": 25.489082834
+  }
+]

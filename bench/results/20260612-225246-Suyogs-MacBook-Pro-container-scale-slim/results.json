@@ -1,0 +1,92 @@
+[
+  {
+    "max_ram_mib": 4096,
+    "workload": "idle",
+    "flavor": "slim",
+    "n_started": 507,
+    "n_running_final": 500,
+    "container_errors": 5,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125): docker: error during connect: Head \"http://%2FUsers%2Fsuyogsonwalkar%2F.nebula%2Frun%2Fdocker.sock/_ping\": EOF. | See 'docker run --help'.",
+    "duration_s": 69.085111167
+  },
+  {
+    "max_ram_mib": 4096,
+    "workload": "nginx",
+    "flavor": "slim",
+    "n_started": 285,
+    "n_running_final": 280,
+    "container_errors": 5,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125): docker: error during connect: Head \"http://%2FUsers%2Fsuyogsonwalkar%2F.nebula%2Frun%2Fdocker.sock/_ping\": EOF. | See 'docker run --help'.",
+    "duration_s": 69.044248666
+  },
+  {
+    "max_ram_mib": 4096,
+    "workload": "hog:256",
+    "flavor": "slim",
+    "n_started": 1500,
+    "n_running_final": 5,
+    "container_errors": 0,
+    "stop_reason": "max_n: reached configured cap 1500",
+    "duration_s": 180.56933275
+  },
+  {
+    "max_ram_mib": 8192,
+    "workload": "idle",
+    "flavor": "slim",
+    "n_started": 507,
+    "n_running_final": 500,
+    "container_errors": 5,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125): docker: error during connect: Head \"http://%2FUsers%2Fsuyogsonwalkar%2F.nebula%2Frun%2Fdocker.sock/_ping\": EOF. | See 'docker run --help'.",
+    "duration_s": 79.674090583
+  },
+  {
+    "max_ram_mib": 8192,
+    "workload": "nginx",
+    "flavor": "slim",
+    "n_started": 507,
+    "n_running_final": 500,
+    "container_errors": 5,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125): docker: error during connect: Head \"http://%2FUsers%2Fsuyogsonwalkar%2F.nebula%2Frun%2Fdocker.sock/_ping\": EOF. | See 'docker run --help'.",
+    "duration_s": 67.326624042
+  },
+  {
+    "max_ram_mib": 8192,
+    "workload": "hog:256",
+    "flavor": "slim",
+    "n_started": 1500,
+    "n_running_final": 4,
+    "container_errors": 0,
+    "stop_reason": "max_n: reached configured cap 1500",
+    "duration_s": 123.094070333
+  },
+  {
+    "max_ram_mib": 16384,
+    "workload": "idle",
+    "flavor": "slim",
+    "n_started": 507,
+    "n_running_final": 500,
+    "container_errors": 5,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125): docker: error during connect: Head \"http://%2FUsers%2Fsuyogsonwalkar%2F.nebula%2Frun%2Fdocker.sock/_ping\": EOF. | See 'docker run --help'.",
+    "duration_s": 66.400922959
+  },
+  {
+    "max_ram_mib": 16384,
+    "workload": "nginx",
+    "flavor": "slim",
+    "n_started": 507,
+    "n_running_final": 500,
+    "container_errors": 5,
+    "stop_reason": "cmd_error: 5/10 of a batch failed; last: exit Some(125): docker: error during connect: Head \"http://%2FUsers%2Fsuyogsonwalkar%2F.nebula%2Frun%2Fdocker.sock/_ping\": EOF. | See 'docker run --help'.",
+    "duration_s": 67.61112875
+  },
+  {
+    "max_ram_mib": 16384,
+    "workload": "hog:256",
+    "flavor": "slim",
+    "n_started": 1500,
+    "n_running_final": 6,
+    "container_errors": 0,
+    "stop_reason": "max_n: reached configured cap 1500",
+    "duration_s": 123.508149709
+  }
+]
