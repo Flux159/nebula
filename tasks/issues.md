@@ -6,6 +6,15 @@ limitations; routine TODOs live in code.)
 
 ## Open (being worked / next phase)
 
+- **(2026-06-12) dockerd fd limit caps idle-container density at ~680,
+  before memory does (container-scale sweep).** At 8 GiB max, container #685
+  failed with `pipe2: too many open files` inside dockerd's iptables setup
+  (676 still running, guest memory fine). 4 GiB broke at 480 on memory; every
+  ceiling ≥8 GiB will flatten at the fd wall instead. Fix candidate:
+  vessel-init should raise RLIMIT_NOFILE for dockerd/containerd (and slimd)
+  well above the Alpine default before exec. Worth re-running the idle line
+  after the fix to find the real memory-bound curve.
+
 - **(2026-06-12) Balloon battle-test characterization (nebula-battletest,
   full suite, 128 GiB M-series Mac).** All 19 contract checks pass; baseline
   committed at `bench/baselines/Suyogs-MacBook-Pro.json` (±15% gate, run

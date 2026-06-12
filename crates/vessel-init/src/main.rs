@@ -424,6 +424,20 @@ mod init {
         phase("rosetta+home-share");
         // dockerd requires forwarding for container NAT.
         let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
+        // Battle-testing (issues.md 2026-06-12): dockerd hit EMFILE in
+        // iptables at ~680 containers — the kernel-default 1024 nofile was
+        // the density ceiling, not memory. We are PID 1: raise it here and
+        // every service (dockerd/containerd/slimd/agent) inherits.
+        let nofile = libc::rlimit {
+            rlim_cur: 1_048_576,
+            rlim_max: 1_048_576,
+        };
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &nofile) } != 0 {
+            eprintln!(
+                "nebula-init: setrlimit(NOFILE) failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
         println!(
             "NEBULA_VESSEL_UP init={} uname={}",
             env!("CARGO_PKG_VERSION"),
