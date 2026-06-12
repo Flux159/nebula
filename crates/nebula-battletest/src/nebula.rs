@@ -90,6 +90,25 @@ impl Nebula {
         Ok(o.stdout)
     }
 
+    /// Agent-healthy ≠ engine-ready: dockerd/slimd come up seconds after the
+    /// agent. Poll `docker version` like the phase scripts do.
+    pub fn wait_docker(&self, timeout: Duration) -> anyhow::Result<()> {
+        let t0 = Instant::now();
+        loop {
+            if self
+                .docker(&["version"], SHORT)
+                .map(|o| o.ok())
+                .unwrap_or(false)
+            {
+                return Ok(());
+            }
+            if t0.elapsed() > timeout {
+                bail!("container engine not answering {:?} after up", timeout);
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
     /// One-off docker command via `nebula docker` (env overrides, never
     /// touches the user's contexts; works against full dockerd and slimd).
     pub fn docker<S: AsRef<std::ffi::OsStr>>(

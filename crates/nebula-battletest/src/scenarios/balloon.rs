@@ -419,6 +419,7 @@ fn set_max_and_boot(neb: &Nebula, guard: &ConfigGuard, mib: u64) -> anyhow::Resu
     guard.set_max_ram(mib)?;
     neb.fresh_up()
         .with_context(|| format!("fresh up @ max_ram {mib}"))?;
+    neb.wait_docker(Duration::from_secs(60))?;
     Ok(())
 }
 

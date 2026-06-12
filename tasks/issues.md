@@ -6,6 +6,22 @@ limitations; routine TODOs live in code.)
 
 ## Open (being worked / next phase)
 
+- **(2026-06-12) Balloon battle-test characterization (nebula-battletest,
+  full suite, 128 GiB M-series Mac).** All 19 contract checks pass; baseline
+  committed at `bench/baselines/Suyogs-MacBook-Pro.json` (±15% gate, run
+  `scripts/battletest.sh balloon` to compare). Numbers worth knowing:
+  * 6 GiB hog → footprint peaks ~8.0 GiB, re-inflate ~36 s, settled footprint
+    = peak (high-water-mark semantics, as characterized in Phase 4).
+  * 10 hog cycles: idle balloon level drifts **0.05%** — no controller leak.
+  * A hog sized to **95% of available** (16 GiB engine) *completes* with zero
+    guest OOM-kills — deflate + DEFLATE_ON_OOM absorb the whole spike.
+  * Sawtooth (4 GiB hog / 30 s idle, 10 min): **0.7 balloon resizes/cycle**,
+    confirming the one-jump-per-workload-change claim under repetition.
+  * Surprise fixed in the harness: "guest available" right after a workload
+    races the re-inflate window (45 s) — anything sizing itself off avail
+    must settle first. Also: agent-healthy ≠ dockerd-ready; dockerd answers
+    ~seconds after the agent, poll `docker version` (phase scripts knew this).
+
 - **(2026-06-10 PM) VZ memory-RESTORE suddenly fails with "permission
   denied" on the dev Mac — environmental, evidence says reboot first.**
   saveMachineStateToURL still works (200ms); restoreMachineStateFromURL

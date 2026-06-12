@@ -74,6 +74,7 @@ pub fn run(neb: &Nebula, out_root: &Path, a: Args) -> anyhow::Result<i32> {
                 sampler.set_phase(&format!("maxram={mr}/{w}"));
                 neb.fresh_up()
                     .with_context(|| format!("fresh up @ {mr} MiB"))?;
+                neb.wait_docker(Duration::from_secs(60))?;
                 neb.pre_pull(&images_for(w))?;
                 let r = run_point(neb, &a, mr, w, &mut points_csv, &sampler)?;
                 println!(
