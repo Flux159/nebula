@@ -1,10 +1,55 @@
 // {{APP_NAME}} — starter UI. Replace this with your product; the panels
-// below prove the plumbing: engine status (direct), the fork demo and a
+// prove the plumbing: engine status (direct), the fork demo and a
 // sqlite-persisted note (both via the app's own hyper server).
 // See AGENTS.md for the project shape.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { app, nebula, type EngineStatus } from "./nebula";
+
+// figlet "ANSI Shadow" — gradient-filled by .wordmark in styles.css
+const NEBULA = String.raw`
+███╗   ██╗███████╗██████╗ ██╗   ██╗██╗      █████╗
+████╗  ██║██╔════╝██╔══██╗██║   ██║██║     ██╔══██╗
+██╔██╗ ██║█████╗  ██████╔╝██║   ██║██║     ███████║
+██║╚██╗██║██╔══╝  ██╔══██╗██║   ██║██║     ██╔══██║
+██║ ╚████║███████╗██████╔╝╚██████╔╝███████╗██║  ██║
+╚═╝  ╚═══╝╚══════╝╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝`;
+
+function Starfield() {
+  // ASCII stars, twinkling on individual delays. Generated once per mount.
+  const stars = useMemo(
+    () =>
+      Array.from({ length: 90 }, (_, i) => ({
+        id: i,
+        ch: ["·", "✦", "·", "*", "·", "."][i % 6],
+        left: `${Math.random() * 100}%`,
+        top: `${Math.random() * 100}%`,
+        size: `${8 + Math.random() * 8}px`,
+        delay: `${-Math.random() * 6}s`,
+        dur: `${2 + Math.random() * 4}s`,
+      })),
+    [],
+  );
+  return (
+    <div className="backdrop" aria-hidden>
+      {stars.map((s) => (
+        <span
+          key={s.id}
+          className="star"
+          style={{
+            left: s.left,
+            top: s.top,
+            fontSize: s.size,
+            animationDelay: s.delay,
+            ["--tw" as never]: s.dur,
+          }}
+        >
+          {s.ch}
+        </span>
+      ))}
+    </div>
+  );
+}
 
 export default function App() {
   const [status, setStatus] = useState<EngineStatus | null>(null);
@@ -44,65 +89,68 @@ export default function App() {
   };
 
   return (
-    <main style={{ fontFamily: "system-ui", padding: "2rem", maxWidth: 640, margin: "0 auto" }}>
-      <h1>{{APP_NAME}}</h1>
-      <section style={card}>
-        <h3 style={{ marginTop: 0 }}>engine ({{FLAVOR}})</h3>
-        {err ? (
-          <p>
-            unreachable — run <code>npm run engine:up</code>
-            <br />
-            <small>{err}</small>
-          </p>
-        ) : status ? (
-          <p>
-            {status.vmState} · kernel {status.agent?.kernel} · {status.cpus} cpus ·{" "}
-            {status.memMib} MiB
-          </p>
-        ) : (
-          <p>connecting…</p>
-        )}
-      </section>
-      <section style={card}>
-        <h3 style={{ marginTop: 0 }}>the primitive</h3>
-        <p>
-          Snapshot a <em>running</em> Linux VM and fork it — RAM, processes and all — in about
-          a second. Served by the app's hyper backend (<code>POST /api/fork-demo</code>).
+    <>
+      <Starfield />
+      <main className="shell">
+        <pre className="wordmark">{NEBULA}</pre>
+        <p className="tagline">
+          <span className="sparkle">✦</span> Create your own{" "}
+          <span className="grad">agent orchestrator</span>{" "}
+          <span className="sparkle s2">✦</span>
         </p>
-        <button onClick={runDemo} disabled={busy || !!err} style={btn}>
-          {busy ? "running…" : "fork a live VM"}
-        </button>
-        {demo && <pre style={{ whiteSpace: "pre-wrap" }}>{demo}</pre>}
-      </section>
-      <section style={card}>
-        <h3 style={{ marginTop: 0 }}>app persistence (sqlite)</h3>
-        <p>
-          Stored via <code>PUT /api/settings/note</code> → rusqlite in the OS app-data dir —
-          the same table components like model-config keep API keys in.
+
+        <section className="card">
+          <h3>engine · {{FLAVOR}}</h3>
+          {err ? (
+            <p>
+              <span className="dot" /> unreachable — run <code>npm run engine:up</code>
+              <br />
+              <small>{err}</small>
+            </p>
+          ) : status ? (
+            <p>
+              <span className="dot ok" />
+              {status.vmState} · kernel {status.agent?.kernel} · {status.cpus} cpus ·{" "}
+              {status.memMib} MiB
+            </p>
+          ) : (
+            <p>connecting…</p>
+          )}
+        </section>
+
+        <section className="card">
+          <h3>the primitive</h3>
+          <p>
+            Snapshot a <em>running</em> Linux VM and fork it — RAM, processes and all — in
+            about a second. Served by the app's hyper backend (
+            <code>POST /api/fork-demo</code>).
+          </p>
+          <button onClick={runDemo} disabled={busy || !!err}>
+            {busy ? "running…" : "✦ fork a live VM"}
+          </button>
+          {demo && <pre className="term">{demo}</pre>}
+        </section>
+
+        <section className="card">
+          <h3>app persistence · sqlite</h3>
+          <p>
+            Stored via <code>PUT /api/settings/note</code> → rusqlite in the OS app-data dir —
+            the same table components like model-config keep API keys in.
+          </p>
+          <input
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="type something, restart the app, it's still here"
+          />
+          <button onClick={saveNote}>save</button>
+          {savedAt && <small> saved {savedAt}</small>}
+        </section>
+
+        <p className="foot">
+          Build something: hand <code>AGENTS.md</code> to your coding agent · components live
+          in <code>components/</code>
         </p>
-        <input
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          placeholder="type something, restart the app, it's still here"
-          style={{ width: "70%", padding: "0.4rem" }}
-        />{" "}
-        <button onClick={saveNote} style={btn}>
-          save
-        </button>
-        {savedAt && <small> saved {savedAt}</small>}
-      </section>
-      <p style={{ opacity: 0.6 }}>
-        Build something: hand <code>AGENTS.md</code> to your coding agent. Components live in{" "}
-        <code>components/</code>.
-      </p>
-    </main>
+      </main>
+    </>
   );
 }
-
-const card: React.CSSProperties = {
-  border: "1px solid #ddd",
-  borderRadius: 8,
-  padding: "1rem 1.25rem",
-  marginBottom: "1rem",
-};
-const btn: React.CSSProperties = { padding: "0.5rem 1rem", fontSize: "1rem" };

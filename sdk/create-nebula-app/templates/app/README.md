@@ -12,6 +12,10 @@ npm install
 npm run dev     # boots the isolated engine, then vite + the Tauri window
 ```
 
+Note: a `cargo build` debug binary run directly shows a white window —
+debug builds load the vite dev server (`devUrl`), which `npm run dev`
+starts for you. Release builds (`npm run tauri build`) embed `dist/`.
+
 First run fetches engine artifacts (~40MB slim). The embedded engine lives
 entirely under `.nebula/` with its own ports (see `nebula.config.json`) —
 isolated from any standalone Nebula install.

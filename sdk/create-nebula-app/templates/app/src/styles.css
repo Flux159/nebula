@@ -1,0 +1,257 @@
+/* {{APP_NAME}} — starter theme. Dark, starfield, gradient hero. No deps. */
+
+:root {
+  color-scheme: dark;
+  --bg: #07070d;
+  --panel: rgba(255, 255, 255, 0.04);
+  --panel-border: rgba(255, 255, 255, 0.09);
+  --text: #e8e8f0;
+  --muted: #9aa0b4;
+  --accent-1: #818cf8; /* indigo */
+  --accent-2: #c084fc; /* violet */
+  --accent-3: #f0abfc; /* fuchsia */
+  --ok: #34d399;
+  --bad: #f87171;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100%;
+}
+
+/* --- backdrop: nebula glows + starfield ---------------------------------- */
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+.backdrop::before,
+.backdrop::after {
+  content: "";
+  position: absolute;
+  width: 60vmax;
+  height: 60vmax;
+  border-radius: 50%;
+  filter: blur(90px);
+  opacity: 0.16;
+  animation: drift 26s ease-in-out infinite alternate;
+}
+.backdrop::before {
+  background: radial-gradient(circle at 35% 35%, var(--accent-1), transparent 60%);
+  top: -22vmax;
+  left: -14vmax;
+}
+.backdrop::after {
+  background: radial-gradient(circle at 60% 60%, var(--accent-2), transparent 60%);
+  bottom: -26vmax;
+  right: -16vmax;
+  animation-delay: -13s;
+}
+@keyframes drift {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(6vmax, 4vmax, 0) scale(1.15);
+  }
+}
+
+.star {
+  position: absolute;
+  color: #fff;
+  user-select: none;
+  animation: twinkle var(--tw, 3s) ease-in-out infinite alternate;
+}
+@keyframes twinkle {
+  from {
+    opacity: 0.08;
+    transform: scale(0.85);
+  }
+  to {
+    opacity: 0.65;
+    transform: scale(1.05);
+  }
+}
+
+/* --- hero ------------------------------------------------------------------ */
+
+.shell {
+  position: relative;
+  z-index: 1;
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 3.5rem 1.5rem 4rem;
+}
+
+.wordmark {
+  margin: 0 auto 0.4rem;
+  width: fit-content;
+  font-size: clamp(6px, 1.7vw, 12px);
+  line-height: 1.15;
+  letter-spacing: 0;
+  text-align: center;
+  /* the performative-startup gradient, animated */
+  background: linear-gradient(
+    100deg,
+    var(--accent-1) 0%,
+    var(--accent-2) 30%,
+    var(--accent-3) 50%,
+    var(--accent-2) 70%,
+    var(--accent-1) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: sheen 7s linear infinite;
+  filter: drop-shadow(0 0 22px rgba(129, 140, 248, 0.35));
+}
+@keyframes sheen {
+  to {
+    background-position: 200% 0;
+  }
+}
+
+.tagline {
+  text-align: center;
+  margin: 0.75rem 0 2.5rem;
+  font-size: 1.05rem;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+.tagline .grad {
+  background: linear-gradient(90deg, var(--accent-1), var(--accent-3), var(--accent-1));
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-weight: 600;
+  animation: sheen 5s linear infinite;
+}
+
+.sparkle {
+  display: inline-block;
+  color: var(--accent-3);
+  animation: sparkle 2.4s ease-in-out infinite;
+  transform-origin: center;
+}
+.sparkle.s2 {
+  animation-delay: -1.2s;
+  font-size: 0.8em;
+}
+@keyframes sparkle {
+  0%,
+  100% {
+    transform: scale(0.8) rotate(-8deg);
+    opacity: 0.5;
+  }
+  50% {
+    transform: scale(1.15) rotate(8deg);
+    opacity: 1;
+  }
+}
+
+/* --- panels ----------------------------------------------------------------- */
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  padding: 1.1rem 1.3rem;
+  margin-bottom: 1rem;
+  backdrop-filter: blur(8px);
+  transition: border-color 0.25s ease, transform 0.25s ease;
+}
+.card:hover {
+  border-color: rgba(129, 140, 248, 0.35);
+  transform: translateY(-1px);
+}
+.card h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.card p {
+  margin: 0.4rem 0;
+  line-height: 1.55;
+}
+.card code {
+  background: rgba(255, 255, 255, 0.07);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  font-size: 0.85em;
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 0.5em;
+  background: var(--bad);
+}
+.dot.ok {
+  background: var(--ok);
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.7);
+}
+
+button {
+  background: linear-gradient(95deg, var(--accent-1), var(--accent-2));
+  color: #0b0b14;
+  font-weight: 700;
+  border: 0;
+  border-radius: 8px;
+  padding: 0.55rem 1.1rem;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: filter 0.15s ease, transform 0.15s ease;
+}
+button:hover:not(:disabled) {
+  filter: brightness(1.12);
+  transform: translateY(-1px);
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+input {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 0.5rem 0.7rem;
+  width: 68%;
+  margin-right: 0.5rem;
+}
+input:focus {
+  outline: none;
+  border-color: var(--accent-1);
+}
+
+pre.term {
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 0.8rem 1rem;
+  white-space: pre-wrap;
+  font-size: 0.85rem;
+  color: #c9f7d8;
+  margin: 0.8rem 0 0;
+}
+
+.foot {
+  text-align: center;
+  color: var(--muted);
+  opacity: 0.75;
+  font-size: 0.9rem;
+  margin-top: 2.2rem;
+}
