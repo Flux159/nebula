@@ -84,6 +84,24 @@ into the engine vessel at the identical path, so the simplest pattern is a
 bind mount: `-v ~/Library/Application Support/YourApp/bin:/opt/yourapp:ro`.
 No image rebuild when the agent updates.
 
+**Mounting directories outside `$HOME`:** only `$HOME` is shared into the engine
+vessel by default, so a `docker -v /path:/ctr` bind whose source lives outside
+`$HOME` (e.g. `/Volumes/...`, `/tmp/...`) won't resolve. Add the host roots to
+the engine's `config.toml` and they're shared at their identical absolute path,
+exactly like `$HOME`:
+
+```toml
+[[shares]]
+path = "/Volumes/scratch"
+
+[[shares]]
+path = "/srv/data"
+read_only = true
+```
+
+virtiofs has no hotplug, so adding or removing a share takes an engine restart
+(`nebula down && nebula up`).
+
 **The "small insight" surface for end users:** `status` (API), and two
 sidecar commands worth exposing as buttons — `nebula down && nebula up`
 (restart) and `nebula vessels reset vessel` (restore the engine OS to
