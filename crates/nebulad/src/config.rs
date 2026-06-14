@@ -32,6 +32,33 @@ pub struct Config {
     /// Host port forwarding to the k3s API (default 6443). Unique per
     /// k8s-enabled instance.
     pub k8s_port: Option<u16>,
+    /// Extra host directories to share into the engine vessel via virtiofs, on
+    /// top of `$HOME` (always shared). Each is mounted inside the guest at the
+    /// SAME absolute path as on the host — exactly like `$HOME` — so a
+    /// `docker -v /host/path:/ctr` bind resolves identically on both sides.
+    /// Embedders (e.g. Galaxy) write these to expose user-chosen mount roots
+    /// that live outside `$HOME`. Adding or removing one requires an engine
+    /// restart (`nebula down && nebula up`): virtiofs has no hotplug.
+    ///
+    /// ```toml
+    /// [[shares]]
+    /// path = "/Volumes/scratch"
+    /// read_only = false
+    /// ```
+    #[serde(default)]
+    pub shares: Vec<ShareEntry>,
+}
+
+/// One `[[shares]]` entry — a host directory mounted into the engine vessel at
+/// its identical absolute path. See [`Config::shares`].
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ShareEntry {
+    /// Absolute host path of the directory to share.
+    pub path: PathBuf,
+    /// Mount it read-only in the guest (default: read-write).
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 pub struct Effective {
@@ -130,5 +157,23 @@ mod tests {
     #[test]
     fn rejects_unknown_fields() {
         assert!(toml::from_str::<Config>("definitely_not_a_field = 1\n").is_err());
+    }
+
+    #[test]
+    fn parses_shares() {
+        let c: Config = toml::from_str(
+            "[[shares]]\npath = \"/Volumes/scratch\"\n\n[[shares]]\npath = \"/data\"\nread_only = true\n",
+        )
+        .unwrap();
+        assert_eq!(c.shares.len(), 2);
+        assert_eq!(c.shares[0].path, std::path::PathBuf::from("/Volumes/scratch"));
+        assert!(!c.shares[0].read_only);
+        assert!(c.shares[1].read_only);
+    }
+
+    #[test]
+    fn shares_default_empty() {
+        assert!(Config::default().shares.is_empty());
+        assert!(toml::from_str::<Config>("cpus = 2\n").unwrap().shares.is_empty());
     }
 }

@@ -392,6 +392,55 @@ mod init {
         }
     }
 
+    /// Decode lowercase/uppercase hex (paths arrive hex-encoded so the kernel
+    /// cmdline never has to carry spaces/colons). Returns None on malformed input.
+    fn hex_decode(s: &str) -> Option<String> {
+        let b = s.as_bytes();
+        if b.len() % 2 != 0 {
+            return None;
+        }
+        let nib = |c: u8| -> Option<u8> {
+            match c {
+                b'0'..=b'9' => Some(c - b'0'),
+                b'a'..=b'f' => Some(c - b'a' + 10),
+                b'A'..=b'F' => Some(c - b'A' + 10),
+                _ => None,
+            }
+        };
+        let mut out = Vec::with_capacity(b.len() / 2);
+        for pair in b.chunks(2) {
+            out.push((nib(pair[0])? << 4) | nib(pair[1])?);
+        }
+        String::from_utf8(out).ok()
+    }
+
+    /// Mount the extra host shares the host attached (config `[[shares]]`), each
+    /// at its identical absolute path — same contract as the home share — so
+    /// `docker -v /host/path:/ctr` binds resolve on both sides. The host passes
+    /// the tag→path map on the kernel cmdline as `NEBULA_SHARES=tag=hexpath,…`.
+    fn setup_extra_shares() {
+        let Ok(spec) = std::env::var("NEBULA_SHARES") else {
+            return;
+        };
+        for pair in spec.split(',').filter(|p| !p.is_empty()) {
+            let Some((tag, hexpath)) = pair.split_once('=') else {
+                continue;
+            };
+            let Some(path) = hex_decode(hexpath) else {
+                eprintln!("nebula-init: bad share path for tag {tag}");
+                continue;
+            };
+            let _ = std::fs::create_dir_all(&path);
+            let status = std::process::Command::new("/bin/mount")
+                .args(["-t", "virtiofs", tag, &path])
+                .status();
+            match status {
+                Ok(s) if s.success() => println!("nebula-init: share {tag} mounted at {path}"),
+                _ => eprintln!("nebula-init: share {tag} mount at {path} failed"),
+            }
+        }
+    }
+
     fn vessel_mode() -> ! {
         attach_console();
         let _ = std::fs::write("/proc/sys/kernel/hostname", "nebula");
@@ -421,6 +470,7 @@ mod init {
         phase("network");
         setup_rosetta();
         setup_home_share();
+        setup_extra_shares();
         phase("rosetta+home-share");
         // dockerd requires forwarding for container NAT.
         let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
@@ -513,6 +563,20 @@ mod init {
             vessel_mode()
         } else {
             spike_mode()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn hex_decode_roundtrips_and_rejects_bad_input() {
+            assert_eq!(hex_decode("2f746d702f78").as_deref(), Some("/tmp/x"));
+            assert_eq!(hex_decode("2F546d70").as_deref(), Some("/Tmp")); // uppercase ok
+            assert_eq!(hex_decode(""), Some(String::new()));
+            assert_eq!(hex_decode("abc"), None); // odd length
+            assert_eq!(hex_decode("zz"), None); // non-hex
         }
     }
 }

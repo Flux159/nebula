@@ -61,6 +61,10 @@ impl Vessel {
                 m(VSOCK_PORT_CONTAINERD, "containerd.vsock"),
             ]
         };
+        // No virtiofs on the Windows fork yet (and HOME is unix-only): home +
+        // any configured extra shares. Computed once so the kernel cmdline can
+        // hand the guest the SAME tag→path map the host attaches.
+        let shares = if cfg!(windows) { vec![] } else { vessel_shares(cfg) };
         let spec = VmSpec {
             name: "vessel".into(),
             cpus: eff.cpus,
@@ -68,7 +72,7 @@ impl Vessel {
             boot: BootSpec::Kernel {
                 kernel,
                 initramfs: None,
-                cmdline: vessel_cmdline(cfg),
+                cmdline: vessel_cmdline(cfg, &shares),
             },
             disks: vec![
                 DiskSpec {
@@ -80,8 +84,7 @@ impl Vessel {
                     read_only: false,
                 },
             ],
-            // No virtiofs on the Windows fork yet (and HOME is unix-only).
-            shares: if cfg!(windows) { vec![] } else { home_share() },
+            shares,
             // Nat everywhere: VZ NAT on macOS; the fork's usernet virtio-net
             // on Linux and Windows (the engine needs outbound for image
             // pulls — TSI's guest-side hijack doesn't apply to our own-init
@@ -253,7 +256,45 @@ fn home_share() -> Vec<nebula_core::ShareSpec> {
     }
 }
 
-fn vessel_cmdline(cfg: &Config) -> String {
+/// All virtiofs shares for the engine vessel: `$HOME` (tag `home`) plus each
+/// configured `[[shares]]` entry that still points at a directory. Extra shares
+/// get stable tags `share0`, `share1`, … in config order (skipped entries don't
+/// consume a tag), and the guest mounts each at its identical host path — same
+/// contract as `$HOME`. A configured path that has vanished is dropped with a
+/// warning rather than failing the whole engine boot.
+fn vessel_shares(cfg: &Config) -> Vec<nebula_core::ShareSpec> {
+    let mut shares = home_share();
+    let mut n = 0;
+    for entry in &cfg.shares {
+        if !entry.path.is_dir() {
+            tracing::warn!(
+                "configured share {} is not a directory — skipping",
+                entry.path.display()
+            );
+            continue;
+        }
+        shares.push(nebula_core::ShareSpec {
+            tag: format!("share{n}"),
+            host_path: entry.path.clone(),
+            read_only: entry.read_only,
+        });
+        n += 1;
+    }
+    shares
+}
+
+/// Lowercase hex (the guest decodes it). Paths can contain spaces/colons/commas
+/// that would break kernel-cmdline word splitting; hex keeps each value to
+/// `[0-9a-f]` so `NEBULA_SHARES=tag=hexpath,…` is always one clean word.
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+fn vessel_cmdline(cfg: &Config, shares: &[nebula_core::ShareSpec]) -> String {
     let mut cmdline = String::from(
         "console=hvc0 root=/dev/vda rw rootfstype=ext4 init=/sbin/nebula-init reboot=k panic=10",
     );
@@ -266,5 +307,60 @@ fn vessel_cmdline(cfg: &Config) -> String {
         // The guest agent relays 127.0.0.1:53 to the host gateway at this port.
         cmdline.push_str(&format!(" NEBULA_DNS_PORT={port}"));
     }
+    // Hand the guest the tag→path map for every non-home share so vessel-init
+    // can `mount -t virtiofs <tag> <path>` at the identical host path.
+    let extras: Vec<String> = shares
+        .iter()
+        .filter(|s| s.tag != "home")
+        .map(|s| format!("{}={}", s.tag, hex_encode(s.host_path.to_string_lossy().as_bytes())))
+        .collect();
+    if !extras.is_empty() {
+        cmdline.push_str(&format!(" NEBULA_SHARES={}", extras.join(",")));
+    }
     cmdline
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nebula_core::ShareSpec;
+
+    fn hex_decode(s: &str) -> String {
+        let bytes: Vec<u8> = (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn hex_encode_is_lowercase_bytes() {
+        assert_eq!(hex_encode(b"/tmp/x"), "2f746d702f78");
+        assert_eq!(hex_decode(&hex_encode(b"/Volumes/a b")), "/Volumes/a b");
+    }
+
+    #[test]
+    fn cmdline_encodes_extra_shares_only() {
+        let shares = vec![
+            ShareSpec { tag: "home".into(), host_path: "/Users/x".into(), read_only: false },
+            ShareSpec { tag: "share0".into(), host_path: "/Volumes/a b".into(), read_only: false },
+        ];
+        let cl = vessel_cmdline(&Config::default(), &shares);
+        // home is handled via NEBULA_HOME, never re-encoded as an extra share.
+        assert!(!cl.contains("home="));
+        let word = cl
+            .split_whitespace()
+            .find(|w| w.starts_with("NEBULA_SHARES="))
+            .expect("NEBULA_SHARES present");
+        // One whitespace-free cmdline word, even though the path has a space.
+        assert!(!word.contains(' '));
+        let hex = word.trim_start_matches("NEBULA_SHARES=share0=");
+        assert_eq!(hex_decode(hex), "/Volumes/a b");
+    }
+
+    #[test]
+    fn cmdline_omits_shares_when_only_home() {
+        let shares = vec![ShareSpec { tag: "home".into(), host_path: "/Users/x".into(), read_only: false }];
+        assert!(!vessel_cmdline(&Config::default(), &shares).contains("NEBULA_SHARES="));
+    }
 }
