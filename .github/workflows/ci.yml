@@ -51,3 +51,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build (host stack + WHP backend, native Windows)
         run: cargo build --workspace
+
+  slim:
+    # slim/ is a separate workspace (excluded from the root), so the root jobs
+    # above don't lint or test it. Gate it here with the same fmt + clippy bar.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: slim
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: slim
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Unit tests
+        run: cargo test
