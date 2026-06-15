@@ -38,7 +38,12 @@ impl Reference {
         } else {
             repo
         };
-        Reference { registry, repo, tag, digest }
+        Reference {
+            registry,
+            repo,
+            tag,
+            digest,
+        }
     }
 
     /// Registry API host (docker.io → registry-1.docker.io). `SLIM_REGISTRY_MIRROR`
@@ -62,7 +67,10 @@ impl Reference {
     /// prints repo tags.
     pub fn familiar(&self) -> String {
         let repo = if self.registry == "docker.io" {
-            self.repo.strip_prefix("library/").unwrap_or(&self.repo).to_string()
+            self.repo
+                .strip_prefix("library/")
+                .unwrap_or(&self.repo)
+                .to_string()
         } else {
             format!("{}/{}", self.registry, self.repo)
         };

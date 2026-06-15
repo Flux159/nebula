@@ -80,7 +80,12 @@ pub struct Store {
 #[derive(Debug, Clone)]
 pub enum PullEvent {
     Status(String),
-    LayerStatus { id: String, status: String, current: u64, total: i64 },
+    LayerStatus {
+        id: String,
+        status: String,
+        current: u64,
+        total: i64,
+    },
 }
 
 fn other(e: impl std::fmt::Display) -> io::Error {
@@ -105,8 +110,15 @@ impl Store {
         // location, make db.json reads/writes cross-process safe so several
         // engines can share one layer cache. Layers/blobs are content-addressed
         // and idempotent, so only db.json metadata needs coordinating.
-        let shared = std::env::var("NEBULA_IMAGES_DIR").map(|v| !v.trim().is_empty()).unwrap_or(false);
-        Ok(Store { root: root.to_path_buf(), arch, db: Mutex::new(db), shared })
+        let shared = std::env::var("NEBULA_IMAGES_DIR")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        Ok(Store {
+            root: root.to_path_buf(),
+            arch,
+            db: Mutex::new(db),
+            shared,
+        })
     }
 
     /// Take an exclusive cross-process lock on the store (shared mode only).
@@ -116,7 +128,12 @@ impl Store {
             return None;
         }
         use std::os::unix::io::AsRawFd;
-        let f = std::fs::OpenOptions::new().create(true).write(true).open(self.root.join(".db.lock")).ok()?;
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.root.join(".db.lock"))
+            .ok()?;
         unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
         Some(f)
     }
@@ -154,18 +171,25 @@ impl Store {
 
     fn save_db(&self, db: &Db) {
         let tmp = self.root.join("db.json.tmp");
-        if serde_json::to_vec_pretty(db).ok().and_then(|b| std::fs::write(&tmp, b).ok()).is_some()
+        if serde_json::to_vec_pretty(db)
+            .ok()
+            .and_then(|b| std::fs::write(&tmp, b).ok())
+            .is_some()
         {
             let _ = std::fs::rename(&tmp, self.root.join("db.json"));
         }
     }
 
     pub fn blob_path(&self, digest: &str) -> PathBuf {
-        self.root.join("blobs/sha256").join(digest.trim_start_matches("sha256:"))
+        self.root
+            .join("blobs/sha256")
+            .join(digest.trim_start_matches("sha256:"))
     }
 
     pub fn layer_dir(&self, diff_id: &str) -> PathBuf {
-        self.root.join("layers").join(diff_id.trim_start_matches("sha256:"))
+        self.root
+            .join("layers")
+            .join(diff_id.trim_start_matches("sha256:"))
     }
 
     // ---------- pull ----------
@@ -198,7 +222,12 @@ impl Store {
         // Layers.
         let mut total_size = 0i64;
         for (i, layer) in manifest.layers.iter().enumerate() {
-            let short: String = layer.digest.trim_start_matches("sha256:").chars().take(12).collect();
+            let short: String = layer
+                .digest
+                .trim_start_matches("sha256:")
+                .chars()
+                .take(12)
+                .collect();
             let want_diff = oci.rootfs.diff_ids.get(i).cloned().unwrap_or_default();
             if !want_diff.is_empty() && self.layer_dir(&want_diff).join(".complete").exists() {
                 emit(PullEvent::LayerStatus {
@@ -225,7 +254,9 @@ impl Store {
                     "layer {short} uses zstd compression — not supported by slim yet (tasks/issues.md)"
                 )));
             }
-            let tmp = self.root.join(format!("layers/.tmp-{}", std::process::id()));
+            let tmp = self
+                .root
+                .join(format!("layers/.tmp-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&tmp);
 
             // Two-phase: download blob to file (verifies digest), then unpack.
@@ -302,7 +333,10 @@ impl Store {
             db.images.insert(image_id.clone(), record.clone());
             let repo_key = r.familiar_repo();
             if !r.tag.is_empty() {
-                db.repos.entry(repo_key.clone()).or_default().insert(r.tag.clone(), image_id.clone());
+                db.repos
+                    .entry(repo_key.clone())
+                    .or_default()
+                    .insert(r.tag.clone(), image_id.clone());
             }
             db.digests
                 .entry(repo_key)
@@ -384,15 +418,19 @@ impl Store {
     }
 
     pub fn tag(&self, src: &str, target: &str) -> io::Result<()> {
-        let rec = self
-            .resolve(src)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("No such image: {src}")))?;
+        let rec = self.resolve(src).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("No such image: {src}"))
+        })?;
         let t = Reference::parse(target);
         self.with_write_db(|db| {
-            db.repos
-                .entry(t.familiar_repo())
-                .or_default()
-                .insert(if t.tag.is_empty() { "latest".into() } else { t.tag }, rec.id);
+            db.repos.entry(t.familiar_repo()).or_default().insert(
+                if t.tag.is_empty() {
+                    "latest".into()
+                } else {
+                    t.tag
+                },
+                rec.id,
+            );
         });
         Ok(())
     }
@@ -407,7 +445,10 @@ impl Store {
         in_use: &dyn Fn(&str) -> bool,
     ) -> io::Result<Vec<ImageDeleteResponse>> {
         let rec = self.resolve(name_or_id).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, format!("No such image: {name_or_id}"))
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("No such image: {name_or_id}"),
+            )
         })?;
         let r = Reference::parse(name_or_id);
         self.with_write_db(|db| {
@@ -479,10 +520,14 @@ impl Store {
             db.images.insert(record.id.clone(), record.clone());
             if let Some(t) = tag_as {
                 let t = Reference::parse(t);
-                db.repos
-                    .entry(t.familiar_repo())
-                    .or_default()
-                    .insert(if t.tag.is_empty() { "latest".into() } else { t.tag }, record.id.clone());
+                db.repos.entry(t.familiar_repo()).or_default().insert(
+                    if t.tag.is_empty() {
+                        "latest".into()
+                    } else {
+                        t.tag
+                    },
+                    record.id.clone(),
+                );
             }
         });
         Ok(())
@@ -522,7 +567,10 @@ impl Reference {
     /// The repo key used in the db ("alpine", "ghcr.io/x/y").
     pub fn familiar_repo(&self) -> String {
         if self.registry == "docker.io" {
-            self.repo.strip_prefix("library/").unwrap_or(&self.repo).to_string()
+            self.repo
+                .strip_prefix("library/")
+                .unwrap_or(&self.repo)
+                .to_string()
         } else {
             format!("{}/{}", self.registry, self.repo)
         }
@@ -562,7 +610,10 @@ fn mount_overlay(lowers: &[String], upper: &Path, work: &Path, merged: &Path) ->
 
 #[cfg(not(target_os = "linux"))]
 fn mount_overlay(_l: &[String], _u: &Path, _w: &Path, _m: &Path) -> io::Result<()> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, "overlay requires linux"))
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "overlay requires linux",
+    ))
 }
 
 #[cfg(target_os = "linux")]

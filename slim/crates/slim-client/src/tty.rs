@@ -43,7 +43,11 @@ pub fn enter_raw() -> Option<RawGuard> {
         if libc::tcsetattr(fd, libc::TCSANOW, &raw) != 0 {
             return None;
         }
-        Some(RawGuard { fd, orig, active: true })
+        Some(RawGuard {
+            fd,
+            orig,
+            active: true,
+        })
     }
 }
 

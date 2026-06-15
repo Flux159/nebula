@@ -80,8 +80,12 @@ fn read_filename(args: &[String]) -> Result<Option<String>, String> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "-f" | "--filename" => return Ok(Some(args.get(i + 1).cloned().ok_or("-f needs a path")?)),
-            s if s.starts_with("--filename=") => return Ok(Some(s["--filename=".len()..].to_string())),
+            "-f" | "--filename" => {
+                return Ok(Some(args.get(i + 1).cloned().ok_or("-f needs a path")?))
+            }
+            s if s.starts_with("--filename=") => {
+                return Ok(Some(s["--filename=".len()..].to_string()))
+            }
             s if s.starts_with("-f=") => return Ok(Some(s["-f=".len()..].to_string())),
             _ => i += 1,
         }
@@ -92,7 +96,9 @@ fn read_filename(args: &[String]) -> Result<Option<String>, String> {
 fn slurp(path: &str) -> Result<String, String> {
     if path == "-" {
         let mut s = String::new();
-        std::io::stdin().read_to_string(&mut s).map_err(|e| e.to_string())?;
+        std::io::stdin()
+            .read_to_string(&mut s)
+            .map_err(|e| e.to_string())?;
         Ok(s)
     } else {
         std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))
@@ -158,9 +164,15 @@ fn verb_get(facade: &Facade, args: &[String]) -> Result<i32, String> {
         }
         Some("wide") | None => {
             // Table.
-            println!("{:<28} {:<8} {:<10} {:<10}", "NAME", "READY", "STATUS", "RESTARTS");
+            println!(
+                "{:<28} {:<8} {:<10} {:<10}",
+                "NAME", "READY", "STATUS", "RESTARTS"
+            );
             for o in &objs {
-                println!("{:<28} {:<8} {:<10} {:<10}", o.name, o.ready, o.status, o.restarts);
+                println!(
+                    "{:<28} {:<8} {:<10} {:<10}",
+                    o.name, o.ready, o.status, o.restarts
+                );
             }
         }
         Some(other) => return Err(format!("unsupported output format: {other}")),
@@ -180,7 +192,9 @@ fn verb_scale(facade: &Facade, args: &[String], out: &mut dyn FnMut(&str)) -> Re
         Some((k, n)) => (k, n),
         None => ("deployments", target.as_str()),
     };
-    facade.scale(kind, name, replicas, out).map_err(|e| e.to_string())?;
+    facade
+        .scale(kind, name, replicas, out)
+        .map_err(|e| e.to_string())?;
     Ok(0)
 }
 
@@ -190,7 +204,9 @@ fn verb_logs(facade: &Facade, args: &[String]) -> Result<i32, String> {
     let follow = args.iter().any(|a| a == "-f" || a == "--follow");
     let container = flag_value(args, &["-c", "--container"]).unwrap_or_default();
     let mut out = std::io::stdout();
-    facade.logs(pod, &container, follow, &mut out).map_err(|e| e.to_string())?;
+    facade
+        .logs(pod, &container, follow, &mut out)
+        .map_err(|e| e.to_string())?;
     Ok(0)
 }
 
@@ -222,9 +238,15 @@ fn verb_exec(facade: &Facade, args: &[String]) -> Result<i32, String> {
     if cmd.is_empty() {
         return Err("exec requires a command after --".into());
     }
-    let interactive = head.iter().any(|a| a == "-i" || a == "-it" || a == "-ti" || a == "--stdin");
-    let tty = head.iter().any(|a| a == "-t" || a == "-it" || a == "-ti" || a == "--tty");
-    facade.exec(pod, &container, &cmd, interactive, tty).map_err(|e| e.to_string())
+    let interactive = head
+        .iter()
+        .any(|a| a == "-i" || a == "-it" || a == "-ti" || a == "--stdin");
+    let tty = head
+        .iter()
+        .any(|a| a == "-t" || a == "-it" || a == "-ti" || a == "--tty");
+    facade
+        .exec(pod, &container, &cmd, interactive, tty)
+        .map_err(|e| e.to_string())
 }
 
 fn verb_describe(facade: &Facade, args: &[String]) -> Result<i32, String> {

@@ -39,7 +39,11 @@ impl Chart {
     pub fn load(path: &Path) -> HelmResult<Chart> {
         if path.is_dir() {
             Self::load_dir(path)
-        } else if path.extension().map(|e| e == "tgz" || e == "gz").unwrap_or(false) {
+        } else if path
+            .extension()
+            .map(|e| e == "tgz" || e == "gz")
+            .unwrap_or(false)
+        {
             Self::load_tgz(path)
         } else {
             he(format!("not a chart: {}", path.display()))
@@ -50,9 +54,21 @@ impl Chart {
         let chart_yaml = std::fs::read_to_string(dir.join("Chart.yaml"))
             .map_err(|e| HelmError(format!("Chart.yaml: {e}")))?;
         let meta: Value = yaml_to_json(&chart_yaml)?;
-        let name = meta.get("name").and_then(|v| v.as_str()).unwrap_or("chart").to_string();
-        let version = meta.get("version").and_then(|v| v.as_str()).unwrap_or("0.0.0").to_string();
-        let app_version = meta.get("appVersion").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = meta
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("chart")
+            .to_string();
+        let version = meta
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0.0.0")
+            .to_string();
+        let app_version = meta
+            .get("appVersion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let default_values = match std::fs::read_to_string(dir.join("values.yaml")) {
             Ok(s) => yaml_to_json(&s)?,
@@ -63,7 +79,14 @@ impl Chart {
         let mut library = String::new();
         let tdir = dir.join("templates");
         collect_templates(&tdir, &tdir, &mut templates, &mut library)?;
-        Ok(Chart { name, version, app_version, default_values, templates, library })
+        Ok(Chart {
+            name,
+            version,
+            app_version,
+            default_values,
+            templates,
+            library,
+        })
     }
 
     fn load_tgz(path: &Path) -> HelmResult<Chart> {
@@ -91,7 +114,9 @@ fn collect_templates(
     templates: &mut Vec<(String, String)>,
     library: &mut String,
 ) -> HelmResult<()> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return Ok(()) };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
     let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
@@ -101,14 +126,20 @@ fn collect_templates(
             collect_templates(base, &p, templates, library)?;
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(&p) else { continue };
+        let Ok(content) = std::fs::read_to_string(&p) else {
+            continue;
+        };
         if name.ends_with(".tpl") || name.starts_with('_') {
             library.push_str(&content);
             library.push('\n');
         } else if name == "NOTES.txt" {
             // skip
         } else if name.ends_with(".yaml") || name.ends_with(".yml") {
-            let rel = p.strip_prefix(base).unwrap_or(&p).to_string_lossy().into_owned();
+            let rel = p
+                .strip_prefix(base)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .into_owned();
             templates.push((rel, content));
         }
     }
@@ -150,8 +181,8 @@ pub fn render(chart: &Chart, values: &Value, opts: &RenderOptions) -> HelmResult
     let mut out = String::new();
     for (rel, content) in &chart.templates {
         let full = format!("{}\n{}", chart.library, content);
-        let mut tmpl = slim_tmpl::Template::parse(&full)
-            .map_err(|e| HelmError(format!("{rel}: {e}")))?;
+        let mut tmpl =
+            slim_tmpl::Template::parse(&full).map_err(|e| HelmError(format!("{rel}: {e}")))?;
         sprig::register(&mut tmpl);
         let rendered = tmpl
             .render(&ctx)
@@ -159,7 +190,10 @@ pub fn render(chart: &Chart, values: &Value, opts: &RenderOptions) -> HelmResult
         if rendered.trim().is_empty() {
             continue;
         }
-        out.push_str(&format!("---\n# Source: {}/templates/{}\n", chart.name, rel));
+        out.push_str(&format!(
+            "---\n# Source: {}/templates/{}\n",
+            chart.name, rel
+        ));
         out.push_str(rendered.trim_end());
         out.push('\n');
     }
@@ -169,11 +203,7 @@ pub fn render(chart: &Chart, values: &Value, opts: &RenderOptions) -> HelmResult
 // ---------- values ----------
 
 /// chart defaults ← values files ← --set overrides.
-pub fn build_values(
-    chart: &Chart,
-    files: &[String],
-    sets: &[String],
-) -> HelmResult<Value> {
+pub fn build_values(chart: &Chart, files: &[String], sets: &[String]) -> HelmResult<Value> {
     let mut v = chart.default_values.clone();
     for f in files {
         let content = std::fs::read_to_string(f).map_err(|e| HelmError(format!("{f}: {e}")))?;
@@ -198,7 +228,9 @@ fn deep_merge(base: &mut Value, over: &Value) {
 }
 
 fn apply_set(root: &mut Value, spec: &str) -> HelmResult<()> {
-    let (path, raw) = spec.split_once('=').ok_or_else(|| HelmError(format!("invalid --set {spec}")))?;
+    let (path, raw) = spec
+        .split_once('=')
+        .ok_or_else(|| HelmError(format!("invalid --set {spec}")))?;
     let val = parse_scalar(raw);
     let keys: Vec<&str> = path.split('.').collect();
     if !root.is_object() {
@@ -244,7 +276,14 @@ pub struct Helm<'a> {
 
 impl<'a> Helm<'a> {
     pub fn new(client: &'a Client, namespace: &str) -> Self {
-        Helm { client, namespace: if namespace.is_empty() { "default".into() } else { namespace.into() } }
+        Helm {
+            client,
+            namespace: if namespace.is_empty() {
+                "default".into()
+            } else {
+                namespace.into()
+            },
+        }
     }
 
     pub fn install(
@@ -254,11 +293,23 @@ impl<'a> Helm<'a> {
         values: &Value,
         out: &mut dyn FnMut(&str),
     ) -> HelmResult<Vec<String>> {
-        let opts = RenderOptions { release: release.to_string(), namespace: self.namespace.clone(), is_upgrade: false };
+        let opts = RenderOptions {
+            release: release.to_string(),
+            namespace: self.namespace.clone(),
+            is_upgrade: false,
+        };
         let manifests = render(chart, values, &opts)?;
         let facade = Facade::new(self.client, &self.namespace);
-        let skipped = facade.apply_yaml(&manifests, out).map_err(|e| HelmError(e.to_string()))?;
-        save_release(release, &self.namespace, &chart.name, &chart.version, &manifests)?;
+        let skipped = facade
+            .apply_yaml(&manifests, out)
+            .map_err(|e| HelmError(e.to_string()))?;
+        save_release(
+            release,
+            &self.namespace,
+            &chart.name,
+            &chart.version,
+            &manifests,
+        )?;
         out(&format!(
             "NAME: {release}\nLAST DEPLOYED: {}\nNAMESPACE: {}\nSTATUS: deployed\nREVISION: 1\n",
             slim_kube_now(),
@@ -272,7 +323,9 @@ impl<'a> Helm<'a> {
     pub fn uninstall(&self, release: &str, out: &mut dyn FnMut(&str)) -> HelmResult<()> {
         let rec = load_release(release)?;
         let facade = Facade::new(self.client, &rec.namespace);
-        facade.delete_yaml(&rec.manifests, out).map_err(|e| HelmError(e.to_string()))?;
+        facade
+            .delete_yaml(&rec.manifests, out)
+            .map_err(|e| HelmError(e.to_string()))?;
         delete_release(release);
         out(&format!("release \"{release}\" uninstalled\n"));
         Ok(())
@@ -297,22 +350,37 @@ pub struct ReleaseRecord {
 fn release_dir() -> PathBuf {
     let base = std::env::var("NEBULA_HOME")
         .map(|h| format!("{h}/slim/helm"))
-        .unwrap_or_else(|_| format!("{}/.nebula/slim/helm", std::env::var("HOME").unwrap_or_default()));
+        .unwrap_or_else(|_| {
+            format!(
+                "{}/.nebula/slim/helm",
+                std::env::var("HOME").unwrap_or_default()
+            )
+        });
     PathBuf::from(base)
 }
 
-fn save_release(name: &str, ns: &str, chart: &str, version: &str, manifests: &str) -> HelmResult<()> {
+fn save_release(
+    name: &str,
+    ns: &str,
+    chart: &str,
+    version: &str,
+    manifests: &str,
+) -> HelmResult<()> {
     let dir = release_dir();
     std::fs::create_dir_all(&dir).map_err(|e| HelmError(e.to_string()))?;
     let header = format!("#name:{name}\n#namespace:{ns}\n#chart:{chart}\n#version:{version}\n");
-    std::fs::write(dir.join(format!("{name}.release")), format!("{header}{manifests}"))
-        .map_err(|e| HelmError(e.to_string()))?;
+    std::fs::write(
+        dir.join(format!("{name}.release")),
+        format!("{header}{manifests}"),
+    )
+    .map_err(|e| HelmError(e.to_string()))?;
     Ok(())
 }
 
 fn load_release(name: &str) -> HelmResult<ReleaseRecord> {
     let p = release_dir().join(format!("{name}.release"));
-    let content = std::fs::read_to_string(&p).map_err(|_| HelmError(format!("release: not found: {name}")))?;
+    let content = std::fs::read_to_string(&p)
+        .map_err(|_| HelmError(format!("release: not found: {name}")))?;
     Ok(parse_release(name, &content))
 }
 
@@ -335,7 +403,13 @@ fn parse_release(name: &str, content: &str) -> ReleaseRecord {
             body.push('\n');
         }
     }
-    ReleaseRecord { name: name.to_string(), namespace: ns, chart, version, manifests: body }
+    ReleaseRecord {
+        name: name.to_string(),
+        namespace: ns,
+        chart,
+        version,
+        manifests: body,
+    }
 }
 
 fn delete_release(name: &str) {
@@ -346,9 +420,18 @@ fn list_releases() -> Vec<ReleaseRecord> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(release_dir()) {
         for e in rd.flatten() {
-            if e.path().extension().map(|x| x == "release").unwrap_or(false) {
+            if e.path()
+                .extension()
+                .map(|x| x == "release")
+                .unwrap_or(false)
+            {
                 if let Ok(content) = std::fs::read_to_string(e.path()) {
-                    let name = e.path().file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                    let name = e
+                        .path()
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
                     out.push(parse_release(&name, &content));
                 }
             }
@@ -360,7 +443,8 @@ fn list_releases() -> Vec<ReleaseRecord> {
 // ---------- helpers ----------
 
 fn yaml_to_json(s: &str) -> HelmResult<Value> {
-    let v: serde_yaml::Value = serde_yaml::from_str(s).map_err(|e| HelmError(format!("YAML: {e}")))?;
+    let v: serde_yaml::Value =
+        serde_yaml::from_str(s).map_err(|e| HelmError(format!("YAML: {e}")))?;
     serde_json::to_value(&v).map_err(|e| HelmError(e.to_string()))
 }
 
@@ -377,7 +461,9 @@ fn slim_kube_now() -> String {
 pub fn read_values_file(path: &str) -> HelmResult<String> {
     if path == "-" {
         let mut s = String::new();
-        std::io::stdin().read_to_string(&mut s).map_err(|e| HelmError(e.to_string()))?;
+        std::io::stdin()
+            .read_to_string(&mut s)
+            .map_err(|e| HelmError(e.to_string()))?;
         Ok(s)
     } else {
         std::fs::read_to_string(path).map_err(|e| HelmError(format!("{path}: {e}")))
@@ -405,8 +491,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("slimhelm-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("templates")).unwrap();
-        std::fs::write(dir.join("Chart.yaml"), "name: web\nversion: 1.0.0\nappVersion: \"2\"\n").unwrap();
-        std::fs::write(dir.join("values.yaml"), "replicas: 2\nimage: nginx:alpine\n").unwrap();
+        std::fs::write(
+            dir.join("Chart.yaml"),
+            "name: web\nversion: 1.0.0\nappVersion: \"2\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("values.yaml"),
+            "replicas: 2\nimage: nginx:alpine\n",
+        )
+        .unwrap();
         std::fs::write(
             dir.join("templates/_helpers.tpl"),
             "{{- define \"web.fullname\" -}}\n{{ .Release.Name }}-web\n{{- end -}}\n",
@@ -419,7 +513,11 @@ mod tests {
         .unwrap();
         let chart = Chart::load(&dir).unwrap();
         let values = build_values(&chart, &[], &["replicas=5".into()]).unwrap();
-        let opts = RenderOptions { release: "rel".into(), namespace: "default".into(), is_upgrade: false };
+        let opts = RenderOptions {
+            release: "rel".into(),
+            namespace: "default".into(),
+            is_upgrade: false,
+        };
         let out = render(&chart, &values, &opts).unwrap();
         assert!(out.contains("name: rel-web"), "got:\n{out}");
         assert!(out.contains("replicas: 5"), "got:\n{out}");

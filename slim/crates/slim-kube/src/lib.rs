@@ -92,7 +92,11 @@ impl<'a> Facade<'a> {
     pub fn new(client: &'a Client, namespace: &str) -> Self {
         Facade {
             client,
-            namespace: if namespace.is_empty() { "default".into() } else { namespace.into() },
+            namespace: if namespace.is_empty() {
+                "default".into()
+            } else {
+                namespace.into()
+            },
             disco: RefCell::new(None),
         }
     }
@@ -105,8 +109,18 @@ impl<'a> Facade<'a> {
         }
         let mut out = self.fetch_reslist("/api/v1").unwrap_or_default();
         if let Ok(groups) = self.client.json::<Value>("GET", "/apis", None) {
-            for g in groups.get("groups").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
-                for gv in g.get("versions").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+            for g in groups
+                .get("groups")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+            {
+                for gv in g
+                    .get("versions")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                {
                     if let Some(gvs) = gv.get("groupVersion").and_then(|v| v.as_str()) {
                         if let Ok(rs) = self.fetch_reslist(&format!("/apis/{gvs}")) {
                             out.extend(rs);
@@ -116,7 +130,9 @@ impl<'a> Facade<'a> {
             }
         }
         if out.is_empty() {
-            return Err(ke("could not reach the slim apiserver (is the engine running?)"));
+            return Err(ke(
+                "could not reach the slim apiserver (is the engine running?)",
+            ));
         }
         *self.disco.borrow_mut() = Some(out.clone());
         Ok(out)
@@ -130,7 +146,12 @@ impl<'a> Facade<'a> {
             None => (String::new(), gv.to_string()),
         };
         let mut out = Vec::new();
-        for r in v.get("resources").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+        for r in v
+            .get("resources")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
             let name = r.get("name").and_then(|x| x.as_str()).unwrap_or("");
             if name.is_empty() || name.contains('/') {
                 continue; // skip subresources (pods/log, etc.)
@@ -139,13 +160,28 @@ impl<'a> Facade<'a> {
                 group: group.clone(),
                 version: version.clone(),
                 resource: name.to_string(),
-                singular: r.get("singularName").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                kind: r.get("kind").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                namespaced: r.get("namespaced").and_then(|x| x.as_bool()).unwrap_or(true),
+                singular: r
+                    .get("singularName")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                kind: r
+                    .get("kind")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                namespaced: r
+                    .get("namespaced")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(true),
                 short_names: r
                     .get("shortNames")
                     .and_then(|x| x.as_array())
-                    .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|s| s.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default(),
             });
         }
@@ -174,7 +210,9 @@ impl<'a> Facade<'a> {
                 return Ok(r.clone());
             }
         }
-        Err(ke(format!("the server doesn't have a resource type \"{kind}\"")))
+        Err(ke(format!(
+            "the server doesn't have a resource type \"{kind}\""
+        )))
     }
 
     fn obj_ns(&self, d: &Value, res: &Res) -> String {
@@ -214,7 +252,9 @@ impl<'a> Facade<'a> {
                 Ok(()) => {}
                 Err(KubeError(m)) if m.starts_with("UNSUPPORTED:") => {
                     let kn = m.trim_start_matches("UNSUPPORTED:").to_string();
-                    out(&format!("warning: {kn} — kind unknown to the slim apiserver, skipped\n"));
+                    out(&format!(
+                        "warning: {kn} — kind unknown to the slim apiserver, skipped\n"
+                    ));
                     skipped.push(kn);
                 }
                 Err(e) => return Err(e),
@@ -249,7 +289,8 @@ impl<'a> Facade<'a> {
                 "configured"
             }
             Err(_) => {
-                self.client.json::<Value>("POST", &res.collection_path(&ns), Some(&body))?;
+                self.client
+                    .json::<Value>("POST", &res.collection_path(&ns), Some(&body))?;
                 "created"
             }
         };
@@ -264,9 +305,14 @@ impl<'a> Facade<'a> {
             if kind.is_empty() || name.is_empty() {
                 continue;
             }
-            let Ok(res) = self.resolve(&kind) else { continue };
+            let Ok(res) = self.resolve(&kind) else {
+                continue;
+            };
             let ns = self.obj_ns(&d, &res);
-            match self.client.json::<Value>("DELETE", &res.object_path(&ns, &name), None) {
+            match self
+                .client
+                .json::<Value>("DELETE", &res.object_path(&ns, &name), None)
+            {
                 Ok(_) => out(&format!("{}/{} deleted\n", res.display(), name)),
                 Err(e) if e.status == 404 => {}
                 Err(e) => return Err(e.into()),
@@ -279,22 +325,34 @@ impl<'a> Facade<'a> {
 
     pub fn get(&self, kind: &str, name: Option<&str>) -> KubeResult<Vec<KubeObject>> {
         let res = self.resolve(kind)?;
-        let ns = if res.namespaced { self.namespace.clone() } else { String::new() };
+        let ns = if res.namespaced {
+            self.namespace.clone()
+        } else {
+            String::new()
+        };
         let mut rows = Vec::new();
         match name {
             Some(n) => {
-                let obj: Value = self.client.json("GET", &res.object_path(&ns, n), None).map_err(|e| {
-                    if e.status == 404 {
-                        ke(format!("{} \"{n}\" not found", res.display()))
-                    } else {
-                        e.into()
-                    }
-                })?;
+                let obj: Value = self
+                    .client
+                    .json("GET", &res.object_path(&ns, n), None)
+                    .map_err(|e| {
+                        if e.status == 404 {
+                            ke(format!("{} \"{n}\" not found", res.display()))
+                        } else {
+                            e.into()
+                        }
+                    })?;
                 rows.push(obj_to_kube(&res, &obj));
             }
             None => {
                 let list: Value = self.client.json("GET", &res.collection_path(&ns), None)?;
-                for item in list.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+                for item in list
+                    .get("items")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                {
                     rows.push(obj_to_kube(&res, &item));
                 }
             }
@@ -304,14 +362,20 @@ impl<'a> Facade<'a> {
 
     pub fn delete(&self, kind: &str, name: &str, out: &mut dyn FnMut(&str)) -> KubeResult<()> {
         let res = self.resolve(kind)?;
-        let ns = if res.namespaced { self.namespace.clone() } else { String::new() };
-        self.client.json::<Value>("DELETE", &res.object_path(&ns, name), None).map_err(|e| {
-            if e.status == 404 {
-                ke(format!("{} \"{name}\" not found", res.display()))
-            } else {
-                e.into()
-            }
-        })?;
+        let ns = if res.namespaced {
+            self.namespace.clone()
+        } else {
+            String::new()
+        };
+        self.client
+            .json::<Value>("DELETE", &res.object_path(&ns, name), None)
+            .map_err(|e| {
+                if e.status == 404 {
+                    ke(format!("{} \"{name}\" not found", res.display()))
+                } else {
+                    e.into()
+                }
+            })?;
         out(&format!("{}/{} deleted\n", res.display(), name));
         Ok(())
     }
@@ -320,7 +384,13 @@ impl<'a> Facade<'a> {
 
     /// Scale a workload via the `/scale` subresource. `kind` defaults to
     /// deployments when empty (kubectl `scale deployment/x`).
-    pub fn scale(&self, kind: &str, name: &str, replicas: i64, out: &mut dyn FnMut(&str)) -> KubeResult<()> {
+    pub fn scale(
+        &self,
+        kind: &str,
+        name: &str,
+        replicas: i64,
+        out: &mut dyn FnMut(&str),
+    ) -> KubeResult<()> {
         let res = self.resolve(if kind.is_empty() { "deployments" } else { kind })?;
         let ns = self.namespace.clone();
         let scale_path = format!("{}/scale", res.object_path(&ns, name));
@@ -330,13 +400,15 @@ impl<'a> Facade<'a> {
             "metadata": {"name": name, "namespace": ns},
             "spec": {"replicas": replicas},
         });
-        self.client.json::<Value>("PUT", &scale_path, Some(&body)).map_err(|e| {
-            if e.status == 404 {
-                ke(format!("{} \"{name}\" not found", res.display()))
-            } else {
-                e.into()
-            }
-        })?;
+        self.client
+            .json::<Value>("PUT", &scale_path, Some(&body))
+            .map_err(|e| {
+                if e.status == 404 {
+                    ke(format!("{} \"{name}\" not found", res.display()))
+                } else {
+                    e.into()
+                }
+            })?;
         out(&format!("{}/{} scaled\n", res.display(), name));
         Ok(())
     }
@@ -349,7 +421,12 @@ impl<'a> Facade<'a> {
         let ns = &self.namespace;
         let exists = |n: &str| {
             self.client
-                .call("GET", &format!("/api/v1/namespaces/{ns}/pods/{n}"), &[], None)
+                .call(
+                    "GET",
+                    &format!("/api/v1/namespaces/{ns}/pods/{n}"),
+                    &[],
+                    None,
+                )
                 .map(|(s, _)| s == 200)
                 .unwrap_or(false)
         };
@@ -363,11 +440,22 @@ impl<'a> Facade<'a> {
         Err(ke(format!("pods \"{name}\" not found")))
     }
 
-    pub fn logs(&self, pod: &str, container: &str, follow: bool, w: &mut dyn Write) -> KubeResult<()> {
+    pub fn logs(
+        &self,
+        pod: &str,
+        container: &str,
+        follow: bool,
+        w: &mut dyn Write,
+    ) -> KubeResult<()> {
         let ns = self.namespace.clone();
         let pod = self.resolve_pod(pod)?;
-        let cq = if container.is_empty() { String::new() } else { format!("&container={container}") };
-        let path = format!("/api/v1/namespaces/{ns}/pods/{pod}/log?follow={follow}&timestamps=false{cq}");
+        let cq = if container.is_empty() {
+            String::new()
+        } else {
+            format!("&container={container}")
+        };
+        let path =
+            format!("/api/v1/namespaces/{ns}/pods/{pod}/log?follow={follow}&timestamps=false{cq}");
         let mut resp = self.client.request("GET", &path, &[], None)?;
         if resp.status == 404 {
             return Err(ke(format!("pods \"{pod}\" not found")));
@@ -381,33 +469,69 @@ impl<'a> Facade<'a> {
 
     /// Exec into a pod through the apiserver's WebSocket exec subresource.
     /// Returns the command's exit code.
-    pub fn exec(&self, pod: &str, container: &str, cmd: &[String], interactive: bool, tty: bool) -> KubeResult<i32> {
+    pub fn exec(
+        &self,
+        pod: &str,
+        container: &str,
+        cmd: &[String],
+        interactive: bool,
+        tty: bool,
+    ) -> KubeResult<i32> {
         let ns = self.namespace.clone();
         let pod = self.resolve_pod(pod)?;
-        ws::exec(self.client, &ns, &pod, container, cmd, tty, interactive).map_err(|e| ke(e.to_string()))
+        ws::exec(self.client, &ns, &pod, container, cmd, tty, interactive)
+            .map_err(|e| ke(e.to_string()))
     }
 }
 
 // ---------- object → table row ----------
 
 fn obj_to_kube(res: &Res, obj: &Value) -> KubeObject {
-    let name = obj.pointer("/metadata/name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let kind = obj.get("kind").and_then(|v| v.as_str()).unwrap_or(&res.kind).to_string();
+    let name = obj
+        .pointer("/metadata/name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let kind = obj
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&res.kind)
+        .to_string();
     let (ready, status, restarts) = summarize(res, obj);
-    KubeObject { kind, name, ready, status, restarts, members: vec![] }
+    KubeObject {
+        kind,
+        name,
+        ready,
+        status,
+        restarts,
+        members: vec![],
+    }
 }
 
 fn summarize(res: &Res, obj: &Value) -> (String, String, i64) {
     match res.resource.as_str() {
         "pods" => {
-            let phase = obj.pointer("/status/phase").and_then(|v| v.as_str()).unwrap_or("Pending").to_string();
+            let phase = obj
+                .pointer("/status/phase")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Pending")
+                .to_string();
             // Prefer real containerStatuses (ready count + restarts); fall back
             // to phase for older/sparse status.
-            match obj.pointer("/status/containerStatuses").and_then(|c| c.as_array()) {
+            match obj
+                .pointer("/status/containerStatuses")
+                .and_then(|c| c.as_array())
+            {
                 Some(arr) if !arr.is_empty() => {
                     let total = arr.len();
-                    let ready = arr.iter().filter(|c| c.get("ready").and_then(|r| r.as_bool()).unwrap_or(false)).count();
-                    let restarts = arr.iter().filter_map(|c| c.get("restartCount").and_then(|r| r.as_i64())).sum();
+                    let ready = arr
+                        .iter()
+                        .filter(|c| c.get("ready").and_then(|r| r.as_bool()).unwrap_or(false))
+                        .count();
+                    let restarts = arr
+                        .iter()
+                        .filter_map(|c| c.get("restartCount").and_then(|r| r.as_i64()))
+                        .sum();
                     (format!("{ready}/{total}"), phase, restarts)
                 }
                 _ => {
@@ -417,7 +541,10 @@ fn summarize(res: &Res, obj: &Value) -> (String, String, i64) {
             }
         }
         "deployments" | "statefulsets" | "replicasets" => {
-            let desired = obj.pointer("/spec/replicas").and_then(|v| v.as_i64()).unwrap_or(1);
+            let desired = obj
+                .pointer("/spec/replicas")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(1);
             let avail = obj
                 .pointer("/status/readyReplicas")
                 .or_else(|| obj.pointer("/status/availableReplicas"))
@@ -426,7 +553,11 @@ fn summarize(res: &Res, obj: &Value) -> (String, String, i64) {
             (format!("{avail}/{desired}"), String::new(), 0)
         }
         _ => {
-            let status = obj.pointer("/status/phase").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let status = obj
+                .pointer("/status/phase")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             (String::new(), status, 0)
         }
     }
@@ -441,7 +572,8 @@ fn parse_docs(yaml: &str) -> KubeResult<Vec<Value>> {
         if t.is_empty() {
             continue;
         }
-        let v: serde_yaml::Value = serde_yaml::from_str(t).map_err(|e| ke(format!("YAML parse error: {e}")))?;
+        let v: serde_yaml::Value =
+            serde_yaml::from_str(t).map_err(|e| ke(format!("YAML parse error: {e}")))?;
         let jv: Value = serde_json::to_value(&v).map_err(|e| ke(e.to_string()))?;
         if !jv.is_null() {
             out.push(jv);
@@ -451,17 +583,26 @@ fn parse_docs(yaml: &str) -> KubeResult<Vec<Value>> {
 }
 
 fn kind_of(d: &Value) -> String {
-    d.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string()
+    d.get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 fn name_of(d: &Value) -> String {
-    d.pointer("/metadata/name").and_then(|v| v.as_str()).unwrap_or("").to_string()
+    d.pointer("/metadata/name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Get (creating if absent) the object's `/metadata` map for in-place edits.
 fn ensure_meta(obj: &mut Value) -> &mut serde_json::Map<String, Value> {
     let map = obj.as_object_mut().expect("manifest must be a JSON object");
     map.entry("metadata").or_insert_with(|| json!({}));
-    map.get_mut("metadata").unwrap().as_object_mut().expect("metadata must be an object")
+    map.get_mut("metadata")
+        .unwrap()
+        .as_object_mut()
+        .expect("metadata must be an object")
 }
 
 #[cfg(test)]
@@ -489,8 +630,14 @@ mod tests {
             namespaced: true,
             short_names: vec!["deploy".into()],
         };
-        assert_eq!(dep.collection_path("default"), "/apis/apps/v1/namespaces/default/deployments");
-        assert_eq!(dep.object_path("default", "web"), "/apis/apps/v1/namespaces/default/deployments/web");
+        assert_eq!(
+            dep.collection_path("default"),
+            "/apis/apps/v1/namespaces/default/deployments"
+        );
+        assert_eq!(
+            dep.object_path("default", "web"),
+            "/apis/apps/v1/namespaces/default/deployments/web"
+        );
         let ns = Res {
             group: String::new(),
             version: "v1".into(),
@@ -501,14 +648,20 @@ mod tests {
             short_names: vec!["ns".into()],
         };
         assert_eq!(ns.collection_path(""), "/api/v1/namespaces");
-        assert_eq!(ns.object_path("", "kube-system"), "/api/v1/namespaces/kube-system");
+        assert_eq!(
+            ns.object_path("", "kube-system"),
+            "/api/v1/namespaces/kube-system"
+        );
     }
 
     #[test]
     fn ensure_meta_creates() {
         let mut o = json!({"kind": "Pod"});
         ensure_meta(&mut o).insert("resourceVersion".into(), json!("7"));
-        assert_eq!(o.pointer("/metadata/resourceVersion").unwrap().as_str(), Some("7"));
+        assert_eq!(
+            o.pointer("/metadata/resourceVersion").unwrap().as_str(),
+            Some("7")
+        );
     }
 
     #[test]

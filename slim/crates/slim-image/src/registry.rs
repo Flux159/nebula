@@ -98,7 +98,11 @@ impl RegistryClient {
                     }
                     return Err(err(format!(
                         "registry returned {code} for {url}: {}",
-                        resp.into_string().unwrap_or_default().chars().take(300).collect::<String>()
+                        resp.into_string()
+                            .unwrap_or_default()
+                            .chars()
+                            .take(300)
+                            .collect::<String>()
                     )));
                 }
                 Err(e) => return Err(err(format!("request to {url} failed: {e}"))),
@@ -164,9 +168,14 @@ impl RegistryClient {
     /// Resolve a reference to the arch-specific manifest.
     /// Returns (manifest, manifest digest, raw manifest bytes).
     pub fn manifest(&self, r: &Reference, arch: &str) -> Result<(Manifest, String, Vec<u8>)> {
-        let tag_or_digest = if !r.digest.is_empty() { r.digest.clone() } else { r.tag.clone() };
+        let tag_or_digest = if !r.digest.is_empty() {
+            r.digest.clone()
+        } else {
+            r.tag.clone()
+        };
         let url = format!("{}/{}/manifests/{}", self.base(r), r.repo, tag_or_digest);
-        let accept = format!("{MT_MANIFEST_LIST_V2}, {MT_MANIFEST_V2}, {MT_OCI_INDEX}, {MT_OCI_MANIFEST}");
+        let accept =
+            format!("{MT_MANIFEST_LIST_V2}, {MT_MANIFEST_V2}, {MT_OCI_INDEX}, {MT_OCI_MANIFEST}");
         let (status, mut body, ctype) = self.get(r, &url, &accept)?;
         if status == 404 {
             return Err(err(format!(
@@ -178,7 +187,8 @@ impl RegistryClient {
             return Err(err(format!("manifest fetch returned {status}")));
         }
         let mut raw = Vec::new();
-        body.read_to_end(&mut raw).map_err(|e| err(format!("manifest read: {e}")))?;
+        body.read_to_end(&mut raw)
+            .map_err(|e| err(format!("manifest read: {e}")))?;
         let digest = format!("sha256:{}", hex::encode(crate::sha256(&raw)));
         let ctype = ctype.unwrap_or_default();
 
@@ -225,18 +235,23 @@ impl RegistryClient {
         let mut buf = [0u8; 64 * 1024];
         let mut total = 0u64;
         loop {
-            let n = body.read(&mut buf).map_err(|e| err(format!("blob read: {e}")))?;
+            let n = body
+                .read(&mut buf)
+                .map_err(|e| err(format!("blob read: {e}")))?;
             if n == 0 {
                 break;
             }
             hasher.update(&buf[..n]);
-            sink.write_all(&buf[..n]).map_err(|e| err(format!("blob write: {e}")))?;
+            sink.write_all(&buf[..n])
+                .map_err(|e| err(format!("blob write: {e}")))?;
             total += n as u64;
             progress(total);
         }
         let got = format!("sha256:{}", hasher.finish_hex());
         if got != digest {
-            return Err(err(format!("blob digest mismatch: want {digest} got {got}")));
+            return Err(err(format!(
+                "blob digest mismatch: want {digest} got {got}"
+            )));
         }
         Ok(total)
     }
@@ -249,26 +264,34 @@ fn is_index(raw: &[u8]) -> bool {
 }
 
 fn pick_platform(index: &ManifestIndex, arch: &str) -> Option<Descriptor> {
-    let matches = |p: &Platform, a: &str| {
-        p.os == "linux" && (p.architecture == a)
-    };
+    let matches = |p: &Platform, a: &str| p.os == "linux" && (p.architecture == a);
     // Prefer exact arch; fall back to amd64 (Rosetta exists in the full
     // engine but NOT under slimd — keep the fallback so `pull` works, the
     // run will fail with a clear exec format error).
     index
         .manifests
         .iter()
-        .find(|m| m.platform.as_ref().map(|p| matches(p, arch)).unwrap_or(false))
+        .find(|m| {
+            m.platform
+                .as_ref()
+                .map(|p| matches(p, arch))
+                .unwrap_or(false)
+        })
         .or_else(|| {
             index.manifests.iter().find(|m| {
-                m.platform.as_ref().map(|p| matches(p, "amd64")).unwrap_or(false)
+                m.platform
+                    .as_ref()
+                    .map(|p| matches(p, "amd64"))
+                    .unwrap_or(false)
             })
         })
         .cloned()
 }
 
 fn parse_challenge(s: &str) -> Vec<(String, String)> {
-    let s = s.trim_start_matches("Bearer ").trim_start_matches("bearer ");
+    let s = s
+        .trim_start_matches("Bearer ")
+        .trim_start_matches("bearer ");
     let mut out = Vec::new();
     for part in s.split(',') {
         if let Some((k, v)) = part.split_once('=') {
@@ -279,7 +302,10 @@ fn parse_challenge(s: &str) -> Vec<(String, String)> {
 }
 
 fn basic_header(a: &BasicAuth) -> String {
-    format!("Basic {}", b64(format!("{}:{}", a.username, a.password).as_bytes()))
+    format!(
+        "Basic {}",
+        b64(format!("{}:{}", a.username, a.password).as_bytes())
+    )
 }
 
 fn urlenc(s: &str) -> String {
@@ -300,12 +326,24 @@ pub fn b64(data: &[u8]) -> String {
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }

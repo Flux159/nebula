@@ -208,7 +208,11 @@ fn build_plan(spec: &ContainerSpec) -> io::Result<ChildPlan> {
             flags: TMPFS_FLAGS | libc::MS_NODEV,
             data: cstr(&format!(
                 "mode=1777,size={}",
-                if spec.shm_size > 0 { spec.shm_size } else { 64 * 1024 * 1024 }
+                if spec.shm_size > 0 {
+                    spec.shm_size
+                } else {
+                    64 * 1024 * 1024
+                }
             )),
         },
         MountStep {
@@ -244,19 +248,58 @@ fn build_plan(spec: &ContainerSpec) -> io::Result<ChildPlan> {
 
     let makedev = |maj: u32, min: u32| libc::makedev(maj, min);
     let dev_nodes = vec![
-        DevNode { path: cstr("/dev/null"), mode: 0o666, dev: makedev(1, 3) },
-        DevNode { path: cstr("/dev/zero"), mode: 0o666, dev: makedev(1, 5) },
-        DevNode { path: cstr("/dev/full"), mode: 0o666, dev: makedev(1, 7) },
-        DevNode { path: cstr("/dev/random"), mode: 0o666, dev: makedev(1, 8) },
-        DevNode { path: cstr("/dev/urandom"), mode: 0o666, dev: makedev(1, 9) },
-        DevNode { path: cstr("/dev/tty"), mode: 0o666, dev: makedev(5, 0) },
+        DevNode {
+            path: cstr("/dev/null"),
+            mode: 0o666,
+            dev: makedev(1, 3),
+        },
+        DevNode {
+            path: cstr("/dev/zero"),
+            mode: 0o666,
+            dev: makedev(1, 5),
+        },
+        DevNode {
+            path: cstr("/dev/full"),
+            mode: 0o666,
+            dev: makedev(1, 7),
+        },
+        DevNode {
+            path: cstr("/dev/random"),
+            mode: 0o666,
+            dev: makedev(1, 8),
+        },
+        DevNode {
+            path: cstr("/dev/urandom"),
+            mode: 0o666,
+            dev: makedev(1, 9),
+        },
+        DevNode {
+            path: cstr("/dev/tty"),
+            mode: 0o666,
+            dev: makedev(5, 0),
+        },
     ];
     let symlinks = vec![
-        SymlinkStep { target: cstr("/proc/self/fd"), link: cstr("/dev/fd") },
-        SymlinkStep { target: cstr("/proc/self/fd/0"), link: cstr("/dev/stdin") },
-        SymlinkStep { target: cstr("/proc/self/fd/1"), link: cstr("/dev/stdout") },
-        SymlinkStep { target: cstr("/proc/self/fd/2"), link: cstr("/dev/stderr") },
-        SymlinkStep { target: cstr("pts/ptmx"), link: cstr("/dev/ptmx") },
+        SymlinkStep {
+            target: cstr("/proc/self/fd"),
+            link: cstr("/dev/fd"),
+        },
+        SymlinkStep {
+            target: cstr("/proc/self/fd/0"),
+            link: cstr("/dev/stdin"),
+        },
+        SymlinkStep {
+            target: cstr("/proc/self/fd/1"),
+            link: cstr("/dev/stdout"),
+        },
+        SymlinkStep {
+            target: cstr("/proc/self/fd/2"),
+            link: cstr("/dev/stderr"),
+        },
+        SymlinkStep {
+            target: cstr("pts/ptmx"),
+            link: cstr("/dev/ptmx"),
+        },
     ];
 
     // User resolution against the image's passwd/group — done HERE so the
@@ -264,7 +307,11 @@ fn build_plan(spec: &ContainerSpec) -> io::Result<ChildPlan> {
     let (uid, gid, sgids, home) = resolve_user(root, &spec.user)?;
 
     // Working directory: docker creates it if missing.
-    let cwd = if spec.cwd.is_empty() { "/".to_string() } else { spec.cwd.clone() };
+    let cwd = if spec.cwd.is_empty() {
+        "/".to_string()
+    } else {
+        spec.cwd.clone()
+    };
     let _ = std::fs::create_dir_all(root.join(cwd.trim_start_matches('/')));
 
     // Environment: image/config env + required defaults.
@@ -274,7 +321,14 @@ fn build_plan(spec: &ContainerSpec) -> io::Result<ChildPlan> {
         env.push("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into());
     }
     if !has("HOME", &env) {
-        env.push(format!("HOME={}", if home.is_empty() { "/root".into() } else { home }));
+        env.push(format!(
+            "HOME={}",
+            if home.is_empty() {
+                "/root".into()
+            } else {
+                home
+            }
+        ));
     }
     if !has("HOSTNAME", &env) && !spec.hostname.is_empty() {
         env.push(format!("HOSTNAME={}", spec.hostname));
@@ -349,7 +403,9 @@ fn resolve_user(root: &Path, user: &str) -> io::Result<(u32, u32, Vec<u32>, Stri
         gid = g.parse().ok().or_else(|| {
             group.lines().find_map(|line| {
                 let f: Vec<&str> = line.split(':').collect();
-                (f.len() >= 3 && f[0] == g).then(|| f[2].parse().ok()).flatten()
+                (f.len() >= 3 && f[0] == g)
+                    .then(|| f[2].parse().ok())
+                    .flatten()
             })
         });
         if gid.is_none() {
@@ -529,8 +585,11 @@ unsafe fn child_enter_rootfs(plan: &ChildPlan, err_w: RawFd) {
     }
     child_try!(
         err_w,
-        libc::syscall(libc::SYS_pivot_root, plan.rootfs.as_ptr(), plan.pivot_old.as_ptr())
-            as libc::c_int,
+        libc::syscall(
+            libc::SYS_pivot_root,
+            plan.rootfs.as_ptr(),
+            plan.pivot_old.as_ptr()
+        ) as libc::c_int,
         b"pivot_root failed"
     );
     child_try!(err_w, libc::chdir(c"/".as_ptr()), b"chdir / failed");
@@ -558,7 +617,13 @@ unsafe fn child_enter_rootfs(plan: &ChildPlan, err_w: RawFd) {
             if fd >= 0 {
                 libc::close(fd);
             }
-            let _ = libc::mount(d.path.as_ptr(), d.path.as_ptr(), std::ptr::null(), BIND, std::ptr::null());
+            let _ = libc::mount(
+                d.path.as_ptr(),
+                d.path.as_ptr(),
+                std::ptr::null(),
+                BIND,
+                std::ptr::null(),
+            );
         }
     }
     for s in &plan.symlinks {
@@ -576,7 +641,11 @@ unsafe fn child_enter_rootfs(plan: &ChildPlan, err_w: RawFd) {
 }
 
 unsafe fn child_exec(plan: &ChildPlan, err_w: RawFd) -> ! {
-    child_try!(err_w, libc::chdir(plan.cwd.as_ptr()), b"chdir to workdir failed");
+    child_try!(
+        err_w,
+        libc::chdir(plan.cwd.as_ptr()),
+        b"chdir to workdir failed"
+    );
     child_set_ids(plan, err_w);
     let mut argv: Vec<*const libc::c_char> = plan.argv.iter().map(|a| a.as_ptr()).collect();
     argv.push(std::ptr::null()); // pre-sized Vec: single alloc, tolerable
@@ -614,7 +683,11 @@ unsafe fn exec_with_path(
         buf[dir.len()] = b'/';
         buf[dir.len() + 1..dir.len() + 1 + a0.len()].copy_from_slice(a0);
         buf[dir.len() + 1 + a0.len()] = 0;
-        libc::execve(buf.as_ptr() as *const libc::c_char, argv.as_ptr(), envp.as_ptr());
+        libc::execve(
+            buf.as_ptr() as *const libc::c_char,
+            argv.as_ptr(),
+            envp.as_ptr(),
+        );
     }
 }
 
@@ -649,14 +722,25 @@ pub fn start_container(spec: &ContainerSpec) -> io::Result<Handle> {
             child_try!(
                 err_w,
                 libc::unshare(
-                    libc::CLONE_NEWNS | libc::CLONE_NEWPID | libc::CLONE_NEWUTS | libc::CLONE_NEWIPC
+                    libc::CLONE_NEWNS
+                        | libc::CLONE_NEWPID
+                        | libc::CLONE_NEWUTS
+                        | libc::CLONE_NEWIPC
                 ),
                 b"unshare failed (kernel without namespace support?)"
             );
             if netns_fd >= 0 {
-                child_try!(err_w, libc::setns(netns_fd, libc::CLONE_NEWNET), b"setns netns failed");
+                child_try!(
+                    err_w,
+                    libc::setns(netns_fd, libc::CLONE_NEWNET),
+                    b"setns netns failed"
+                );
             } else {
-                child_try!(err_w, libc::unshare(libc::CLONE_NEWNET), b"unshare netns failed");
+                child_try!(
+                    err_w,
+                    libc::unshare(libc::CLONE_NEWNET),
+                    b"unshare netns failed"
+                );
             }
             let child = libc::fork();
             if child < 0 {
@@ -666,10 +750,8 @@ pub fn start_container(spec: &ContainerSpec) -> io::Result<Handle> {
                 // ---------- grandchild: PID 1 of the container ----------
                 child_stdio(&stdio.child, spec.tty, err_w);
                 if !plan.hostname.as_bytes().is_empty() {
-                    let _ = libc::sethostname(
-                        plan.hostname.as_ptr(),
-                        plan.hostname.as_bytes().len(),
-                    );
+                    let _ =
+                        libc::sethostname(plan.hostname.as_ptr(), plan.hostname.as_bytes().len());
                 }
                 child_enter_rootfs(&plan, err_w);
                 // Wait for the parent to finish cgroup placement.
@@ -701,7 +783,10 @@ pub fn start_container(spec: &ContainerSpec) -> io::Result<Handle> {
     let n = pid_file.read(&mut pid_buf).unwrap_or(0);
     if n < 4 {
         // Intermediate died before the second fork: collect the error.
-        return Err(read_child_error(err_r, "container setup failed before start"));
+        return Err(read_child_error(
+            err_r,
+            "container setup failed before start",
+        ));
     }
     let pid = i32::from_ne_bytes(pid_buf);
 
@@ -763,13 +848,23 @@ pub fn exec_in_container_cg(
         env.push("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into());
     }
     if !has("HOME", &env) {
-        env.push(format!("HOME={}", if home.is_empty() { "/root".into() } else { home }));
+        env.push(format!(
+            "HOME={}",
+            if home.is_empty() {
+                "/root".into()
+            } else {
+                home
+            }
+        ));
     }
     if spec.tty && !has("TERM", &env) {
         env.push("TERM=xterm".into());
     }
     if spec.argv.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "exec: empty command"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "exec: empty command",
+        ));
     }
 
     let plan = ChildPlan {
@@ -799,7 +894,9 @@ pub fn exec_in_container_cg(
             for fd in &ns_fds {
                 unsafe { libc::close(*fd) };
             }
-            return Err(errno_err("open container namespace (container not running?)"));
+            return Err(errno_err(
+                "open container namespace (container not running?)",
+            ));
         }
         ns_fds.push(fd);
     }
@@ -912,7 +1009,10 @@ pub fn wait_pid(pid: i32) -> io::Result<ExitStatus> {
     } else {
         255
     };
-    Ok(ExitStatus { code, oom_killed: false })
+    Ok(ExitStatus {
+        code,
+        oom_killed: false,
+    })
 }
 
 pub fn read_oom(id: &str) -> bool {
@@ -938,7 +1038,10 @@ pub fn read_stats(id: &str, _pid: i32) -> CgroupStats {
     let cpu_usage = std::fs::read_to_string(format!("{base}/cpu.stat"))
         .unwrap_or_default()
         .lines()
-        .find_map(|l| l.strip_prefix("usage_usec ").and_then(|v| v.trim().parse().ok()))
+        .find_map(|l| {
+            l.strip_prefix("usage_usec ")
+                .and_then(|v| v.trim().parse().ok())
+        })
         .unwrap_or(0);
     let mem_max = std::fs::read_to_string(format!("{base}/memory.max")).unwrap_or_default();
     CgroupStats {
@@ -986,7 +1089,10 @@ fn cgroup_setup(id: &str, spec: &ContainerSpec, pid: i32) {
     // All best-effort: tier-2 (nested) runs may not own the cgroup tree.
     let dir = format!("{CGROUP_ROOT}/{id}");
     let _ = std::fs::create_dir_all(&dir);
-    for ctl in ["/sys/fs/cgroup/cgroup.subtree_control", &format!("{CGROUP_ROOT}/cgroup.subtree_control")] {
+    for ctl in [
+        "/sys/fs/cgroup/cgroup.subtree_control",
+        &format!("{CGROUP_ROOT}/cgroup.subtree_control"),
+    ] {
         let _ = std::fs::write(ctl, "+memory +pids +cpu");
     }
     if spec.memory > 0 {
@@ -1007,7 +1113,10 @@ fn cgroup_setup(id: &str, spec: &ContainerSpec, pid: i32) {
     }
     if spec.cpu_shares > 1 {
         let weight = 1 + ((spec.cpu_shares - 2) * 9999) / 262142;
-        let _ = std::fs::write(format!("{dir}/cpu.weight"), weight.clamp(1, 10000).to_string());
+        let _ = std::fs::write(
+            format!("{dir}/cpu.weight"),
+            weight.clamp(1, 10000).to_string(),
+        );
     }
     if spec.pids_limit > 0 {
         let _ = std::fs::write(format!("{dir}/pids.max"), spec.pids_limit.to_string());
@@ -1028,7 +1137,11 @@ mod tests {
             "root:x:0:0:root:/root:/bin/sh\nguest:x:405:100:guest:/dev/null:/sbin/nologin\n",
         )
         .unwrap();
-        std::fs::write(dir.join("etc/group"), "wheel:x:10:root,guest\nusers:x:100:\n").unwrap();
+        std::fs::write(
+            dir.join("etc/group"),
+            "wheel:x:10:root,guest\nusers:x:100:\n",
+        )
+        .unwrap();
         let (uid, gid, sgids, _) = resolve_user(&dir, "guest").unwrap();
         assert_eq!((uid, gid), (405, 100));
         assert_eq!(sgids, vec![10]);

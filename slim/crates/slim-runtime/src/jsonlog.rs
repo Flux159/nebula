@@ -58,7 +58,11 @@ pub fn rfc3339(secs: i64, nanos: u32) -> String {
 pub fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
     let days = secs.div_euclid(86400);
     let rem = secs.rem_euclid(86400);
-    let (h, mi, s) = ((rem / 3600) as u32, ((rem % 3600) / 60) as u32, (rem % 60) as u32);
+    let (h, mi, s) = (
+        (rem / 3600) as u32,
+        ((rem % 3600) / 60) as u32,
+        (rem % 60) as u32,
+    );
     let z = days + 719468;
     let era = z.div_euclid(146097);
     let doe = z.rem_euclid(146097);
@@ -173,8 +177,14 @@ mod tests {
         // 2026-06-10 00:00:00 UTC = 1781049600
         let (y, m, d, h, _, _) = civil_from_unix(1_781_049_600);
         assert_eq!((y, m, d, h), (2026, 6, 10, 0));
-        assert_eq!(parse_rfc3339("2026-06-10T00:00:00.000000000Z"), Some(1_781_049_600));
-        assert_eq!(parse_rfc3339(&rfc3339(1_781_049_600, 0)), Some(1_781_049_600));
+        assert_eq!(
+            parse_rfc3339("2026-06-10T00:00:00.000000000Z"),
+            Some(1_781_049_600)
+        );
+        assert_eq!(
+            parse_rfc3339(&rfc3339(1_781_049_600, 0)),
+            Some(1_781_049_600)
+        );
     }
 
     #[test]

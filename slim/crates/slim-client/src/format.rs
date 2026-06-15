@@ -17,7 +17,11 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
     out.push('\n');
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
-            out.push_str(&pad(cell, widths.get(i).copied().unwrap_or(0), i + 1 == row.len()));
+            out.push_str(&pad(
+                cell,
+                widths.get(i).copied().unwrap_or(0),
+                i + 1 == row.len(),
+            ));
         }
         out.push('\n');
     }

@@ -129,13 +129,25 @@ impl Client {
     }
 
     pub fn discover() -> Client {
-        Client { endpoint: discover_endpoint(&["DOCKER_HOST", "SLIM_SOCKET"], "docker.sock", "/var/run/docker.sock") }
+        Client {
+            endpoint: discover_endpoint(
+                &["DOCKER_HOST", "SLIM_SOCKET"],
+                "docker.sock",
+                "/var/run/docker.sock",
+            ),
+        }
     }
 
     /// The slim apiserver-lite endpoint (kubectl-slim/helm-slim). slimd serves it
     /// next to docker.sock; nebula's proxy mirrors it on the host.
     pub fn discover_kube() -> Client {
-        Client { endpoint: discover_endpoint(&["SLIM_KUBE_SOCKET", "SLIM_KUBE_HOST"], "slim-kube.sock", "/var/run/slim-kube.sock") }
+        Client {
+            endpoint: discover_endpoint(
+                &["SLIM_KUBE_SOCKET", "SLIM_KUBE_HOST"],
+                "slim-kube.sock",
+                "/var/run/slim-kube.sock",
+            ),
+        }
     }
 
     fn connect(&self) -> io::Result<Stream> {
@@ -150,7 +162,13 @@ impl Client {
     /// Public connect for duplex clients (e.g., the kube exec WebSocket).
     pub fn connect_stream(&self) -> io::Result<Stream> {
         self.connect().map_err(|e| {
-            io::Error::new(e.kind(), format!("Cannot connect to the slim engine at {}: {e}\nIs the engine running?", self.endpoint))
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "Cannot connect to the slim engine at {}: {e}\nIs the engine running?",
+                    self.endpoint
+                ),
+            )
         })
     }
 
@@ -200,17 +218,24 @@ impl Client {
             }
         }
         let body_len = if headers.iter().any(|(k, v)| {
-            k.eq_ignore_ascii_case("transfer-encoding") && v.to_ascii_lowercase().contains("chunked")
+            k.eq_ignore_ascii_case("transfer-encoding")
+                && v.to_ascii_lowercase().contains("chunked")
         }) {
             BodyLen::Chunked
-        } else if let Some((_, v)) =
-            headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        } else if let Some((_, v)) = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
         {
             BodyLen::Len(v.parse().unwrap_or(0))
         } else {
             BodyLen::Eof
         };
-        Ok(Response { status, headers, stream: reader, body_len })
+        Ok(Response {
+            status,
+            headers,
+            stream: reader,
+            body_len,
+        })
     }
 
     /// Convenience: request and return the full decoded body bytes.
@@ -235,8 +260,16 @@ impl Client {
     ) -> Result<T, ApiError> {
         let raw = body.map(|b| serde_json::to_vec(b).unwrap_or_default());
         let (status, bytes) = self
-            .call(method, path, &[("Content-Type", "application/json")], raw.as_deref())
-            .map_err(|e| ApiError { status: 0, message: e.to_string() })?;
+            .call(
+                method,
+                path,
+                &[("Content-Type", "application/json")],
+                raw.as_deref(),
+            )
+            .map_err(|e| ApiError {
+                status: 0,
+                message: e.to_string(),
+            })?;
         if !(200..300).contains(&status) {
             return Err(api_error(status, &bytes));
         }
@@ -255,8 +288,16 @@ impl Client {
     ) -> Result<u16, ApiError> {
         let raw = body.map(|b| serde_json::to_vec(b).unwrap_or_default());
         let (status, bytes) = self
-            .call(method, path, &[("Content-Type", "application/json")], raw.as_deref())
-            .map_err(|e| ApiError { status: 0, message: e.to_string() })?;
+            .call(
+                method,
+                path,
+                &[("Content-Type", "application/json")],
+                raw.as_deref(),
+            )
+            .map_err(|e| ApiError {
+                status: 0,
+                message: e.to_string(),
+            })?;
         if !(200..300).contains(&status) {
             return Err(api_error(status, &bytes));
         }
@@ -314,8 +355,13 @@ fn discover_endpoint(envs: &[&str], leaf: &str, default_unix: &str) -> Endpoint 
     #[cfg(unix)]
     {
         let candidates = [
-            std::env::var("NEBULA_HOME").ok().map(|h| format!("{h}/run/{leaf}")),
-            Some(format!("{}/.nebula/run/{leaf}", std::env::var("HOME").unwrap_or_default())),
+            std::env::var("NEBULA_HOME")
+                .ok()
+                .map(|h| format!("{h}/run/{leaf}")),
+            Some(format!(
+                "{}/.nebula/run/{leaf}",
+                std::env::var("HOME").unwrap_or_default()
+            )),
             Some(default_unix.to_string()),
         ];
         for c in candidates.into_iter().flatten() {
@@ -330,7 +376,11 @@ fn discover_endpoint(envs: &[&str], leaf: &str, default_unix: &str) -> Endpoint 
         let _ = (leaf, default_unix);
         // Windows: nebula publishes the engine on a loopback TCP port (set via
         // DOCKER_HOST / SLIM_KUBE_HOST). Fall back to the conventional ports.
-        let port = if envs.iter().any(|v| v.contains("KUBE")) { "6443" } else { "2375" };
+        let port = if envs.iter().any(|v| v.contains("KUBE")) {
+            "6443"
+        } else {
+            "2375"
+        };
         Endpoint::Tcp(format!("127.0.0.1:{port}"))
     }
 }
@@ -415,7 +465,11 @@ fn api_error(status: u16, bytes: &[u8]) -> ApiError {
 }
 
 /// stdcopy demux: split a multiplexed docker stream into stdout/stderr.
-pub fn demux_stdcopy(data: &[u8], mut on_stdout: impl FnMut(&[u8]), mut on_stderr: impl FnMut(&[u8])) {
+pub fn demux_stdcopy(
+    data: &[u8],
+    mut on_stdout: impl FnMut(&[u8]),
+    mut on_stderr: impl FnMut(&[u8]),
+) {
     let mut i = 0;
     while i + 8 <= data.len() {
         let stream = data[i];

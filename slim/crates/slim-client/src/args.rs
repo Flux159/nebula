@@ -23,7 +23,10 @@ impl Parsed {
         self.flags.get(&norm(name)).copied().unwrap_or(false)
     }
     pub fn first(&self, name: &str) -> Option<&str> {
-        self.values.get(&norm(name)).and_then(|v| v.first()).map(|s| s.as_str())
+        self.values
+            .get(&norm(name))
+            .and_then(|v| v.first())
+            .map(|s| s.as_str())
     }
     pub fn all(&self, name: &str) -> Vec<String> {
         self.values.get(&norm(name)).cloned().unwrap_or_default()
@@ -33,7 +36,10 @@ impl Parsed {
         self.flags.insert(norm(canon), true);
     }
     fn add_value(&mut self, token: &str, canon: &str, val: String) {
-        self.values.entry(norm(token)).or_default().push(val.clone());
+        self.values
+            .entry(norm(token))
+            .or_default()
+            .push(val.clone());
         if norm(token) != norm(canon) {
             self.values.entry(norm(canon)).or_default().push(val);
         }
@@ -48,16 +54,25 @@ pub fn parse(
     stop_at_first_positional: bool,
 ) -> Result<Parsed, String> {
     let alias = |k: &str| -> String {
-        aliases.iter().find(|(a, _)| *a == k).map(|(_, c)| c.to_string()).unwrap_or_else(|| k.to_string())
+        aliases
+            .iter()
+            .find(|(a, _)| *a == k)
+            .map(|(_, c)| c.to_string())
+            .unwrap_or_else(|| k.to_string())
     };
     let in_list = |k: &str, list: &[&str]| -> bool {
         let ck = alias(k);
-        list.iter().any(|e| alias(e) == ck || *e == k || norm(e) == norm(&ck))
+        list.iter()
+            .any(|e| alias(e) == ck || *e == k || norm(e) == norm(&ck))
     };
     let is_bool = |k: &str| in_list(k, bools);
     let is_valued = |k: &str| in_list(k, valued);
 
-    let mut out = Parsed { values: BTreeMap::new(), flags: BTreeMap::new(), positional: Vec::new() };
+    let mut out = Parsed {
+        values: BTreeMap::new(),
+        flags: BTreeMap::new(),
+        positional: Vec::new(),
+    };
     let mut i = 0;
     let mut only_positional = false;
     while i < argv.len() {
@@ -90,7 +105,9 @@ pub fn parse(
                     Some(v) => v,
                     None => {
                         i += 1;
-                        argv.get(i).cloned().ok_or_else(|| format!("flag {name} needs a value"))?
+                        argv.get(i)
+                            .cloned()
+                            .ok_or_else(|| format!("flag {name} needs a value"))?
                     }
                 };
                 out.add_value(&name, &canon, val);
@@ -113,7 +130,9 @@ pub fn parse(
                         rest
                     } else {
                         i += 1;
-                        argv.get(i).cloned().ok_or_else(|| format!("flag {short} needs a value"))?
+                        argv.get(i)
+                            .cloned()
+                            .ok_or_else(|| format!("flag {short} needs a value"))?
                     };
                     out.add_value(&short, &canon, val);
                     break;

@@ -3,14 +3,30 @@
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instruction {
-    From { image: String, stage: Option<String>, platform: Option<String> },
+    From {
+        image: String,
+        stage: Option<String>,
+        platform: Option<String>,
+    },
     Run(ShellOrExec),
     Cmd(ShellOrExec),
     Entrypoint(ShellOrExec),
-    Copy { from: Option<String>, chown: Option<String>, sources: Vec<String>, dest: String },
-    Add { chown: Option<String>, sources: Vec<String>, dest: String },
+    Copy {
+        from: Option<String>,
+        chown: Option<String>,
+        sources: Vec<String>,
+        dest: String,
+    },
+    Add {
+        chown: Option<String>,
+        sources: Vec<String>,
+        dest: String,
+    },
     Env(Vec<(String, String)>),
-    Arg { name: String, default: Option<String> },
+    Arg {
+        name: String,
+        default: Option<String>,
+    },
     Label(Vec<(String, String)>),
     Expose(Vec<String>),
     Workdir(String),
@@ -20,7 +36,10 @@ pub enum Instruction {
     Shell(Vec<String>),
     Healthcheck(String), // stored raw; enforcement optional
     /// Recognized-but-skipped (onbuild, maintainer): kept for warnings.
-    Unsupported { verb: String, rest: String },
+    Unsupported {
+        verb: String,
+        rest: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -132,14 +151,23 @@ pub fn parse(src: &str) -> Result<Dockerfile, ParseError> {
                 ShellOrExec::Shell(s) => vec![s],
             }),
             "HEALTHCHECK" => Instruction::Healthcheck(rest),
-            other => Instruction::Unsupported { verb: other.to_string(), rest },
+            other => Instruction::Unsupported {
+                verb: other.to_string(),
+                rest,
+            },
         };
         instructions.push(inst);
     }
-    if !instructions.iter().any(|i| matches!(i, Instruction::From { .. })) {
+    if !instructions
+        .iter()
+        .any(|i| matches!(i, Instruction::From { .. }))
+    {
         return Err(ParseError("no FROM instruction".into()));
     }
-    Ok(Dockerfile { instructions, escape })
+    Ok(Dockerfile {
+        instructions,
+        escape,
+    })
 }
 
 fn parse_from(rest: &str) -> Result<Instruction, ParseError> {
@@ -162,7 +190,11 @@ fn parse_from(rest: &str) -> Result<Instruction, ParseError> {
     } else {
         None
     };
-    Ok(Instruction::From { image, stage, platform })
+    Ok(Instruction::From {
+        image,
+        stage,
+        platform,
+    })
 }
 
 fn parse_copy(rest: &str, is_add: bool) -> Result<Instruction, ParseError> {
@@ -197,9 +229,18 @@ fn parse_copy(rest: &str, is_add: bool) -> Result<Instruction, ParseError> {
     let dest = paths.last().unwrap().clone();
     let sources = paths[..paths.len() - 1].to_vec();
     Ok(if is_add {
-        Instruction::Add { chown, sources, dest }
+        Instruction::Add {
+            chown,
+            sources,
+            dest,
+        }
     } else {
-        Instruction::Copy { from, chown, sources, dest }
+        Instruction::Copy {
+            from,
+            chown,
+            sources,
+            dest,
+        }
     })
 }
 
@@ -209,7 +250,10 @@ fn parse_arg(rest: &str) -> Instruction {
             name: n.trim().to_string(),
             default: Some(unquote(v.trim())),
         },
-        None => Instruction::Arg { name: rest.trim().to_string(), default: None },
+        None => Instruction::Arg {
+            name: rest.trim().to_string(),
+            default: None,
+        },
     }
 }
 
@@ -318,7 +362,12 @@ mod tests {
             other => panic!("{other:?}"),
         }
         match &df.instructions[3] {
-            Instruction::Copy { from: Some(f), sources, dest, .. } => {
+            Instruction::Copy {
+                from: Some(f),
+                sources,
+                dest,
+                ..
+            } => {
                 assert_eq!(f, "base");
                 assert_eq!(sources, &["/a", "/b"]);
                 assert_eq!(dest, "./dest/");
@@ -327,7 +376,11 @@ mod tests {
         }
         assert_eq!(
             df.instructions[4],
-            Instruction::Cmd(ShellOrExec::Exec(vec!["sh".into(), "-c".into(), "echo hi".into()]))
+            Instruction::Cmd(ShellOrExec::Exec(vec![
+                "sh".into(),
+                "-c".into(),
+                "echo hi".into()
+            ]))
         );
     }
 
@@ -336,7 +389,9 @@ mod tests {
         let df = parse("# escape=`\n# a comment\nFROM x\nRUN echo a `\n  echo b\n").unwrap();
         assert_eq!(df.escape, '`');
         match &df.instructions[1] {
-            Instruction::Run(ShellOrExec::Shell(s)) => assert!(s.contains("echo a") && s.contains("echo b")),
+            Instruction::Run(ShellOrExec::Shell(s)) => {
+                assert!(s.contains("echo a") && s.contains("echo b"))
+            }
             other => panic!("{other:?}"),
         }
     }
