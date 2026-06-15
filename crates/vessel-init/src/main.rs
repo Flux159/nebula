@@ -396,7 +396,7 @@ mod init {
     /// cmdline never has to carry spaces/colons). Returns None on malformed input.
     fn hex_decode(s: &str) -> Option<String> {
         let b = s.as_bytes();
-        if b.len() % 2 != 0 {
+        if (b.len() & 1) == 1 {
             return None;
         }
         let nib = |c: u8| -> Option<u8> {
