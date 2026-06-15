@@ -17,6 +17,17 @@ environment variables — no config file. This is the full set.
 | `SLIM_KUBE_SOCKET` | `<dir of SLIM_SOCKET>/slim-kube.sock` | Plain-HTTP apiserver unix socket for host clients (kubectl-slim/helm-slim via nebula's socket proxy). |
 | `SLIM_PAUSE_BIN` | (auto) | Path to the static pod-sandbox `pause` binary. Auto-located next to `slimd` and at `/usr/local/share/slim/pause`; override if elsewhere. If absent, pod sandboxes fall back to the app image + `sleep`. |
 
+## Networking strictness (per-container)
+
+By default slimd is **strict like docker**: if a container asks for a network but
+slimd can't allocate an address (the per-network `/24` pool holds ~250 endpoints),
+the start **fails** rather than silently running the container network-less.
+
+Opt a container out into best-effort networking (warn + run without a network on
+exhaustion) with `docker-slim run --net-optional`, or — from any docker client —
+the label `io.nebula.slim.net-optional=true`. Use `--network none` if you
+explicitly want no network at all.
+
 ## Host CLIs (docker-slim / kubectl-slim / helm-slim)
 
 | Var | Purpose |
