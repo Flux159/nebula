@@ -44,20 +44,27 @@ if [ "${NEBULA_STRIP:-0}" = 1 ]; then
     scripts/strip-debug.sh vessel/rootfs/bin/vessel-init vessel/rootfs/bin/vessel-agent
 fi
 
-# slim flavor: stage slimd from the nebula-slim workspace (built separately;
-# see ~/Projects/nebula-slim/scripts/build-musl.sh). vessel-init starts it
-# instead of dockerd+containerd when /usr/local/bin/slimd is present.
+# slim flavor: stage slimd from the canonical in-repo slim workspace (slim/,
+# built by slim/scripts/build-musl.sh). vessel-init starts it instead of
+# dockerd+containerd when /usr/local/bin/slimd is present.
 # .slimkeep is the always-present anchor for the optional-COPY in the
 # Dockerfile (so non-slim builds don't error on a missing slimd).
 rm -f vessel/rootfs/bin/slimd vessel/rootfs/bin/pause
 touch vessel/rootfs/bin/.slimkeep
 if [ "${FLAVOR:-full}" = "slim" ]; then
-    SLIMD_BIN="${SLIMD_BIN:-$HOME/Projects/nebula-slim/target/$MUSL_TARGET/release/slimd}"
-    test -f "$SLIMD_BIN" || { echo "ERROR: slimd not found at $SLIMD_BIN (build it: nebula-slim/scripts/build-musl.sh)" >&2; exit 1; }
+    SLIMD_BIN="${SLIMD_BIN:-slim/target/$MUSL_TARGET/release/slimd}"
+    test -f "$SLIMD_BIN" || { echo "ERROR: slimd not found at $SLIMD_BIN (build it: slim/scripts/build-musl.sh)" >&2; exit 1; }
+    # Staleness guard: refuse to ship a slimd older than the slim sources — this
+    # silently shipped stale binaries twice when SLIMD_BIN defaulted to a
+    # different checkout. Pass SLIMD_BIN explicitly to override.
+    if [ -n "$(find slim/crates -name '*.rs' -newer "$SLIMD_BIN" -print -quit 2>/dev/null)" ]; then
+        echo "ERROR: $SLIMD_BIN is older than slim/crates sources — rebuild it (slim/scripts/build-musl.sh) or pass SLIMD_BIN explicitly" >&2
+        exit 1
+    fi
     cp "$SLIMD_BIN" vessel/rootfs/bin/slimd
     # pause: tiny static pod-sandbox binary (nebula/pause:slim). Optional — if
     # absent, slimd falls back to the app image + sleep for the sandbox.
-    PAUSE_BIN="${PAUSE_BIN:-$HOME/Projects/nebula-slim/target/$MUSL_TARGET/release/pause}"
+    PAUSE_BIN="${PAUSE_BIN:-slim/target/$MUSL_TARGET/release/pause}"
     if [ -f "$PAUSE_BIN" ]; then
         cp "$PAUSE_BIN" vessel/rootfs/bin/pause
     else

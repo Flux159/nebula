@@ -1004,7 +1004,7 @@ pub fn system(client: &Client, cargs: &[String]) -> CmdResult {
 fn parse_run_flags(cargs: &[String]) -> Result<Parsed, CmdError> {
     parse(
         cargs,
-        &["-d", "-i", "-t", "--rm", "-P", "--privileged", "--init", "--read-only"],
+        &["-d", "-i", "-t", "--rm", "-P", "--privileged", "--init", "--read-only", "--net-optional"],
         &["--name", "-p", "-v", "-e", "--env-file", "-w", "-u", "--network", "--restart",
           "--entrypoint", "-h", "-l", "-m", "--cpus", "--add-host", "--pid", "--ipc", "--shm-size",
           "--pull", "--stop-signal", "--memory-swap", "--cpu-shares"],
@@ -1078,6 +1078,15 @@ fn build_create_body(p: &Parsed, image: &str, cmd: &[String]) -> Result<Value, C
     for l in p.all("-l") {
         let (k, v) = l.split_once('=').unwrap_or((l.as_str(), ""));
         labels.insert(k.to_string(), Value::String(v.to_string()));
+    }
+    // --net-optional: opt out of strict networking — start without a network
+    // (with a warning) if the address pool is exhausted, instead of failing.
+    // Carried to slimd as a label (keep in sync with engine::NET_OPTIONAL_LABEL).
+    if p.flag("--net-optional") {
+        labels.insert(
+            "io.nebula.slim.net-optional".to_string(),
+            Value::String("true".to_string()),
+        );
     }
 
     // restart

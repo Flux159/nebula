@@ -45,6 +45,12 @@ fn conflict(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::AlreadyExists, msg.into())
 }
 
+/// Opt out of strict networking per-container: when set to "true"/"1", a
+/// container that can't get a network address (e.g. the per-/24 IP pool is
+/// exhausted) starts network-less with a warning instead of failing the start.
+/// Set by `docker-slim run --net-optional` (or any client via `--label`).
+const NET_OPTIONAL_LABEL: &str = "io.nebula.slim.net-optional";
+
 /// Spawn a fire-and-forget worker thread without panicking on resource
 /// exhaustion. Each running container holds ~3 of these (2 log pumps + 1
 /// waiter), so they're the threads that scale with density — when a thread/pids
@@ -444,7 +450,34 @@ impl Engine {
                     // Refresh /etc/hosts for everyone on this network.
                     self.refresh_network_hosts(&c.network);
                 }
-                Err(e) => eprintln!("slimd: network connect failed: {e}"),
+                Err(e) => {
+                    // Strict by default (docker parity): a container that asked
+                    // for a network but couldn't get an address is broken for
+                    // clients that expect one, so fail the start rather than
+                    // silently running it network-less. The just-started process
+                    // is killed/reaped and the rootfs unmounted (pump/waiter
+                    // threads and "running" state aren't set up yet here). Opt
+                    // out per-container with the net-optional label.
+                    let lenient = c
+                        .config
+                        .labels
+                        .get(NET_OPTIONAL_LABEL)
+                        .map(|v| v == "true" || v == "1")
+                        .unwrap_or(false);
+                    if lenient {
+                        eprintln!(
+                            "slimd: network connect failed; continuing network-less (net-optional): {e}"
+                        );
+                    } else {
+                        eprintln!("slimd: network connect failed, aborting start: {e}");
+                        let _ = slim_runtime::signal_pid(pid, libc::SIGKILL);
+                        let _ = slim_runtime::wait_pid(pid);
+                        self.store.unmount_rootfs(&base);
+                        return Err(io::Error::other(format!(
+                            "failed to set up container networking: {e} (run with --net-optional, or label {NET_OPTIONAL_LABEL}=true, to start without a network)"
+                        )));
+                    }
+                }
             }
         }
 
