@@ -84,7 +84,11 @@ pub fn exec(
         let mut sink = wsock.try_clone()?;
         if tty {
             let (cols, rows) = slim_client::tty::term_size();
-            let _ = send_frame(&mut sink, 4, format!("{{\"Width\":{cols},\"Height\":{rows}}}").as_bytes());
+            let _ = send_frame(
+                &mut sink,
+                4,
+                format!("{{\"Width\":{cols},\"Height\":{rows}}}").as_bytes(),
+            );
         }
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
@@ -153,7 +157,11 @@ fn parse_exit(data: &[u8]) -> i32 {
     if let Some(causes) = v.pointer("/details/causes").and_then(|c| c.as_array()) {
         for c in causes {
             if c.get("reason").and_then(|r| r.as_str()) == Some("ExitCode") {
-                if let Some(code) = c.get("message").and_then(|m| m.as_str()).and_then(|m| m.parse::<i32>().ok()) {
+                if let Some(code) = c
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .and_then(|m| m.parse::<i32>().ok())
+                {
                     return code;
                 }
             }
@@ -261,12 +269,24 @@ fn b64(data: &[u8]) -> String {
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -275,7 +295,9 @@ fn urlenc(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }

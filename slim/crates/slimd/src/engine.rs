@@ -826,6 +826,9 @@ impl Engine {
         self.start(name_or_id)
     }
 
+    // Public API method kept for the /wait route family even when not currently
+    // called from within this crate.
+    #[allow(dead_code)]
     pub fn wait(&self, name_or_id: &str) -> io::Result<i32> {
         let entry = self.get_entry(name_or_id)?;
         // Already exited?
@@ -890,13 +893,11 @@ impl Engine {
         let entry = self.get_entry(name_or_id)?;
         let id = {
             let c = entry.c.lock().unwrap();
-            if c.running() {
-                if !force {
-                    return Err(conflict(format!(
+            if c.running() && !force {
+                return Err(conflict(format!(
                         "You cannot remove a running container {}. Stop the container before attempting removal or force remove",
                         c.short_id()
                     )));
-                }
             }
             c.id.clone()
         };

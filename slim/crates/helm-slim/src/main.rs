@@ -118,7 +118,14 @@ fn parse_install(args: &[String]) -> Result<InstallArgs, String> {
         1 => (positional[0].clone(), positional[0].clone()), // generate-name-ish
         _ => return Err("requires RELEASE and CHART".into()),
     };
-    Ok(InstallArgs { release, chart, values_files, sets, dry_run, strict })
+    Ok(InstallArgs {
+        release,
+        chart,
+        values_files,
+        sets,
+        dry_run,
+        strict,
+    })
 }
 
 fn cmd_install(ns: &str, args: &[String], upgrade: bool) -> Result<i32, String> {
@@ -128,7 +135,11 @@ fn cmd_install(ns: &str, args: &[String], upgrade: bool) -> Result<i32, String> 
     let namespace = if ns.is_empty() { "default" } else { ns };
 
     if ia.dry_run {
-        let opts = RenderOptions { release: ia.release.clone(), namespace: namespace.to_string(), is_upgrade: upgrade };
+        let opts = RenderOptions {
+            release: ia.release.clone(),
+            namespace: namespace.to_string(),
+            is_upgrade: upgrade,
+        };
         let manifests = render(&chart, &values, &opts).map_err(|e| e.to_string())?;
         print!("{manifests}");
         return Ok(0);
@@ -137,7 +148,9 @@ fn cmd_install(ns: &str, args: &[String], upgrade: bool) -> Result<i32, String> 
     let client = Client::discover_kube();
     let helm = Helm::new(&client, namespace);
     let mut out = |s: &str| print!("{s}");
-    let skipped = helm.install(&ia.release, &chart, &values, &mut out).map_err(|e| e.to_string())?;
+    let skipped = helm
+        .install(&ia.release, &chart, &values, &mut out)
+        .map_err(|e| e.to_string())?;
     if !skipped.is_empty() && ia.strict {
         return Err(format!(
             "--strict: {} object(s) of unsupported kinds were skipped: {}",
@@ -153,7 +166,11 @@ fn cmd_template(ns: &str, args: &[String]) -> Result<i32, String> {
     let chart = Chart::load(Path::new(&ia.chart)).map_err(|e| e.to_string())?;
     let values = build_values(&chart, &ia.values_files, &ia.sets).map_err(|e| e.to_string())?;
     let namespace = if ns.is_empty() { "default" } else { ns };
-    let opts = RenderOptions { release: ia.release, namespace: namespace.to_string(), is_upgrade: false };
+    let opts = RenderOptions {
+        release: ia.release,
+        namespace: namespace.to_string(),
+        is_upgrade: false,
+    };
     let manifests = render(&chart, &values, &opts).map_err(|e| e.to_string())?;
     print!("{manifests}");
     Ok(0)
@@ -164,7 +181,8 @@ fn cmd_uninstall(ns: &str, args: &[String]) -> Result<i32, String> {
     let client = Client::discover_kube();
     let helm = Helm::new(&client, ns);
     let mut out = |s: &str| print!("{s}");
-    helm.uninstall(release, &mut out).map_err(|e| e.to_string())?;
+    helm.uninstall(release, &mut out)
+        .map_err(|e| e.to_string())?;
     Ok(0)
 }
 
@@ -172,7 +190,10 @@ fn cmd_list(ns: &str) -> Result<i32, String> {
     let client = Client::discover();
     let helm = Helm::new(&client, ns);
     let releases = helm.list().map_err(|e| e.to_string())?;
-    println!("{:<20} {:<12} {:<20} {:<12}", "NAME", "NAMESPACE", "CHART", "STATUS");
+    println!(
+        "{:<20} {:<12} {:<20} {:<12}",
+        "NAME", "NAMESPACE", "CHART", "STATUS"
+    );
     for r in releases {
         println!(
             "{:<20} {:<12} {:<20} {:<12}",

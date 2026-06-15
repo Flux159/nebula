@@ -18,18 +18,27 @@ pub struct TlsIdentity {
 
 /// Generate a CA and a serving cert covering the in-cluster apiserver names
 /// plus any extra SAN (the bridge gateway IP, the ClusterIP).
-pub fn generate(extra_dns: &[String], extra_ips: &[std::net::IpAddr]) -> Result<TlsIdentity, String> {
+pub fn generate(
+    extra_dns: &[String],
+    extra_ips: &[std::net::IpAddr],
+) -> Result<TlsIdentity, String> {
     let ca_key = KeyPair::generate().map_err(|e| e.to_string())?;
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).map_err(|e| e.to_string())?;
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca_params.distinguished_name.push(rcgen::DnType::CommonName, "nebula-slim-ca");
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "nebula-slim-ca");
     let ca_cert = ca_params.self_signed(&ca_key).map_err(|e| e.to_string())?;
 
     let mut san: Vec<SanType> = vec![
         SanType::DnsName("kubernetes".try_into().map_err(|_| "san")?),
         SanType::DnsName("kubernetes.default".try_into().map_err(|_| "san")?),
         SanType::DnsName("kubernetes.default.svc".try_into().map_err(|_| "san")?),
-        SanType::DnsName("kubernetes.default.svc.cluster.local".try_into().map_err(|_| "san")?),
+        SanType::DnsName(
+            "kubernetes.default.svc.cluster.local"
+                .try_into()
+                .map_err(|_| "san")?,
+        ),
         SanType::DnsName("localhost".try_into().map_err(|_| "san")?),
     ];
     for d in extra_dns {
@@ -45,7 +54,9 @@ pub fn generate(extra_dns: &[String], extra_ips: &[std::net::IpAddr]) -> Result<
     let srv_key = KeyPair::generate().map_err(|e| e.to_string())?;
     let mut srv_params = CertificateParams::new(Vec::<String>::new()).map_err(|e| e.to_string())?;
     srv_params.subject_alt_names = san;
-    srv_params.distinguished_name.push(rcgen::DnType::CommonName, "kube-apiserver");
+    srv_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "kube-apiserver");
     let srv_cert = srv_params
         .signed_by(&srv_key, &ca_cert, &ca_key)
         .map_err(|e| e.to_string())?;
@@ -64,7 +75,10 @@ pub fn generate(extra_dns: &[String], extra_ips: &[std::net::IpAddr]) -> Result<
         .with_single_cert(cert_chain, key)
         .map_err(|e| e.to_string())?;
 
-    Ok(TlsIdentity { ca_pem: ca_cert.pem(), config: Arc::new(config) })
+    Ok(TlsIdentity {
+        ca_pem: ca_cert.pem(),
+        config: Arc::new(config),
+    })
 }
 
 impl TlsIdentity {

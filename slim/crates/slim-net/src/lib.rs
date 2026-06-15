@@ -62,10 +62,16 @@ pub struct NetManager {
 
 impl NetworkRecord {
     pub fn gateway(&self) -> String {
-        format!("{}.{}.{}.1", SUBNET_BASE.0, SUBNET_BASE.1, self.subnet_octet)
+        format!(
+            "{}.{}.{}.1",
+            SUBNET_BASE.0, SUBNET_BASE.1, self.subnet_octet
+        )
     }
     pub fn subnet(&self) -> String {
-        format!("{}.{}.{}.0/24", SUBNET_BASE.0, SUBNET_BASE.1, self.subnet_octet)
+        format!(
+            "{}.{}.{}.0/24",
+            SUBNET_BASE.0, SUBNET_BASE.1, self.subnet_octet
+        )
     }
 }
 
@@ -112,7 +118,10 @@ fn run_in_netns(pid: i32, cmd: &str, args: &[&str]) -> io::Result<String> {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (pid, cmd, args);
-        Err(io::Error::new(io::ErrorKind::Unsupported, "netns requires linux"))
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "netns requires linux",
+        ))
     }
 }
 
@@ -129,7 +138,11 @@ impl NetManager {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
-        Ok(NetManager { state_path, state: Mutex::new(state), firewall })
+        Ok(NetManager {
+            state_path,
+            state: Mutex::new(state),
+            firewall,
+        })
     }
 
     fn save(&self, st: &State) {
@@ -167,8 +180,14 @@ impl NetManager {
             st.published.clear();
             self.save(&st);
         }
-        let nets: Vec<NetworkRecord> =
-            self.state.lock().unwrap().networks.values().cloned().collect();
+        let nets: Vec<NetworkRecord> = self
+            .state
+            .lock()
+            .unwrap()
+            .networks
+            .values()
+            .cloned()
+            .collect();
         for n in &nets {
             self.ensure_bridge(n)?;
         }
@@ -181,7 +200,16 @@ impl NetManager {
             run("ip", &["link", "add", &n.bridge, "type", "bridge"])?;
         }
         // addr add is idempotent-ish; ignore "File exists".
-        let _ = run("ip", &["addr", "add", &format!("{}/24", n.gateway()), "dev", &n.bridge]);
+        let _ = run(
+            "ip",
+            &[
+                "addr",
+                "add",
+                &format!("{}/24", n.gateway()),
+                "dev",
+                &n.bridge,
+            ],
+        );
         run("ip", &["link", "set", &n.bridge, "up"])?;
         let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
         Ok(())
@@ -197,7 +225,18 @@ impl NetManager {
         if !have.contains("-j SLIM") {
             let _ = run(
                 "iptables",
-                &["-t", "nat", "-A", "PREROUTING", "-m", "addrtype", "--dst-type", "LOCAL", "-j", "SLIM"],
+                &[
+                    "-t",
+                    "nat",
+                    "-A",
+                    "PREROUTING",
+                    "-m",
+                    "addrtype",
+                    "--dst-type",
+                    "LOCAL",
+                    "-j",
+                    "SLIM",
+                ],
             );
         }
         let have = run("iptables", &["-t", "nat", "-S", "OUTPUT"]).unwrap_or_default();
@@ -205,8 +244,19 @@ impl NetManager {
             let _ = run(
                 "iptables",
                 &[
-                    "-t", "nat", "-A", "OUTPUT", "!", "-d", "127.0.0.0/8", "-m", "addrtype",
-                    "--dst-type", "LOCAL", "-j", "SLIM",
+                    "-t",
+                    "nat",
+                    "-A",
+                    "OUTPUT",
+                    "!",
+                    "-d",
+                    "127.0.0.0/8",
+                    "-m",
+                    "addrtype",
+                    "--dst-type",
+                    "LOCAL",
+                    "-j",
+                    "SLIM",
                 ],
             );
         }
@@ -215,7 +265,16 @@ impl NetManager {
         if !have.contains(&masq_src) {
             let _ = run(
                 "iptables",
-                &["-t", "nat", "-A", "POSTROUTING", "-s", &masq_src, "-j", "MASQUERADE"],
+                &[
+                    "-t",
+                    "nat",
+                    "-A",
+                    "POSTROUTING",
+                    "-s",
+                    &masq_src,
+                    "-j",
+                    "MASQUERADE",
+                ],
             );
         }
         // Hairpin: containers reaching their own published ports.
@@ -269,7 +328,9 @@ impl NetManager {
             )));
         }
         if name == DEFAULT_NETWORK {
-            return Err(io::Error::other("bridge is a pre-defined network and cannot be removed"));
+            return Err(io::Error::other(
+                "bridge is a pre-defined network and cannot be removed",
+            ));
         }
         let bridge = n.bridge.clone();
         let _ = run("ip", &["link", "del", &bridge]);
@@ -279,15 +340,23 @@ impl NetManager {
     }
 
     pub fn list(&self) -> Vec<NetworkRecord> {
-        self.state.lock().unwrap().networks.values().cloned().collect()
+        self.state
+            .lock()
+            .unwrap()
+            .networks
+            .values()
+            .cloned()
+            .collect()
     }
 
     pub fn get(&self, name_or_id: &str) -> Option<NetworkRecord> {
         let st = self.state.lock().unwrap();
-        st.networks
-            .get(name_or_id)
-            .cloned()
-            .or_else(|| st.networks.values().find(|n| n.id.starts_with(name_or_id)).cloned())
+        st.networks.get(name_or_id).cloned().or_else(|| {
+            st.networks
+                .values()
+                .find(|n| n.id.starts_with(name_or_id))
+                .cloned()
+        })
     }
 
     // ---------- endpoints ----------
@@ -305,11 +374,19 @@ impl NetManager {
         let (bridge, gateway, ip) = {
             let mut st = self.state.lock().unwrap();
             let n = st.networks.get_mut(network).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, format!("network {network} not found"))
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("network {network} not found"),
+                )
             })?;
             let used: Vec<String> = n.endpoints.values().map(|e| e.ip.clone()).collect();
             let host = (2..254u8)
-                .map(|h| format!("{}.{}.{}.{}", SUBNET_BASE.0, SUBNET_BASE.1, n.subnet_octet, h))
+                .map(|h| {
+                    format!(
+                        "{}.{}.{}.{}",
+                        SUBNET_BASE.0, SUBNET_BASE.1, n.subnet_octet, h
+                    )
+                })
                 .find(|ip| !used.contains(ip))
                 .ok_or_else(|| io::Error::other("network address pool exhausted"))?;
             (n.bridge.clone(), n.gateway(), host)
@@ -318,14 +395,23 @@ impl NetManager {
         let veth_h = format!("ve{}", &container_id[..7.min(container_id.len())]);
         let veth_c = format!("vc{}", &container_id[..7.min(container_id.len())]);
         let _ = run("ip", &["link", "del", &veth_h]); // stale from a crash
-        run("ip", &["link", "add", &veth_h, "type", "veth", "peer", "name", &veth_c])?;
+        run(
+            "ip",
+            &[
+                "link", "add", &veth_h, "type", "veth", "peer", "name", &veth_c,
+            ],
+        )?;
         run("ip", &["link", "set", &veth_h, "master", &bridge])?;
         run("ip", &["link", "set", &veth_h, "up"])?;
         run("ip", &["link", "set", &veth_c, "netns", &pid.to_string()])?;
         // Inside the container netns: rename to ethN, address, route.
         let eth = self.next_eth(pid);
         run_in_netns(pid, "ip", &["link", "set", &veth_c, "name", &eth])?;
-        run_in_netns(pid, "ip", &["addr", "add", &format!("{ip}/24"), "dev", &eth])?;
+        run_in_netns(
+            pid,
+            "ip",
+            &["addr", "add", &format!("{ip}/24"), "dev", &eth],
+        )?;
         run_in_netns(pid, "ip", &["link", "set", &eth, "up"])?;
         run_in_netns(pid, "ip", &["link", "set", "lo", "up"])?;
         if eth == "eth0" {
@@ -422,8 +508,18 @@ impl NetManager {
             run(
                 "iptables",
                 &[
-                    "-t", "nat", "-A", "SLIM", "-p", proto, "--dport", &host.to_string(),
-                    "-j", "DNAT", "--to-destination", &dest,
+                    "-t",
+                    "nat",
+                    "-A",
+                    "SLIM",
+                    "-p",
+                    proto,
+                    "--dport",
+                    &host.to_string(),
+                    "-j",
+                    "DNAT",
+                    "--to-destination",
+                    &dest,
                 ],
             )?;
             recorded.push((proto.clone(), *host, dest));
@@ -446,8 +542,18 @@ impl NetManager {
             let _ = run(
                 "iptables",
                 &[
-                    "-t", "nat", "-D", "SLIM", "-p", &proto, "--dport", &host.to_string(),
-                    "-j", "DNAT", "--to-destination", &dest,
+                    "-t",
+                    "nat",
+                    "-D",
+                    "SLIM",
+                    "-p",
+                    &proto,
+                    "--dport",
+                    &host.to_string(),
+                    "-j",
+                    "DNAT",
+                    "--to-destination",
+                    &dest,
                 ],
             );
         }

@@ -104,6 +104,7 @@ pub struct Entry {
     /// Live output fan-out, chunk = (stream, bytes). Lives on the Entry (not
     /// the per-start Runtime) so `docker run` — which attaches BEFORE start —
     /// subscribes to a list the post-start output pump still feeds.
+    #[allow(clippy::type_complexity)]
     pub subscribers: Mutex<Vec<std::sync::mpsc::Sender<(u8, Vec<u8>)>>>,
     #[allow(dead_code)]
     pub base_dir: PathBuf,

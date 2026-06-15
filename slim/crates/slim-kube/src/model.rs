@@ -19,8 +19,16 @@ pub struct ServicePort {
 
 impl Service {
     pub fn parse(d: &Value) -> Service {
-        let name = d.pointer("/metadata/name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let svc_type = d.pointer("/spec/type").and_then(|v| v.as_str()).unwrap_or("ClusterIP").to_string();
+        let name = d
+            .pointer("/metadata/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let svc_type = d
+            .pointer("/spec/type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ClusterIP")
+            .to_string();
         let selector_app = d
             .pointer("/spec/selector/app")
             .and_then(|v| v.as_str())
@@ -38,16 +46,26 @@ impl Service {
                 });
             }
         }
-        Service { name, svc_type, selector_app, ports }
+        Service {
+            name,
+            svc_type,
+            selector_app,
+            ports,
+        }
     }
 
     pub fn selects(&self, app: &str, workload_name: &str) -> bool {
-        self.selector_app == app || self.selector_app == workload_name || self.name == workload_name || self.name == app
+        self.selector_app == app
+            || self.selector_app == workload_name
+            || self.name == workload_name
+            || self.name == app
     }
 }
 
 fn num_u16(v: &Value) -> Option<u16> {
-    v.as_i64().map(|n| n as u16).or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    v.as_i64()
+        .map(|n| n as u16)
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }
 
 /// The reconstructed-from-engine view of a k8s object for `get`.

@@ -26,7 +26,14 @@ pub trait PodProxy: Send + Sync {
     /// Stream a pod container's logs to `w` (plain bytes; follow keeps streaming
     /// until the container exits). `container` selects a specific container
     /// (empty = the pod's first/holder). Err with NotFound if not running here.
-    fn logs(&self, ns: &str, pod: &str, container: &str, opts: &LogOpts, w: &mut dyn Write) -> std::io::Result<()>;
+    fn logs(
+        &self,
+        ns: &str,
+        pod: &str,
+        container: &str,
+        opts: &LogOpts,
+        w: &mut dyn Write,
+    ) -> std::io::Result<()>;
 
     /// Start `cmd` in the pod's `container` (empty = first/holder). The apiserver
     /// wires WebSocket stdin/stdout/stderr/resize channels to the returned handle.

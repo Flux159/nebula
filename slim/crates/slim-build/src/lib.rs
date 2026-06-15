@@ -184,11 +184,18 @@ impl Builder<'_> {
         {
             let base = clone_stage(prev);
             progress(&format!(" ---> {}\n", short(&stage_id(&base))));
-            return Ok(Stage { name: stage.clone(), ..base });
+            return Ok(Stage {
+                name: stage.clone(),
+                ..base
+            });
         }
 
         let record = if image == "scratch" {
-            ImageRecord { architecture: self.store.arch.clone(), os: "linux".into(), ..Default::default() }
+            ImageRecord {
+                architecture: self.store.arch.clone(),
+                os: "linux".into(),
+                ..Default::default()
+            }
         } else if let Some(r) = self.store.resolve(&image) {
             r
         } else {
@@ -199,8 +206,16 @@ impl Builder<'_> {
             name: stage.clone(),
             layers: record.diff_ids.clone(),
             config: record.config.clone(),
-            arch: if record.architecture.is_empty() { self.store.arch.clone() } else { record.architecture.clone() },
-            os: if record.os.is_empty() { "linux".into() } else { record.os.clone() },
+            arch: if record.architecture.is_empty() {
+                self.store.arch.clone()
+            } else {
+                record.architecture.clone()
+            },
+            os: if record.os.is_empty() {
+                "linux".into()
+            } else {
+                record.os.clone()
+            },
         })
     }
 
@@ -223,7 +238,8 @@ impl Builder<'_> {
         if !self.no_cache {
             if let Some(c) = self.cache.get(&cache_key) {
                 stage.layers = c.layers.clone();
-                stage.config = serde_json::from_str(&c.config).unwrap_or_else(|_| stage.config.clone());
+                stage.config =
+                    serde_json::from_str(&c.config).unwrap_or_else(|_| stage.config.clone());
                 progress(" ---> Using cache\n");
                 progress(&format!(" ---> {}\n", short(&stage_id(stage))));
                 return Ok(());
@@ -232,12 +248,17 @@ impl Builder<'_> {
 
         match inst {
             Instruction::Run(soe) => self.do_run(stage, soe)?,
-            Instruction::Copy { from, chown, sources, dest } => {
-                self.do_copy(stage, from.as_deref(), chown.as_deref(), sources, dest)?
-            }
-            Instruction::Add { chown, sources, dest } => {
-                self.do_copy(stage, None, chown.as_deref(), sources, dest)?
-            }
+            Instruction::Copy {
+                from,
+                chown,
+                sources,
+                dest,
+            } => self.do_copy(stage, from.as_deref(), chown.as_deref(), sources, dest)?,
+            Instruction::Add {
+                chown,
+                sources,
+                dest,
+            } => self.do_copy(stage, None, chown.as_deref(), sources, dest)?,
             Instruction::Env(kv) => {
                 for (k, v) in kv {
                     let v = self.expand(v, &BTreeMap::new());
@@ -255,7 +276,10 @@ impl Builder<'_> {
             }
             Instruction::Label(kv) => {
                 for (k, v) in kv {
-                    stage.config.labels.insert(k.clone(), self.expand(v, &BTreeMap::new()));
+                    stage
+                        .config
+                        .labels
+                        .insert(k.clone(), self.expand(v, &BTreeMap::new()));
                 }
             }
             Instruction::Workdir(w) => {
@@ -274,7 +298,11 @@ impl Builder<'_> {
             Instruction::Expose(ports) => {
                 let m = stage.config.exposed_ports.get_or_insert_with(BTreeMap::new);
                 for p in ports {
-                    let key = if p.contains('/') { p.clone() } else { format!("{p}/tcp") };
+                    let key = if p.contains('/') {
+                        p.clone()
+                    } else {
+                        format!("{p}/tcp")
+                    };
                     m.insert(key, serde_json::json!({}));
                 }
             }
@@ -285,7 +313,8 @@ impl Builder<'_> {
                 }
             }
             Instruction::StopSignal(s) => stage.config.stop_signal = Some(s.clone()),
-            Instruction::Shell(_) => { /* affects RUN shell form; handled in to_argv via config? kept simple */ }
+            Instruction::Shell(_) => { /* affects RUN shell form; handled in to_argv via config? kept simple */
+            }
             Instruction::Healthcheck(_) => { /* parsed, not enforced */ }
             Instruction::Unsupported { verb, .. } => {
                 progress(&format!(
@@ -311,16 +340,21 @@ impl Builder<'_> {
         let _ = std::fs::remove_dir_all(&work);
         std::fs::create_dir_all(&work)?;
         let rec = self.stage_record(stage);
-        let merged = self.store.prepare_rootfs(&rec, &work).map_err(|e| {
-            be(format!("overlay for RUN failed: {e}"))
-        })?;
+        let merged = self
+            .store
+            .prepare_rootfs(&rec, &work)
+            .map_err(|e| be(format!("overlay for RUN failed: {e}")))?;
 
         let spec = slim_runtime::ContainerSpec {
             id: format!("build-{}", slim_net_id()),
             rootfs: merged.clone(),
             argv,
             env: stage.config.env.clone(),
-            cwd: if stage.config.working_dir.is_empty() { "/".into() } else { stage.config.working_dir.clone() },
+            cwd: if stage.config.working_dir.is_empty() {
+                "/".into()
+            } else {
+                stage.config.working_dir.clone()
+            },
             user: stage.config.user.clone(),
             hostname: "buildkit".into(),
             tty: false,
@@ -356,7 +390,10 @@ impl Builder<'_> {
         sources: &[String],
         dest: &str,
     ) -> Result<(), BuildError> {
-        let work = self.store.root.join(format!("build/copy-{}", slim_net_id()));
+        let work = self
+            .store
+            .root
+            .join(format!("build/copy-{}", slim_net_id()));
         let upper = work.join("upper");
         std::fs::create_dir_all(&upper)?;
 
@@ -365,7 +402,10 @@ impl Builder<'_> {
             None => (self.ctx.clone(), None),
             Some(f) => {
                 let prev = self.stage_by_ref(f)?;
-                let mdir = self.store.root.join(format!("build/from-{}", slim_net_id()));
+                let mdir = self
+                    .store
+                    .root
+                    .join(format!("build/from-{}", slim_net_id()));
                 std::fs::create_dir_all(&mdir)?;
                 let rec = self.stage_record(&prev);
                 let merged = self.store.prepare_rootfs(&rec, &mdir)?;
@@ -373,12 +413,14 @@ impl Builder<'_> {
             }
         };
 
-        let dest_is_dir = dest.ends_with('/') || sources.len() > 1 || dest == "." ;
+        let dest_is_dir = dest.ends_with('/') || sources.len() > 1 || dest == ".";
         let dest_rel = dest.trim_start_matches('/');
         let dest_base = if stage.config.working_dir.is_empty() || dest.starts_with('/') {
             upper.join(dest_rel)
         } else {
-            upper.join(stage.config.working_dir.trim_start_matches('/')).join(dest_rel)
+            upper
+                .join(stage.config.working_dir.trim_start_matches('/'))
+                .join(dest_rel)
         };
 
         for src in sources {
@@ -444,7 +486,10 @@ impl Builder<'_> {
             architecture: stage.arch.clone(),
             os: stage.os.clone(),
             config,
-            rootfs: OciRootFs { typ: "layers".into(), diff_ids: stage.layers.clone() },
+            rootfs: OciRootFs {
+                typ: "layers".into(),
+                diff_ids: stage.layers.clone(),
+            },
             created: slim_runtime::jsonlog::rfc3339_now(),
             history: vec![],
         };
@@ -491,7 +536,11 @@ impl Builder<'_> {
                 .map(clone_stage)
                 .ok_or_else(|| be(format!("COPY --from={r}: no such stage")));
         }
-        if let Some(s) = self.finished_stages.iter().find(|s| s.name.as_deref() == Some(r)) {
+        if let Some(s) = self
+            .finished_stages
+            .iter()
+            .find(|s| s.name.as_deref() == Some(r))
+        {
             return Ok(clone_stage(s));
         }
         // --from=<external image>
@@ -504,14 +553,21 @@ impl Builder<'_> {
                 os: rec.os.clone(),
             });
         }
-        Err(be(format!("COPY --from={r}: stage or image not found locally")))
+        Err(be(format!(
+            "COPY --from={r}: stage or image not found locally"
+        )))
     }
 
     /// Content hash for cache keying of COPY/ADD (RUN keys on its command
     /// only, matching docker — RUN cache is not invalidated by file changes).
     fn content_hash(&self, inst: &Instruction, _stage: &Stage) -> Result<String, BuildError> {
         let sources = match inst {
-            Instruction::Copy { from: None, sources, .. } | Instruction::Add { sources, .. } => sources,
+            Instruction::Copy {
+                from: None,
+                sources,
+                ..
+            }
+            | Instruction::Add { sources, .. } => sources,
             _ => return Ok(String::new()),
         };
         let mut h = sha2::Sha256::new();
@@ -642,17 +698,37 @@ fn describe(inst: &Instruction) -> String {
         Instruction::Run(s) => format!("RUN {}", soe_str(s)),
         Instruction::Cmd(s) => format!("CMD {}", soe_str(s)),
         Instruction::Entrypoint(s) => format!("ENTRYPOINT {}", soe_str(s)),
-        Instruction::Copy { sources, dest, from, .. } => {
-            let f = from.as_ref().map(|f| format!("--from={f} ")).unwrap_or_default();
+        Instruction::Copy {
+            sources,
+            dest,
+            from,
+            ..
+        } => {
+            let f = from
+                .as_ref()
+                .map(|f| format!("--from={f} "))
+                .unwrap_or_default();
             format!("COPY {f}{} {dest}", sources.join(" "))
         }
         Instruction::Add { sources, dest, .. } => format!("ADD {} {dest}", sources.join(" ")),
-        Instruction::Env(kv) => format!("ENV {}", kv.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ")),
+        Instruction::Env(kv) => format!(
+            "ENV {}",
+            kv.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
         Instruction::Arg { name, default } => match default {
             Some(d) => format!("ARG {name}={d}"),
             None => format!("ARG {name}"),
         },
-        Instruction::Label(kv) => format!("LABEL {}", kv.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ")),
+        Instruction::Label(kv) => format!(
+            "LABEL {}",
+            kv.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
         Instruction::Expose(p) => format!("EXPOSE {}", p.join(" ")),
         Instruction::Workdir(w) => format!("WORKDIR {w}"),
         Instruction::User(u) => format!("USER {u}"),
@@ -694,7 +770,13 @@ fn expand_vars(
     args: &BTreeMap<String, String>,
     locals: &BTreeMap<String, String>,
 ) -> String {
-    let lookup = |k: &str| locals.get(k).or_else(|| args.get(k)).cloned().unwrap_or_default();
+    let lookup = |k: &str| {
+        locals
+            .get(k)
+            .or_else(|| args.get(k))
+            .cloned()
+            .unwrap_or_default()
+    };
     let mut out = String::new();
     let b = s.as_bytes();
     let mut i = 0;
@@ -734,10 +816,18 @@ fn expand_vars(
 fn eval_brace(expr: &str, lookup: &dyn Fn(&str) -> String) -> String {
     if let Some((name, default)) = expr.split_once(":-") {
         let v = lookup(name);
-        if v.is_empty() { default.to_string() } else { v }
+        if v.is_empty() {
+            default.to_string()
+        } else {
+            v
+        }
     } else if let Some((name, alt)) = expr.split_once(":+") {
         let v = lookup(name);
-        if v.is_empty() { String::new() } else { alt.to_string() }
+        if v.is_empty() {
+            String::new()
+        } else {
+            alt.to_string()
+        }
     } else {
         lookup(expr)
     }
@@ -787,7 +877,12 @@ fn glob_in(root: &Path, pattern: &str, ignore: Option<&Vec<String>>) -> Vec<Path
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             if glob_match(&file_pat, &name) {
-                let rel = e.path().strip_prefix(root).unwrap_or(&e.path()).to_string_lossy().into_owned();
+                let rel = e
+                    .path()
+                    .strip_prefix(root)
+                    .unwrap_or(&e.path())
+                    .to_string_lossy()
+                    .into_owned();
                 if !ignore.map(|ig| ignored(&rel, ig)).unwrap_or(false) {
                     out.push(e.path());
                 }
@@ -840,10 +935,21 @@ fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
 }
 
 fn hash_tree(p: &Path, h: &mut sha2::Sha256) {
-    let Ok(meta) = std::fs::symlink_metadata(p) else { return };
-    h.update(p.file_name().unwrap_or_default().to_string_lossy().as_bytes());
+    let Ok(meta) = std::fs::symlink_metadata(p) else {
+        return;
+    };
+    h.update(
+        p.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .as_bytes(),
+    );
     if meta.is_dir() {
-        let mut entries: Vec<_> = std::fs::read_dir(p).into_iter().flatten().flatten().collect();
+        let mut entries: Vec<_> = std::fs::read_dir(p)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect();
         entries.sort_by_key(|e| e.file_name());
         for e in entries {
             hash_tree(&e.path(), h);
@@ -855,7 +961,9 @@ fn hash_tree(p: &Path, h: &mut sha2::Sha256) {
 }
 
 fn dir_is_empty(p: &Path) -> bool {
-    std::fs::read_dir(p).map(|mut r| r.next().is_none()).unwrap_or(true)
+    std::fs::read_dir(p)
+        .map(|mut r| r.next().is_none())
+        .unwrap_or(true)
 }
 
 fn cleanup_dir(dir: &Option<PathBuf>, store: &Store) {
@@ -895,7 +1003,10 @@ mod tests {
         let mut args = BTreeMap::new();
         args.insert("VER".to_string(), "1.2".to_string());
         assert_eq!(expand_vars("v$VER", &args, &BTreeMap::new()), "v1.2");
-        assert_eq!(expand_vars("${MISSING:-def}", &args, &BTreeMap::new()), "def");
+        assert_eq!(
+            expand_vars("${MISSING:-def}", &args, &BTreeMap::new()),
+            "def"
+        );
         assert_eq!(expand_vars("${VER:+yes}", &args, &BTreeMap::new()), "yes");
         assert_eq!(expand_vars("\\$VER", &args, &BTreeMap::new()), "$VER");
     }

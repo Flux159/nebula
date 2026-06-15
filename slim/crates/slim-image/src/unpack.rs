@@ -17,7 +17,11 @@ pub struct HashingReader<R> {
 
 impl<R: Read> HashingReader<R> {
     pub fn new(inner: R) -> Self {
-        Self { inner, hasher: crate::Sha256Stream::new(), count: 0 }
+        Self {
+            inner,
+            hasher: crate::Sha256Stream::new(),
+            count: 0,
+        }
     }
 
     /// Drain the rest of the stream (tar stops at the archive end marker but
@@ -231,7 +235,8 @@ mod tests {
             h.set_size(0);
             h.set_mode(0o644);
             h.set_cksum();
-            b.append_data(&mut h, "etc/.wh.oldfile", io::empty()).unwrap();
+            b.append_data(&mut h, "etc/.wh.oldfile", io::empty())
+                .unwrap();
             b.finish().unwrap();
         }
         let hashing = HashingReader::new(&tarbuf[..]);
@@ -239,7 +244,10 @@ mod tests {
         apply_layer(&mut hashing, &dir).unwrap();
         let diff = hashing.finish().unwrap();
         assert!(diff.starts_with("sha256:"));
-        assert_eq!(std::fs::read_to_string(dir.join("etc/motd")).unwrap(), "hello\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("etc/motd")).unwrap(),
+            "hello\n"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

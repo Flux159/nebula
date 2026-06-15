@@ -20,7 +20,10 @@ use std::sync::Arc;
 /// process-wide RLIMIT_NOFILE raise at startup (see slim_http::raise_open_file_limit).
 pub(crate) fn spawn_conn<F: FnOnce() + Send + 'static>(name: &str, f: F) {
     if let Err(e) = std::thread::Builder::new().name(name.into()).spawn(f) {
-        eprintln!("slim-kubeapi: refusing connection — thread spawn failed ({name}): {e} (raw {:?})", e.raw_os_error());
+        eprintln!(
+            "slim-kubeapi: refusing connection — thread spawn failed ({name}): {e} (raw {:?})",
+            e.raw_os_error()
+        );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
@@ -36,12 +39,16 @@ pub trait Conn: Read + Write + Send {
 }
 impl Conn for std::net::TcpStream {
     fn dup_reader(&self) -> Option<Box<dyn Read + Send>> {
-        self.try_clone().ok().map(|s| Box::new(s) as Box<dyn Read + Send>)
+        self.try_clone()
+            .ok()
+            .map(|s| Box::new(s) as Box<dyn Read + Send>)
     }
 }
 impl Conn for std::os::unix::net::UnixStream {
     fn dup_reader(&self) -> Option<Box<dyn Read + Send>> {
-        self.try_clone().ok().map(|s| Box::new(s) as Box<dyn Read + Send>)
+        self.try_clone()
+            .ok()
+            .map(|s| Box::new(s) as Box<dyn Read + Send>)
     }
 }
 impl Conn for rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream> {}
@@ -61,11 +68,17 @@ struct Req {
 
 impl Req {
     fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
     }
     fn is_ws_exec(&self) -> bool {
         self.path.ends_with("/exec")
-            && self.header("upgrade").map(|u| u.eq_ignore_ascii_case("websocket")).unwrap_or(false)
+            && self
+                .header("upgrade")
+                .map(|u| u.eq_ignore_ascii_case("websocket"))
+                .unwrap_or(false)
     }
 }
 
@@ -77,7 +90,10 @@ impl ApiServer {
     /// With a PodProxy, the apiserver serves pods/{}/log and pods/{}/exec from
     /// the proxy (slimd's in-process engine).
     pub fn with_proxy(store: SharedStore, proxy: Arc<dyn PodProxy>) -> Arc<Self> {
-        Arc::new(ApiServer { store, proxy: Some(proxy) })
+        Arc::new(ApiServer {
+            store,
+            proxy: Some(proxy),
+        })
     }
 
     pub fn serve(self: &Arc<Self>, addr: &str) -> std::io::Result<()> {
@@ -127,9 +143,15 @@ impl ApiServer {
         if req.is_ws_exec() {
             return self.handle_exec_ws(&req, &mut stream);
         }
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.route(&req, &mut stream)));
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.route(&req, &mut stream)
+        }));
         if matches!(res, Ok(Err(_)) | Err(_)) {
-            let _ = write_json(&mut stream, 500, &status_obj(500, "internal error", "InternalError"));
+            let _ = write_json(
+                &mut stream,
+                500,
+                &status_obj(500, "internal error", "InternalError"),
+            );
         }
         Ok(())
     }
@@ -139,19 +161,29 @@ impl ApiServer {
         match (req.method.as_str(), segs.as_slice()) {
             // ---- meta / discovery ----
             ("GET", ["version"]) => write_json(w, 200, &version_info()),
-            ("GET", ["api"]) => write_json(w, 200, &json!({"kind":"APIVersions","versions":["v1"],"serverAddressByClientCIDRs":[]})),
+            ("GET", ["api"]) => write_json(
+                w,
+                200,
+                &json!({"kind":"APIVersions","versions":["v1"],"serverAddressByClientCIDRs":[]}),
+            ),
             ("GET", ["api", "v1"]) => write_json(w, 200, &self.api_resource_list("", "v1")),
             ("GET", ["apis"]) => write_json(w, 200, &self.api_group_list()),
             ("GET", ["apis", group]) => write_json(w, 200, &self.api_group(group)),
-            ("GET", ["apis", group, version]) => write_json(w, 200, &self.api_resource_list(group, version)),
-            ("GET", ["healthz"]) | ("GET", ["livez"]) | ("GET", ["readyz"]) => write_text(w, 200, "ok"),
+            ("GET", ["apis", group, version]) => {
+                write_json(w, 200, &self.api_resource_list(group, version))
+            }
+            ("GET", ["healthz"]) | ("GET", ["livez"]) | ("GET", ["readyz"]) => {
+                write_text(w, 200, "ok")
+            }
             // OpenAPI v3: kubectl ≥1.27 requires it for client-side `apply`
             // validation (404 → "failed to download openapi"). We serve a
             // discovery doc + per-group-version docs whose schemas are
             // permissive (x-kubernetes-preserve-unknown-fields), so any object
             // validates. Operators use client-go and don't need this.
             ("GET", ["openapi", "v3"]) => write_json(w, 200, &self.openapi_root()),
-            ("GET", ["openapi", "v3", "api", "v1"]) => write_json(w, 200, &self.openapi_gv("", "v1")),
+            ("GET", ["openapi", "v3", "api", "v1"]) => {
+                write_json(w, 200, &self.openapi_gv("", "v1"))
+            }
             ("GET", ["openapi", "v3", "apis", g, v]) => write_json(w, 200, &self.openapi_gv(g, v)),
             // kubectl's client-side `apply` validator downloads OpenAPI v2 in
             // gnostic protobuf and errors if it 404s. We serve a minimal valid
@@ -168,25 +200,55 @@ impl ApiServer {
                 "application/com.github.proto-openapi.spec.v2.v1.0+protobuf",
                 &openapi_v2_proto(),
             ),
-            ("GET", ["openapi", ..]) => {
-                write_json(w, 404, &status_obj(404, "only openapi v2/v3 are served by slim", "NotFound"))
-            }
+            ("GET", ["openapi", ..]) => write_json(
+                w,
+                404,
+                &status_obj(404, "only openapi v2/v3 are served by slim", "NotFound"),
+            ),
 
             // ---- core group: /api/v1/... ----
-            ("GET", ["api", "v1", rest @ ..]) => self.handle_resource("", "v1", rest, req, w, Verb::Get),
-            ("POST", ["api", "v1", rest @ ..]) => self.handle_resource("", "v1", rest, req, w, Verb::Create),
-            ("PUT", ["api", "v1", rest @ ..]) => self.handle_resource("", "v1", rest, req, w, Verb::Update),
-            ("PATCH", ["api", "v1", rest @ ..]) => self.handle_resource("", "v1", rest, req, w, Verb::Patch),
-            ("DELETE", ["api", "v1", rest @ ..]) => self.handle_resource("", "v1", rest, req, w, Verb::Delete),
+            ("GET", ["api", "v1", rest @ ..]) => {
+                self.handle_resource("", "v1", rest, req, w, Verb::Get)
+            }
+            ("POST", ["api", "v1", rest @ ..]) => {
+                self.handle_resource("", "v1", rest, req, w, Verb::Create)
+            }
+            ("PUT", ["api", "v1", rest @ ..]) => {
+                self.handle_resource("", "v1", rest, req, w, Verb::Update)
+            }
+            ("PATCH", ["api", "v1", rest @ ..]) => {
+                self.handle_resource("", "v1", rest, req, w, Verb::Patch)
+            }
+            ("DELETE", ["api", "v1", rest @ ..]) => {
+                self.handle_resource("", "v1", rest, req, w, Verb::Delete)
+            }
 
             // ---- named groups: /apis/<group>/<version>/... ----
-            ("GET", ["apis", g, v, rest @ ..]) => self.handle_resource(g, v, rest, req, w, Verb::Get),
-            ("POST", ["apis", g, v, rest @ ..]) => self.handle_resource(g, v, rest, req, w, Verb::Create),
-            ("PUT", ["apis", g, v, rest @ ..]) => self.handle_resource(g, v, rest, req, w, Verb::Update),
-            ("PATCH", ["apis", g, v, rest @ ..]) => self.handle_resource(g, v, rest, req, w, Verb::Patch),
-            ("DELETE", ["apis", g, v, rest @ ..]) => self.handle_resource(g, v, rest, req, w, Verb::Delete),
+            ("GET", ["apis", g, v, rest @ ..]) => {
+                self.handle_resource(g, v, rest, req, w, Verb::Get)
+            }
+            ("POST", ["apis", g, v, rest @ ..]) => {
+                self.handle_resource(g, v, rest, req, w, Verb::Create)
+            }
+            ("PUT", ["apis", g, v, rest @ ..]) => {
+                self.handle_resource(g, v, rest, req, w, Verb::Update)
+            }
+            ("PATCH", ["apis", g, v, rest @ ..]) => {
+                self.handle_resource(g, v, rest, req, w, Verb::Patch)
+            }
+            ("DELETE", ["apis", g, v, rest @ ..]) => {
+                self.handle_resource(g, v, rest, req, w, Verb::Delete)
+            }
 
-            _ => write_json(w, 404, &status_obj(404, &format!("not found: {} {}", req.method, req.path), "NotFound")),
+            _ => write_json(
+                w,
+                404,
+                &status_obj(
+                    404,
+                    &format!("not found: {} {}", req.method, req.path),
+                    "NotFound",
+                ),
+            ),
         }
     }
 
@@ -196,19 +258,42 @@ impl ApiServer {
     ///   [namespaces, ns, resource]
     ///   [namespaces, ns, resource, name]
     ///   [namespaces, ns, resource, name, subresource]
-    fn handle_resource(&self, group: &str, _version: &str, rest: &[&str], req: &Req, w: &mut dyn Write, verb: Verb) -> std::io::Result<()> {
-        let (ns, resource, name, subresource): (Option<String>, &str, Option<&str>, Option<&str>) = match rest {
-            ["namespaces", ns, resource] => (Some(ns.to_string()), resource, None, None),
-            ["namespaces", ns, resource, name] => (Some(ns.to_string()), resource, Some(name), None),
-            ["namespaces", ns, resource, name, sub] => (Some(ns.to_string()), resource, Some(name), Some(sub)),
-            [resource] => (None, resource, None, None),
-            [resource, name] => (None, resource, Some(name), None),
-            [resource, name, sub] => (None, resource, Some(name), Some(sub)),
-            _ => return write_json(w, 404, &status_obj(404, "unsupported path", "NotFound")),
-        };
+    fn handle_resource(
+        &self,
+        group: &str,
+        _version: &str,
+        rest: &[&str],
+        req: &Req,
+        w: &mut dyn Write,
+        verb: Verb,
+    ) -> std::io::Result<()> {
+        let (ns, resource, name, subresource): (Option<String>, &str, Option<&str>, Option<&str>) =
+            match rest {
+                ["namespaces", ns, resource] => (Some(ns.to_string()), resource, None, None),
+                ["namespaces", ns, resource, name] => {
+                    (Some(ns.to_string()), resource, Some(name), None)
+                }
+                ["namespaces", ns, resource, name, sub] => {
+                    (Some(ns.to_string()), resource, Some(name), Some(sub))
+                }
+                [resource] => (None, resource, None, None),
+                [resource, name] => (None, resource, Some(name), None),
+                [resource, name, sub] => (None, resource, Some(name), Some(sub)),
+                _ => return write_json(w, 404, &status_obj(404, "unsupported path", "NotFound")),
+            };
 
         let Some(info) = self.store.lookup(group, resource) else {
-            return write_json(w, 404, &status_obj(404, &format!("the server could not find the requested resource ({group}/{resource})"), "NotFound"));
+            return write_json(
+                w,
+                404,
+                &status_obj(
+                    404,
+                    &format!(
+                        "the server could not find the requested resource ({group}/{resource})"
+                    ),
+                    "NotFound",
+                ),
+            );
         };
 
         // The scale subresource needs a real Scale object response (kubectl
@@ -234,7 +319,13 @@ impl ApiServer {
         }
     }
 
-    fn do_list(&self, info: &ResourceInfo, ns: Option<&str>, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
+    fn do_list(
+        &self,
+        info: &ResourceInfo,
+        ns: Option<&str>,
+        req: &Req,
+        w: &mut dyn Write,
+    ) -> std::io::Result<()> {
         let labels = label_selector(&req.query);
         let (items, rv) = self.store.list(info, ns, &labels);
         // kubectl's human-readable `get` requests a server-side Table; without
@@ -251,32 +342,74 @@ impl ApiServer {
         write_json(w, 200, &list)
     }
 
-    fn do_get(&self, info: &ResourceInfo, ns: &Option<String>, name: &str, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
+    fn do_get(
+        &self,
+        info: &ResourceInfo,
+        ns: &Option<String>,
+        name: &str,
+        req: &Req,
+        w: &mut dyn Write,
+    ) -> std::io::Result<()> {
         let nsv = ns.clone().unwrap_or_default();
         match self.store.get(info, &nsv, name) {
             Some(obj) => {
                 if wants_table(req) {
-                    let rv = obj.pointer("/metadata/resourceVersion").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let rv = obj
+                        .pointer("/metadata/resourceVersion")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
                     return write_json(w, 200, &build_table(info, std::slice::from_ref(&obj), rv));
                 }
                 write_json(w, 200, &obj)
             }
-            None => write_json(w, 404, &status_obj(404, &format!("{} \"{name}\" not found", info.singular), "NotFound")),
+            None => write_json(
+                w,
+                404,
+                &status_obj(
+                    404,
+                    &format!("{} \"{name}\" not found", info.singular),
+                    "NotFound",
+                ),
+            ),
         }
     }
 
-    fn do_create(&self, info: &ResourceInfo, ns: &Option<String>, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
+    fn do_create(
+        &self,
+        info: &ResourceInfo,
+        ns: &Option<String>,
+        req: &Req,
+        w: &mut dyn Write,
+    ) -> std::io::Result<()> {
         let Ok(obj) = serde_json::from_slice::<Value>(&req.body) else {
             return write_json(w, 400, &status_obj(400, "invalid body", "BadRequest"));
         };
-        let name = obj.pointer("/metadata/name").and_then(|v| v.as_str()).map(String::from);
-        let gen = obj.pointer("/metadata/generateName").and_then(|v| v.as_str()).map(String::from);
+        let name = obj
+            .pointer("/metadata/name")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let gen = obj
+            .pointer("/metadata/generateName")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let name = match (name, gen) {
             (Some(n), _) => n,
             (None, Some(g)) => format!("{g}{}", rand_suffix()),
-            _ => return write_json(w, 422, &status_obj(422, "metadata.name required", "Invalid")),
+            _ => {
+                return write_json(
+                    w,
+                    422,
+                    &status_obj(422, "metadata.name required", "Invalid"),
+                )
+            }
         };
-        let nsv = ns.clone().unwrap_or_else(|| obj.pointer("/metadata/namespace").and_then(|v| v.as_str()).unwrap_or("default").to_string());
+        let nsv = ns.clone().unwrap_or_else(|| {
+            obj.pointer("/metadata/namespace")
+                .and_then(|v| v.as_str())
+                .unwrap_or("default")
+                .to_string()
+        });
         // CRD application also registers the new resource type.
         if info.resource == "customresourcedefinitions" {
             self.register_crd(&obj);
@@ -285,7 +418,15 @@ impl ApiServer {
         write_json(w, 201, &created)
     }
 
-    fn do_update(&self, info: &ResourceInfo, ns: &Option<String>, name: &str, sub: Option<&str>, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
+    fn do_update(
+        &self,
+        info: &ResourceInfo,
+        ns: &Option<String>,
+        name: &str,
+        sub: Option<&str>,
+        req: &Req,
+        w: &mut dyn Write,
+    ) -> std::io::Result<()> {
         let Ok(mut obj) = serde_json::from_slice::<Value>(&req.body) else {
             return write_json(w, 400, &status_obj(400, "invalid body", "BadRequest"));
         };
@@ -294,7 +435,9 @@ impl ApiServer {
         if sub == Some("status") {
             if let Some(mut existing) = self.store.get(info, &nsv, name) {
                 if let Some(st) = obj.get("status").cloned() {
-                    existing.as_object_mut().map(|o| o.insert("status".into(), st));
+                    existing
+                        .as_object_mut()
+                        .map(|o| o.insert("status".into(), st));
                 }
                 let saved = self.store.put(info, existing, &nsv, name, false);
                 return write_json(w, 200, &saved);
@@ -302,16 +445,34 @@ impl ApiServer {
             return write_json(w, 404, &status_obj(404, "not found", "NotFound"));
         }
         if obj.pointer("/metadata/name").is_none() {
-            obj.pointer_mut("/metadata").and_then(|m| m.as_object_mut()).map(|m| m.insert("name".into(), json!(name)));
+            obj.pointer_mut("/metadata")
+                .and_then(|m| m.as_object_mut())
+                .map(|m| m.insert("name".into(), json!(name)));
         }
         let saved = self.store.put(info, obj, &nsv, name, false);
         write_json(w, 200, &saved)
     }
 
-    fn do_patch(&self, info: &ResourceInfo, ns: &Option<String>, name: &str, sub: Option<&str>, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
+    fn do_patch(
+        &self,
+        info: &ResourceInfo,
+        ns: &Option<String>,
+        name: &str,
+        sub: Option<&str>,
+        req: &Req,
+        w: &mut dyn Write,
+    ) -> std::io::Result<()> {
         let nsv = ns.clone().unwrap_or_default();
         let Some(mut existing) = self.store.get(info, &nsv, name) else {
-            return write_json(w, 404, &status_obj(404, &format!("{} \"{name}\" not found", info.singular), "NotFound"));
+            return write_json(
+                w,
+                404,
+                &status_obj(
+                    404,
+                    &format!("{} \"{name}\" not found", info.singular),
+                    "NotFound",
+                ),
+            );
         };
         let Ok(patch) = serde_json::from_slice::<Value>(&req.body) else {
             return write_json(w, 400, &status_obj(400, "invalid patch", "BadRequest"));
@@ -326,21 +487,51 @@ impl ApiServer {
         write_json(w, 200, &saved)
     }
 
-    fn do_delete(&self, info: &ResourceInfo, ns: &Option<String>, name: &str, w: &mut dyn Write) -> std::io::Result<()> {
+    fn do_delete(
+        &self,
+        info: &ResourceInfo,
+        ns: &Option<String>,
+        name: &str,
+        w: &mut dyn Write,
+    ) -> std::io::Result<()> {
         let nsv = ns.clone().unwrap_or_default();
         match self.store.delete(info, &nsv, name) {
             Some(obj) => write_json(w, 200, &obj),
-            None => write_json(w, 404, &status_obj(404, &format!("{} \"{name}\" not found", info.singular), "NotFound")),
+            None => write_json(
+                w,
+                404,
+                &status_obj(
+                    404,
+                    &format!("{} \"{name}\" not found", info.singular),
+                    "NotFound",
+                ),
+            ),
         }
     }
 
     /// The `/scale` subresource: GET returns an autoscaling/v1 Scale built
     /// from `.spec.replicas`; PUT/PATCH sets `.spec.replicas` on the parent
     /// and returns the updated Scale (what kubectl `scale` expects).
-    fn handle_scale(&self, verb: Verb, info: &ResourceInfo, ns: &Option<String>, name: &str, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
+    fn handle_scale(
+        &self,
+        verb: Verb,
+        info: &ResourceInfo,
+        ns: &Option<String>,
+        name: &str,
+        req: &Req,
+        w: &mut dyn Write,
+    ) -> std::io::Result<()> {
         let nsv = ns.clone().unwrap_or_default();
         let Some(mut obj) = self.store.get(info, &nsv, name) else {
-            return write_json(w, 404, &status_obj(404, &format!("{} \"{name}\" not found", info.singular), "NotFound"));
+            return write_json(
+                w,
+                404,
+                &status_obj(
+                    404,
+                    &format!("{} \"{name}\" not found", info.singular),
+                    "NotFound",
+                ),
+            );
         };
         if matches!(verb, Verb::Update | Verb::Patch) {
             if let Ok(body) = serde_json::from_slice::<Value>(&req.body) {
@@ -352,8 +543,14 @@ impl ApiServer {
                 }
             }
         }
-        let replicas = obj.pointer("/spec/replicas").and_then(|v| v.as_i64()).unwrap_or(1);
-        let rv = obj.pointer("/metadata/resourceVersion").cloned().unwrap_or(json!("0"));
+        let replicas = obj
+            .pointer("/spec/replicas")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1);
+        let rv = obj
+            .pointer("/metadata/resourceVersion")
+            .cloned()
+            .unwrap_or(json!("0"));
         let scale = json!({
             "apiVersion": "autoscaling/v1",
             "kind": "Scale",
@@ -377,10 +574,26 @@ impl ApiServer {
         let segs: Vec<&str> = req.path.split('/').filter(|s| !s.is_empty()).collect();
         let ns = seg_after(&segs, "namespaces").unwrap_or("default");
         let pod = seg_after(&segs, "pods").unwrap_or("");
-        let cmd: Vec<String> = req.query.iter().filter(|(k, _)| k == "command").map(|(_, v)| v.clone()).collect();
-        let tty = req.query.iter().any(|(k, v)| k == "tty" && (v == "true" || v == "1"));
-        let want_stdin = req.query.iter().any(|(k, v)| k == "stdin" && (v == "true" || v == "1"));
-        let container = req.query.iter().find(|(k, _)| k == "container").map(|(_, v)| v.as_str()).unwrap_or("");
+        let cmd: Vec<String> = req
+            .query
+            .iter()
+            .filter(|(k, _)| k == "command")
+            .map(|(_, v)| v.clone())
+            .collect();
+        let tty = req
+            .query
+            .iter()
+            .any(|(k, v)| k == "tty" && (v == "true" || v == "1"));
+        let want_stdin = req
+            .query
+            .iter()
+            .any(|(k, v)| k == "stdin" && (v == "true" || v == "1"));
+        let container = req
+            .query
+            .iter()
+            .find(|(k, _)| k == "container")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
         if cmd.is_empty() || pod.is_empty() {
             return write_to(stream, 400, "exec requires a pod and command");
         }
@@ -397,7 +610,11 @@ impl ApiServer {
         let mut h = match proxy.exec_start(ns, pod, container, &cmd, tty, want_stdin) {
             Ok(h) => h,
             Err(e) => {
-                let _ = ws_send(stream, 3, exec_status(1, &format!("exec failed: {e}")).as_bytes());
+                let _ = ws_send(
+                    stream,
+                    3,
+                    exec_status(1, &format!("exec failed: {e}")).as_bytes(),
+                );
                 return ws_close(stream);
             }
         };
@@ -431,21 +648,22 @@ impl ApiServer {
         // Output readers → mpsc → single frame writer (this thread).
         let (tx, rx) = std::sync::mpsc::channel::<(u8, Vec<u8>)>();
         let mut joins = Vec::new();
-        let mut spawn_reader = |mut f: std::fs::File, ch: u8, tx: std::sync::mpsc::Sender<(u8, Vec<u8>)>| {
-            joins.push(std::thread::spawn(move || {
-                let mut buf = [0u8; 8192];
-                loop {
-                    match f.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            if tx.send((ch, buf[..n].to_vec())).is_err() {
-                                break;
+        let mut spawn_reader =
+            |mut f: std::fs::File, ch: u8, tx: std::sync::mpsc::Sender<(u8, Vec<u8>)>| {
+                joins.push(std::thread::spawn(move || {
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        match f.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                if tx.send((ch, buf[..n].to_vec())).is_err() {
+                                    break;
+                                }
                             }
                         }
                     }
-                }
-            }));
-        };
+                }));
+            };
         if let Some(pty) = h.pty {
             spawn_reader(pty, 1, tx.clone());
         } else {
@@ -470,15 +688,32 @@ impl ApiServer {
         let status = if code == 0 {
             exec_status(0, "")
         } else {
-            exec_status(code, &format!("command terminated with non-zero exit code {code}"))
+            exec_status(
+                code,
+                &format!("command terminated with non-zero exit code {code}"),
+            )
         };
         let _ = ws_send(stream, 3, status.as_bytes());
         ws_close(stream)
     }
 
-    fn handle_log(&self, ns: &Option<String>, pod: &str, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
+    fn handle_log(
+        &self,
+        ns: &Option<String>,
+        pod: &str,
+        req: &Req,
+        w: &mut dyn Write,
+    ) -> std::io::Result<()> {
         let Some(proxy) = &self.proxy else {
-            return write_json(w, 501, &status_obj(501, "logs not available (no engine bound)", "NotImplemented"));
+            return write_json(
+                w,
+                501,
+                &status_obj(
+                    501,
+                    "logs not available (no engine bound)",
+                    "NotImplemented",
+                ),
+            );
         };
         let nsv = ns.clone().unwrap_or_else(|| "default".into());
         let container = query_str(&req.query, "container").unwrap_or("");
@@ -500,13 +735,25 @@ impl ApiServer {
         cw.finish()
     }
 
-    fn do_watch(&self, info: &ResourceInfo, ns: Option<&str>, req: &Req, w: &mut dyn Write) -> std::io::Result<()> {
+    fn do_watch(
+        &self,
+        info: &ResourceInfo,
+        ns: Option<&str>,
+        req: &Req,
+        w: &mut dyn Write,
+    ) -> std::io::Result<()> {
         let labels = label_selector(&req.query);
-        let since = query_str(&req.query, "resourceVersion").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        let since = query_str(&req.query, "resourceVersion")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
         let (backlog, rx) = match self.store.watch(info, ns, labels, since) {
             Ok(x) => x,
             Err(Gone) => {
-                return write_json(w, 410, &status_obj(410, "requested resourceVersion too old", "Expired"));
+                return write_json(
+                    w,
+                    410,
+                    &status_obj(410, "requested resourceVersion too old", "Expired"),
+                );
             }
         };
         // Stream: 200 + chunked, one JSON WatchEvent per chunk.
@@ -543,21 +790,48 @@ impl ApiServer {
     // ---- CRD registration ----
 
     fn register_crd(&self, crd: &Value) {
-        let group = crd.pointer("/spec/group").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let group = crd
+            .pointer("/spec/group")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let names = crd.pointer("/spec/names");
-        let plural = names.and_then(|n| n.get("plural")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let singular = names.and_then(|n| n.get("singular")).and_then(|v| v.as_str()).unwrap_or(&plural).to_string();
-        let kind = names.and_then(|n| n.get("kind")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let plural = names
+            .and_then(|n| n.get("plural"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let singular = names
+            .and_then(|n| n.get("singular"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&plural)
+            .to_string();
+        let kind = names
+            .and_then(|n| n.get("kind"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let short_names: Vec<String> = names
             .and_then(|n| n.get("shortNames"))
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
-        let scope = crd.pointer("/spec/scope").and_then(|v| v.as_str()).unwrap_or("Namespaced");
+        let scope = crd
+            .pointer("/spec/scope")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Namespaced");
         let versions: Vec<String> = crd
             .pointer("/spec/versions")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.get("name").and_then(|n| n.as_str()).map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.get("name").and_then(|n| n.as_str()).map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         for version in versions {
             self.store.register(ResourceInfo {
@@ -575,7 +849,11 @@ impl ApiServer {
     // ---- discovery builders ----
 
     fn api_resource_list(&self, group: &str, version: &str) -> Value {
-        let gv = if group.is_empty() { version.to_string() } else { format!("{group}/{version}") };
+        let gv = if group.is_empty() {
+            version.to_string()
+        } else {
+            format!("{group}/{version}")
+        };
         let resources: Vec<Value> = self
             .store
             .registry()
@@ -594,7 +872,8 @@ impl ApiServer {
     }
 
     fn api_group_list(&self) -> Value {
-        let mut groups: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = Default::default();
+        let mut groups: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+            Default::default();
         for r in self.store.registry() {
             if !r.group.is_empty() {
                 groups.entry(r.group).or_default().insert(r.version);
@@ -607,21 +886,37 @@ impl ApiServer {
     // ---- openapi v3 (permissive) ----
 
     fn gv_paths(&self) -> std::collections::BTreeSet<(String, String)> {
-        self.store.registry().into_iter().map(|r| (r.group, r.version)).collect()
+        self.store
+            .registry()
+            .into_iter()
+            .map(|r| (r.group, r.version))
+            .collect()
     }
 
     fn openapi_root(&self) -> Value {
         let mut paths = serde_json::Map::new();
         for (g, v) in self.gv_paths() {
-            let p = if g.is_empty() { format!("api/{v}") } else { format!("apis/{g}/{v}") };
-            paths.insert(p.clone(), json!({"serverRelativeURL": format!("/openapi/v3/{p}")}));
+            let p = if g.is_empty() {
+                format!("api/{v}")
+            } else {
+                format!("apis/{g}/{v}")
+            };
+            paths.insert(
+                p.clone(),
+                json!({"serverRelativeURL": format!("/openapi/v3/{p}")}),
+            );
         }
         json!({ "paths": paths })
     }
 
     fn openapi_gv(&self, group: &str, version: &str) -> Value {
         let mut schemas = serde_json::Map::new();
-        for r in self.store.registry().into_iter().filter(|r| r.group == group && r.version == version) {
+        for r in self
+            .store
+            .registry()
+            .into_iter()
+            .filter(|r| r.group == group && r.version == version)
+        {
             let key = if group.is_empty() {
                 format!("io.k8s.api.core.{version}.{}", r.kind)
             } else {
@@ -689,7 +984,9 @@ fn version_info() -> Value {
 // ---- server-side Table printing (kubectl human-readable `get`) ----
 
 fn wants_table(req: &Req) -> bool {
-    req.header("accept").map(|a| a.contains("as=Table")).unwrap_or(false)
+    req.header("accept")
+        .map(|a| a.contains("as=Table"))
+        .unwrap_or(false)
 }
 
 /// Build a meta.k8s.io/v1 Table for `items` with per-kind columns, so real
@@ -697,10 +994,20 @@ fn wants_table(req: &Req) -> bool {
 /// NAME/AGE fallback.
 fn build_table(info: &ResourceInfo, items: &[Value], rv: u64) -> Value {
     let cols: &[(&str, &str)] = match info.resource.as_str() {
-        "pods" => &[("Name", "string"), ("Ready", "string"), ("Status", "string"), ("Restarts", "integer"), ("Age", "string")],
-        "deployments" | "replicasets" | "statefulsets" => {
-            &[("Name", "string"), ("Ready", "string"), ("Up-to-date", "integer"), ("Available", "integer"), ("Age", "string")]
-        }
+        "pods" => &[
+            ("Name", "string"),
+            ("Ready", "string"),
+            ("Status", "string"),
+            ("Restarts", "integer"),
+            ("Age", "string"),
+        ],
+        "deployments" | "replicasets" | "statefulsets" => &[
+            ("Name", "string"),
+            ("Ready", "string"),
+            ("Up-to-date", "integer"),
+            ("Available", "integer"),
+            ("Age", "string"),
+        ],
         _ => &[("Name", "string"), ("Age", "string")],
     };
     let coldefs: Vec<Value> = cols
@@ -711,20 +1018,47 @@ fn build_table(info: &ResourceInfo, items: &[Value], rv: u64) -> Value {
     let rows: Vec<Value> = items
         .iter()
         .map(|o| {
-            let name = o.pointer("/metadata/name").and_then(|v| v.as_str()).unwrap_or("");
+            let name = o
+                .pointer("/metadata/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let age = age_of(o);
             let cells: Vec<Value> = match info.resource.as_str() {
                 "pods" => {
                     let status = pod_status_cell(o);
                     let (ready, restarts) = pod_ready_restarts(o);
-                    vec![json!(name), json!(ready), json!(status), json!(restarts), json!(age)]
+                    vec![
+                        json!(name),
+                        json!(ready),
+                        json!(status),
+                        json!(restarts),
+                        json!(age),
+                    ]
                 }
                 "deployments" | "replicasets" | "statefulsets" => {
-                    let desired = o.pointer("/spec/replicas").and_then(|v| v.as_i64()).unwrap_or(1);
-                    let ready = o.pointer("/status/readyReplicas").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let updated = o.pointer("/status/updatedReplicas").and_then(|v| v.as_i64()).unwrap_or(ready);
-                    let avail = o.pointer("/status/availableReplicas").and_then(|v| v.as_i64()).unwrap_or(ready);
-                    vec![json!(name), json!(format!("{ready}/{desired}")), json!(updated), json!(avail), json!(age)]
+                    let desired = o
+                        .pointer("/spec/replicas")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(1);
+                    let ready = o
+                        .pointer("/status/readyReplicas")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let updated = o
+                        .pointer("/status/updatedReplicas")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(ready);
+                    let avail = o
+                        .pointer("/status/availableReplicas")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(ready);
+                    vec![
+                        json!(name),
+                        json!(format!("{ready}/{desired}")),
+                        json!(updated),
+                        json!(avail),
+                        json!(age),
+                    ]
                 }
                 _ => vec![json!(name), json!(age)],
             };
@@ -742,13 +1076,23 @@ fn build_table(info: &ResourceInfo, items: &[Value], rv: u64) -> Value {
 
 /// Pod STATUS cell: `Init:done/total` while init containers run, else the phase.
 fn pod_status_cell(pod: &Value) -> String {
-    let phase = pod.pointer("/status/phase").and_then(|v| v.as_str()).unwrap_or("Pending");
+    let phase = pod
+        .pointer("/status/phase")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Pending");
     if phase == "Pending" {
-        if let Some(inits) = pod.pointer("/status/initContainerStatuses").and_then(|v| v.as_array()) {
+        if let Some(inits) = pod
+            .pointer("/status/initContainerStatuses")
+            .and_then(|v| v.as_array())
+        {
             if !inits.is_empty() {
                 let done = inits
                     .iter()
-                    .filter(|c| c.pointer("/state/terminated/exitCode").and_then(|v| v.as_i64()) == Some(0))
+                    .filter(|c| {
+                        c.pointer("/state/terminated/exitCode")
+                            .and_then(|v| v.as_i64())
+                            == Some(0)
+                    })
                     .count();
                 if done < inits.len() {
                     return format!("Init:{done}/{}", inits.len());
@@ -761,11 +1105,20 @@ fn pod_status_cell(pod: &Value) -> String {
 
 /// (ready "n/m", total restarts) from a pod's containerStatuses.
 fn pod_ready_restarts(pod: &Value) -> (String, i64) {
-    match pod.pointer("/status/containerStatuses").and_then(|c| c.as_array()) {
+    match pod
+        .pointer("/status/containerStatuses")
+        .and_then(|c| c.as_array())
+    {
         Some(arr) if !arr.is_empty() => {
             let total = arr.len();
-            let ready = arr.iter().filter(|c| c.get("ready").and_then(|r| r.as_bool()).unwrap_or(false)).count();
-            let restarts = arr.iter().filter_map(|c| c.get("restartCount").and_then(|r| r.as_i64())).sum();
+            let ready = arr
+                .iter()
+                .filter(|c| c.get("ready").and_then(|r| r.as_bool()).unwrap_or(false))
+                .count();
+            let restarts = arr
+                .iter()
+                .filter_map(|c| c.get("restartCount").and_then(|r| r.as_i64()))
+                .sum();
             (format!("{ready}/{total}"), restarts)
         }
         _ => {
@@ -777,11 +1130,19 @@ fn pod_ready_restarts(pod: &Value) -> (String, i64) {
 
 /// kubectl-style age ("5s","3m","2h","4d") from metadata.creationTimestamp.
 fn age_of(obj: &Value) -> String {
-    let Some(ts) = obj.pointer("/metadata/creationTimestamp").and_then(|v| v.as_str()) else {
+    let Some(ts) = obj
+        .pointer("/metadata/creationTimestamp")
+        .and_then(|v| v.as_str())
+    else {
         return "<unknown>".into();
     };
-    let Some(created) = parse_rfc3339(ts) else { return "<unknown>".into() };
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let Some(created) = parse_rfc3339(ts) else {
+        return "<unknown>".into();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let secs = (now - created).max(0);
     if secs < 60 {
         format!("{secs}s")
@@ -841,7 +1202,10 @@ fn merge(base: &mut Value, patch: &Value) {
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 fn seg_after<'a>(segs: &'a [&'a str], key: &str) -> Option<&'a str> {
-    segs.iter().position(|s| *s == key).and_then(|i| segs.get(i + 1)).copied()
+    segs.iter()
+        .position(|s| *s == key)
+        .and_then(|i| segs.get(i + 1))
+        .copied()
 }
 
 /// Choose a channel subprotocol from the client's offer (prefer v4, which we
@@ -941,6 +1305,9 @@ fn read_client_frames(
     resize_fd: Option<RawFd>,
     proxy: &dyn PodProxy,
 ) {
+    // Other match arms (Ok(None)/Err) break, so this reads as while-let, but the
+    // explicit loop keeps the close/error handling obvious. Allow the lint.
+    #[allow(clippy::while_let_loop)]
     loop {
         match read_ws_frame(rd) {
             Ok(Some((op, payload))) => {
@@ -964,7 +1331,8 @@ fn read_client_frames(
                         if let Some(fd) = resize_fd {
                             if let Ok(v) = serde_json::from_slice::<Value>(data) {
                                 let w = v.get("Width").and_then(|x| x.as_u64()).unwrap_or(0) as u16;
-                                let h = v.get("Height").and_then(|x| x.as_u64()).unwrap_or(0) as u16;
+                                let h =
+                                    v.get("Height").and_then(|x| x.as_u64()).unwrap_or(0) as u16;
                                 if w > 0 && h > 0 {
                                     proxy.exec_resize(fd, w, h);
                                 }
@@ -1016,12 +1384,24 @@ fn b64_std(data: &[u8]) -> String {
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -1055,7 +1435,12 @@ fn read_request<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Req>> {
     let hdrs: Vec<(String, String)> = r
         .headers
         .iter()
-        .map(|h| (h.name.to_string(), String::from_utf8_lossy(h.value).into_owned()))
+        .map(|h| {
+            (
+                h.name.to_string(),
+                String::from_utf8_lossy(h.value).into_owned(),
+            )
+        })
         .collect();
     let clen = hdrs
         .iter()
@@ -1066,7 +1451,13 @@ fn read_request<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Req>> {
     if clen > 0 {
         reader.read_exact(&mut body)?;
     }
-    Ok(Some(Req { method, path, query, headers: hdrs, body }))
+    Ok(Some(Req {
+        method,
+        path,
+        query,
+        headers: hdrs,
+        body,
+    }))
 }
 
 fn parse_query(full: &str) -> (String, Vec<(String, String)>) {
@@ -1238,6 +1629,7 @@ fn url_decode(s: &str) -> String {
 
 fn rand_suffix() -> String {
     let mut b = [0u8; 3];
-    let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b));
+    let _ = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b));
     b.iter().map(|x| format!("{x:02x}")).collect()
 }

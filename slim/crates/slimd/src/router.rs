@@ -309,10 +309,8 @@ fn wait_container(engine: &EngineRef, ctx: &mut Ctx, id: &str) -> R {
 fn prune_containers(engine: &EngineRef, ctx: &mut Ctx) -> R {
     let mut deleted = Vec::new();
     for c in engine.list(true) {
-        if c.state.status == "exited" {
-            if engine.remove(&c.id, false, false).is_ok() {
-                deleted.push(c.id);
-            }
+        if c.state.status == "exited" && engine.remove(&c.id, false, false).is_ok() {
+            deleted.push(c.id);
         }
     }
     ctx.respond_json(

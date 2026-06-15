@@ -107,11 +107,31 @@ fn lex(src: &str) -> Result<Vec<Tok>, TmplError> {
 enum Node {
     Text(String),
     Output(Expr),
-    Assign { name: String, expr: Expr, declare: bool },
-    If { branches: Vec<(Expr, Vec<Node>)>, else_body: Option<Vec<Node>> },
-    Range { key: Option<String>, val: Option<String>, expr: Expr, body: Vec<Node>, else_body: Option<Vec<Node>> },
-    With { expr: Expr, body: Vec<Node>, else_body: Option<Vec<Node>> },
-    Template { name: String, arg: Option<Expr> },
+    Assign {
+        name: String,
+        expr: Expr,
+        declare: bool,
+    },
+    If {
+        branches: Vec<(Expr, Vec<Node>)>,
+        else_body: Option<Vec<Node>>,
+    },
+    Range {
+        key: Option<String>,
+        val: Option<String>,
+        expr: Expr,
+        body: Vec<Node>,
+        else_body: Option<Vec<Node>>,
+    },
+    With {
+        expr: Expr,
+        body: Vec<Node>,
+        else_body: Option<Vec<Node>>,
+    },
+    Template {
+        name: String,
+        arg: Option<Expr>,
+    },
     Break,
     Continue,
 }
@@ -192,7 +212,10 @@ impl Parser<'_> {
                         break;
                     }
                 }
-                Ok(Some(Node::If { branches, else_body }))
+                Ok(Some(Node::If {
+                    branches,
+                    else_body,
+                }))
             }
             "range" => {
                 let (key, val, expr) = parse_range_head(a[5..].trim())?;
@@ -203,7 +226,13 @@ impl Parser<'_> {
                 } else {
                     None
                 };
-                Ok(Some(Node::Range { key, val, expr, body, else_body }))
+                Ok(Some(Node::Range {
+                    key,
+                    val,
+                    expr,
+                    body,
+                    else_body,
+                }))
             }
             "with" => {
                 let expr = parse_pipeline(a[4..].trim())?;
@@ -214,7 +243,11 @@ impl Parser<'_> {
                 } else {
                     None
                 };
-                Ok(Some(Node::With { expr, body, else_body }))
+                Ok(Some(Node::With {
+                    expr,
+                    body,
+                    else_body,
+                }))
             }
             "define" => {
                 let name = unquote(a[6..].trim());
@@ -226,7 +259,11 @@ impl Parser<'_> {
                 let rest = a[5..].trim();
                 let (name_part, arg_part) = split_first_token(rest);
                 let name = unquote(name_part);
-                let arg = if arg_part.trim().is_empty() { None } else { Some(parse_pipeline(arg_part.trim())?) };
+                let arg = if arg_part.trim().is_empty() {
+                    None
+                } else {
+                    Some(parse_pipeline(arg_part.trim())?)
+                };
                 let (body, _) = self.parse_body(&["end"])?;
                 self.defines.insert(name.clone(), body);
                 Ok(Some(Node::Template { name, arg }))
@@ -235,7 +272,11 @@ impl Parser<'_> {
                 let rest = a[8..].trim();
                 let (name_part, arg_part) = split_first_token(rest);
                 let name = unquote(name_part);
-                let arg = if arg_part.trim().is_empty() { None } else { Some(parse_pipeline(arg_part.trim())?) };
+                let arg = if arg_part.trim().is_empty() {
+                    None
+                } else {
+                    Some(parse_pipeline(arg_part.trim())?)
+                };
                 Ok(Some(Node::Template { name, arg }))
             }
             "break" => Ok(Some(Node::Break)),
@@ -246,7 +287,11 @@ impl Parser<'_> {
                     if let Some(idx) = find_assign(a) {
                         let name = a[1..idx.0].trim().to_string();
                         let expr = parse_pipeline(a[idx.1..].trim())?;
-                        return Ok(Some(Node::Assign { name, expr, declare: idx.2 }));
+                        return Ok(Some(Node::Assign {
+                            name,
+                            expr,
+                            declare: idx.2,
+                        }));
                     }
                 }
                 Ok(Some(Node::Output(parse_pipeline(a)?)))
@@ -278,7 +323,10 @@ fn parse_range_head(s: &str) -> Result<(Option<String>, Option<String>, Expr), T
     if let Some(idx) = s.find(":=") {
         let vars = s[..idx].trim();
         let expr = parse_pipeline(s[idx + 2..].trim())?;
-        let names: Vec<&str> = vars.split(',').map(|v| v.trim().trim_start_matches('$')).collect();
+        let names: Vec<&str> = vars
+            .split(',')
+            .map(|v| v.trim().trim_start_matches('$'))
+            .collect();
         return Ok(match names.as_slice() {
             [v] => (None, Some(v.to_string()), expr),
             [k, v] => (Some(k.to_string()), Some(v.to_string()), expr),
@@ -293,7 +341,9 @@ fn parse_range_head(s: &str) -> Result<(Option<String>, Option<String>, Expr), T
 fn parse_pipeline(s: &str) -> Result<Expr, TmplError> {
     let parts = split_top(s, '|');
     let mut iter = parts.into_iter();
-    let first = iter.next().ok_or_else(|| TmplError("empty pipeline".into()))?;
+    let first = iter
+        .next()
+        .ok_or_else(|| TmplError("empty pipeline".into()))?;
     let mut expr = parse_command(first.trim())?;
     for stage in iter {
         let staged = parse_command(stage.trim())?;
@@ -323,7 +373,10 @@ fn parse_command(s: &str) -> Result<Expr, TmplError> {
     }
     let name = &tokens[0];
     if is_ident(name) {
-        let args = tokens[1..].iter().map(|t| parse_operand(t)).collect::<Result<Vec<_>, _>>()?;
+        let args = tokens[1..]
+            .iter()
+            .map(|t| parse_operand(t))
+            .collect::<Result<Vec<_>, _>>()?;
         return Ok(Expr::Call(name.clone(), args));
     }
     parse_operand(&tokens[0])
@@ -355,10 +408,18 @@ fn parse_operand(s: &str) -> Result<Expr, TmplError> {
     }
     if let Some(rest) = s.strip_prefix('$') {
         if rest.starts_with('.') {
-            let path: Vec<String> = rest.split('.').filter(|p| !p.is_empty()).map(String::from).collect();
+            let path: Vec<String> = rest
+                .split('.')
+                .filter(|p| !p.is_empty())
+                .map(String::from)
+                .collect();
             return Ok(Expr::Var(String::new(), path));
         }
-        let parts: Vec<String> = rest.split('.').filter(|p| !p.is_empty()).map(String::from).collect();
+        let parts: Vec<String> = rest
+            .split('.')
+            .filter(|p| !p.is_empty())
+            .map(String::from)
+            .collect();
         let (name, path) = if parts.is_empty() {
             (String::new(), vec![])
         } else {
@@ -370,7 +431,11 @@ fn parse_operand(s: &str) -> Result<Expr, TmplError> {
         if rest.is_empty() {
             return Ok(Expr::Dot);
         }
-        let path: Vec<String> = rest.split('.').filter(|p| !p.is_empty()).map(String::from).collect();
+        let path: Vec<String> = rest
+            .split('.')
+            .filter(|p| !p.is_empty())
+            .map(String::from)
+            .collect();
         return Ok(Expr::Field(path));
     }
     if is_ident(s) {
@@ -392,11 +457,19 @@ impl Template {
         let toks = lex(src)?;
         let mut defines = BTreeMap::new();
         let nodes = {
-            let mut p = Parser { toks: &toks, pos: 0, defines: &mut defines };
+            let mut p = Parser {
+                toks: &toks,
+                pos: 0,
+                defines: &mut defines,
+            };
             let (nodes, _) = p.parse_body(&[])?;
             nodes
         };
-        Ok(Template { nodes, defines, funcs: BTreeMap::new() })
+        Ok(Template {
+            nodes,
+            defines,
+            funcs: BTreeMap::new(),
+        })
     }
 
     pub fn add_func(&mut self, name: &str, f: Func) {
@@ -407,7 +480,11 @@ impl Template {
         let toks = lex(src)?;
         let mut defines = std::mem::take(&mut self.defines);
         {
-            let mut p = Parser { toks: &toks, pos: 0, defines: &mut defines };
+            let mut p = Parser {
+                toks: &toks,
+                pos: 0,
+                defines: &mut defines,
+            };
             let (nodes, _) = p.parse_body(&[])?;
             defines.insert(name.to_string(), nodes);
         }
@@ -417,7 +494,12 @@ impl Template {
 
     pub fn render(&self, ctx: &Value) -> Result<String, TmplError> {
         let mut out = String::new();
-        let mut ev = Eval { root: ctx, defines: &self.defines, funcs: &self.funcs, vars: Vec::new() };
+        let mut ev = Eval {
+            root: ctx,
+            defines: &self.defines,
+            funcs: &self.funcs,
+            vars: Vec::new(),
+        };
         ev.exec(&self.nodes, ctx, &mut out)?;
         Ok(out)
     }
@@ -438,7 +520,12 @@ enum Flow {
 
 impl Eval<'_> {
     fn lookup_var(&self, name: &str) -> Value {
-        self.vars.iter().rev().find(|(n, _)| n == name).map(|(_, v)| v.clone()).unwrap_or(Value::Null)
+        self.vars
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+            .unwrap_or(Value::Null)
     }
 
     fn exec(&mut self, nodes: &[Node], dot: &Value, out: &mut String) -> Result<Flow, TmplError> {
@@ -449,7 +536,11 @@ impl Eval<'_> {
                     let v = self.eval(e, dot)?;
                     out.push_str(&stringify(&v));
                 }
-                Node::Assign { name, expr, declare } => {
+                Node::Assign {
+                    name,
+                    expr,
+                    declare,
+                } => {
                     let v = self.eval(expr, dot)?;
                     if *declare {
                         self.vars.push((name.clone(), v));
@@ -459,7 +550,10 @@ impl Eval<'_> {
                         self.vars.push((name.clone(), v));
                     }
                 }
-                Node::If { branches, else_body } => {
+                Node::If {
+                    branches,
+                    else_body,
+                } => {
                     let mut done = false;
                     for (cond, body) in branches {
                         if truthy(&self.eval(cond, dot)?) {
@@ -484,7 +578,11 @@ impl Eval<'_> {
                         }
                     }
                 }
-                Node::With { expr, body, else_body } => {
+                Node::With {
+                    expr,
+                    body,
+                    else_body,
+                } => {
                     let v = self.eval(expr, dot)?;
                     if truthy(&v) {
                         let depth = self.vars.len();
@@ -500,11 +598,24 @@ impl Eval<'_> {
                         }
                     }
                 }
-                Node::Range { key, val, expr, body, else_body } => {
+                Node::Range {
+                    key,
+                    val,
+                    expr,
+                    body,
+                    else_body,
+                } => {
                     let v = self.eval(expr, dot)?;
                     let items: Vec<(Value, Value)> = match &v {
-                        Value::Array(a) => a.iter().enumerate().map(|(i, x)| (Value::from(i as i64), x.clone())).collect(),
-                        Value::Object(m) => m.iter().map(|(k, x)| (Value::from(k.clone()), x.clone())).collect(),
+                        Value::Array(a) => a
+                            .iter()
+                            .enumerate()
+                            .map(|(i, x)| (Value::from(i as i64), x.clone()))
+                            .collect(),
+                        Value::Object(m) => m
+                            .iter()
+                            .map(|(k, x)| (Value::from(k.clone()), x.clone()))
+                            .collect(),
                         _ => vec![],
                     };
                     if items.is_empty() {
@@ -533,7 +644,10 @@ impl Eval<'_> {
                     }
                 }
                 Node::Template { name, arg } => {
-                    let body = self.defines.get(name).ok_or_else(|| TmplError(format!("no template {name:?}")))?;
+                    let body = self
+                        .defines
+                        .get(name)
+                        .ok_or_else(|| TmplError(format!("no template {name:?}")))?;
                     let new_dot = match arg {
                         Some(e) => self.eval(e, dot)?,
                         None => Value::Null,
@@ -560,14 +674,21 @@ impl Eval<'_> {
             Expr::Str(s) => Ok(Value::String(s.clone())),
             Expr::Field(path) => Ok(get_path(dot, path)),
             Expr::Var(name, path) => {
-                let base = if name.is_empty() { self.root.clone() } else { self.lookup_var(name) };
+                let base = if name.is_empty() {
+                    self.root.clone()
+                } else {
+                    self.lookup_var(name)
+                };
                 Ok(get_path(&base, path))
             }
             Expr::Pipe(l, r) => {
                 let lv = self.eval(l, dot)?;
                 match &**r {
                     Expr::Call(name, args) => {
-                        let mut argv: Vec<Value> = args.iter().map(|a| self.eval(a, dot)).collect::<Result<_, _>>()?;
+                        let mut argv: Vec<Value> = args
+                            .iter()
+                            .map(|a| self.eval(a, dot))
+                            .collect::<Result<_, _>>()?;
                         argv.push(lv);
                         self.call(name, &argv)
                     }
@@ -577,7 +698,10 @@ impl Eval<'_> {
             Expr::Call(name, args) if name == "include" || name == "tpl" => {
                 // Engine-level funcs: they render templates, so they need
                 // access to defines/funcs (Helm's `include`/`tpl`).
-                let argv: Vec<Value> = args.iter().map(|a| self.eval(a, dot)).collect::<Result<_, _>>()?;
+                let argv: Vec<Value> = args
+                    .iter()
+                    .map(|a| self.eval(a, dot))
+                    .collect::<Result<_, _>>()?;
                 if name == "include" {
                     let tname = argv.first().map(stringify).unwrap_or_default();
                     let sub_dot = argv.get(1).cloned().unwrap_or(Value::Null);
@@ -586,14 +710,24 @@ impl Eval<'_> {
                         .get(&tname)
                         .ok_or_else(|| TmplError(format!("include: no template {tname:?}")))?;
                     let mut out = String::new();
-                    let mut ev = Eval { root: self.root, defines: self.defines, funcs: self.funcs, vars: Vec::new() };
+                    let mut ev = Eval {
+                        root: self.root,
+                        defines: self.defines,
+                        funcs: self.funcs,
+                        vars: Vec::new(),
+                    };
                     ev.exec(body, &sub_dot, &mut out)?;
                     Ok(Value::String(out))
                 } else {
                     let src = argv.first().map(stringify).unwrap_or_default();
                     let sub_dot = argv.get(1).cloned().unwrap_or_else(|| dot.clone());
                     let t = Template::parse(&src)?;
-                    let mut ev = Eval { root: &sub_dot, defines: self.defines, funcs: self.funcs, vars: Vec::new() };
+                    let mut ev = Eval {
+                        root: &sub_dot,
+                        defines: self.defines,
+                        funcs: self.funcs,
+                        vars: Vec::new(),
+                    };
                     let mut out = String::new();
                     ev.exec(&t.nodes, &sub_dot, &mut out)?;
                     Ok(Value::String(out))
@@ -601,10 +735,13 @@ impl Eval<'_> {
             }
             Expr::Call(name, args) => {
                 if self.is_func(name) {
-                    let argv: Vec<Value> = args.iter().map(|a| self.eval(a, dot)).collect::<Result<_, _>>()?;
+                    let argv: Vec<Value> = args
+                        .iter()
+                        .map(|a| self.eval(a, dot))
+                        .collect::<Result<_, _>>()?;
                     self.call(name, &argv)
                 } else if args.is_empty() {
-                    Ok(get_path(dot, &[name.clone()]))
+                    Ok(get_path(dot, std::slice::from_ref(name)))
                 } else {
                     err(format!("function {name:?} not defined"))
                 }
@@ -644,26 +781,50 @@ const BUILTINS: &[&str] = &[
 
 fn builtin(name: &str, args: &[Value]) -> Result<Value, TmplError> {
     match name {
-        "and" => Ok(args.iter().find(|v| !truthy(v)).cloned().unwrap_or_else(|| args.last().cloned().unwrap_or(Value::Bool(false)))),
-        "or" => Ok(args.iter().find(|v| truthy(v)).cloned().unwrap_or_else(|| args.last().cloned().unwrap_or(Value::Bool(false)))),
+        "and" => Ok(args
+            .iter()
+            .find(|v| !truthy(v))
+            .cloned()
+            .unwrap_or_else(|| args.last().cloned().unwrap_or(Value::Bool(false)))),
+        "or" => Ok(args
+            .iter()
+            .find(|v| truthy(v))
+            .cloned()
+            .unwrap_or_else(|| args.last().cloned().unwrap_or(Value::Bool(false)))),
         "not" => Ok(Value::Bool(!truthy(args.first().unwrap_or(&Value::Null)))),
         "eq" => {
             let f = args.first().unwrap_or(&Value::Null);
-            Ok(Value::Bool(args.len() == 1 || args[1..].iter().any(|a| values_eq(f, a))))
+            Ok(Value::Bool(
+                args.len() == 1 || args[1..].iter().any(|a| values_eq(f, a)),
+            ))
         }
-        "ne" => Ok(Value::Bool(!values_eq(args.first().unwrap_or(&Value::Null), args.get(1).unwrap_or(&Value::Null)))),
+        "ne" => Ok(Value::Bool(!values_eq(
+            args.first().unwrap_or(&Value::Null),
+            args.get(1).unwrap_or(&Value::Null),
+        ))),
         "lt" => Ok(Value::Bool(cmp(args)? == std::cmp::Ordering::Less)),
         "le" => Ok(Value::Bool(cmp(args)? != std::cmp::Ordering::Greater)),
         "gt" => Ok(Value::Bool(cmp(args)? == std::cmp::Ordering::Greater)),
         "ge" => Ok(Value::Bool(cmp(args)? != std::cmp::Ordering::Less)),
-        "len" => Ok(Value::from(length(args.first().unwrap_or(&Value::Null)) as i64)),
+        "len" => Ok(Value::from(
+            length(args.first().unwrap_or(&Value::Null)) as i64
+        )),
         "index" => index(args),
         "slice" => slice(args),
-        "print" => Ok(Value::String(args.iter().map(stringify).collect::<Vec<_>>().join(""))),
-        "println" => Ok(Value::String(format!("{}\n", args.iter().map(stringify).collect::<Vec<_>>().join(" ")))),
+        "print" => Ok(Value::String(
+            args.iter().map(stringify).collect::<Vec<_>>().join(""),
+        )),
+        "println" => Ok(Value::String(format!(
+            "{}\n",
+            args.iter().map(stringify).collect::<Vec<_>>().join(" ")
+        ))),
         "printf" => printf(args),
-        "json" => Ok(Value::String(serde_json::to_string(args.first().unwrap_or(&Value::Null)).unwrap_or_default())),
-        "urlquery" | "html" | "js" => Ok(Value::String(stringify(args.first().unwrap_or(&Value::Null)))),
+        "json" => Ok(Value::String(
+            serde_json::to_string(args.first().unwrap_or(&Value::Null)).unwrap_or_default(),
+        )),
+        "urlquery" | "html" | "js" => Ok(Value::String(stringify(
+            args.first().unwrap_or(&Value::Null),
+        ))),
         _ => err(format!("function {name:?} not defined")),
     }
 }
@@ -701,13 +862,23 @@ fn slice(args: &[Value]) -> Result<Value, TmplError> {
     match v {
         Value::Array(a) => {
             let s = start.min(a.len());
-            let end = args.get(2).and_then(|x| x.as_i64()).map(|e| e as usize).unwrap_or(a.len()).clamp(s, a.len());
+            let end = args
+                .get(2)
+                .and_then(|x| x.as_i64())
+                .map(|e| e as usize)
+                .unwrap_or(a.len())
+                .clamp(s, a.len());
             Ok(Value::Array(a[s..end].to_vec()))
         }
         Value::String(st) => {
             let chars: Vec<char> = st.chars().collect();
             let s = start.min(chars.len());
-            let end = args.get(2).and_then(|x| x.as_i64()).map(|e| e as usize).unwrap_or(chars.len()).clamp(s, chars.len());
+            let end = args
+                .get(2)
+                .and_then(|x| x.as_i64())
+                .map(|e| e as usize)
+                .unwrap_or(chars.len())
+                .clamp(s, chars.len());
             Ok(Value::String(chars[s..end].iter().collect()))
         }
         _ => Ok(Value::Null),
@@ -782,13 +953,21 @@ fn format_verb(verb: char, spec: &str, arg: &Value, prec: Option<usize>) -> Stri
     let flags_width = inner.split_once('.').map(|(a, _)| a).unwrap_or(inner);
     let zero = flags_width.starts_with('0');
     let left = flags_width.starts_with('-');
-    let width: usize = flags_width.trim_start_matches(['-', '+', ' ', '0', '#']).parse().unwrap_or(0);
+    let width: usize = flags_width
+        .trim_start_matches(['-', '+', ' ', '0', '#'])
+        .parse()
+        .unwrap_or(0);
 
     let body = match verb {
-        'd' => arg.as_i64().map(|n| n.to_string()).unwrap_or_else(|| stringify(arg)),
+        'd' => arg
+            .as_i64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| stringify(arg)),
         'f' | 'F' => {
             let p = prec.unwrap_or(6);
-            arg.as_f64().map(|n| format!("{n:.p$}")).unwrap_or_else(|| stringify(arg))
+            arg.as_f64()
+                .map(|n| format!("{n:.p$}"))
+                .unwrap_or_else(|| stringify(arg))
         }
         'e' => arg.as_f64().map(|n| format!("{n:e}")).unwrap_or_default(),
         'g' => arg.as_f64().map(|n| format!("{n}")).unwrap_or_default(),
@@ -801,11 +980,18 @@ fn format_verb(verb: char, spec: &str, arg: &Value, prec: Option<usize>) -> Stri
         }
         'q' => format!("{:?}", stringify(arg)),
         't' => truthy(arg).to_string(),
-        'x' => arg.as_i64().map(|n| format!("{n:x}")).unwrap_or_else(|| hex_str(&stringify(arg))),
+        'x' => arg
+            .as_i64()
+            .map(|n| format!("{n:x}"))
+            .unwrap_or_else(|| hex_str(&stringify(arg))),
         'X' => arg.as_i64().map(|n| format!("{n:X}")).unwrap_or_default(),
         'o' => arg.as_i64().map(|n| format!("{n:o}")).unwrap_or_default(),
         'b' => arg.as_i64().map(|n| format!("{n:b}")).unwrap_or_default(),
-        'c' => arg.as_i64().and_then(|n| char::from_u32(n as u32)).map(|c| c.to_string()).unwrap_or_default(),
+        'c' => arg
+            .as_i64()
+            .and_then(|n| char::from_u32(n as u32))
+            .map(|c| c.to_string())
+            .unwrap_or_default(),
         _ => stringify(arg),
     };
     pad_to(&body, width, left, zero && !left)
@@ -853,7 +1039,10 @@ fn stringify(v: &Value) -> String {
 
 fn is_ident(s: &str) -> bool {
     !s.is_empty()
-        && s.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false)
+        && s.chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic() || c == '_')
+            .unwrap_or(false)
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
@@ -968,7 +1157,9 @@ fn split_top(s: &str, sep: char) -> Vec<String> {
 
 fn unquote(s: &str) -> String {
     let s = s.trim();
-    if s.len() >= 2 && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('`') && s.ends_with('`'))) {
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('`') && s.ends_with('`')))
+    {
         s[1..s.len() - 1].to_string()
     } else {
         s.to_string()
@@ -1024,19 +1215,40 @@ mod tests {
     #[test]
     fn conditionals() {
         let c = json!({"State": {"Status": "running"}});
-        assert_eq!(r("{{if eq .State.Status \"running\"}}up{{else}}down{{end}}", c.clone()), "up");
+        assert_eq!(
+            r(
+                "{{if eq .State.Status \"running\"}}up{{else}}down{{end}}",
+                c.clone()
+            ),
+            "up"
+        );
         let c2 = json!({"State": {"Status": "exited"}});
-        assert_eq!(r("{{if eq .State.Status \"running\"}}up{{else}}down{{end}}", c2), "down");
+        assert_eq!(
+            r(
+                "{{if eq .State.Status \"running\"}}up{{else}}down{{end}}",
+                c2
+            ),
+            "down"
+        );
         let c3 = json!({"n": 5});
         assert_eq!(r("{{if gt .n 3}}big{{end}}", c3.clone()), "big");
-        assert_eq!(r("{{if lt .n 3}}small{{else if eq .n 5}}five{{else}}?{{end}}", c3), "five");
+        assert_eq!(
+            r(
+                "{{if lt .n 3}}small{{else if eq .n 5}}five{{else}}?{{end}}",
+                c3
+            ),
+            "five"
+        );
     }
 
     #[test]
     fn ranges() {
         let c = json!({"items": ["a", "b", "c"]});
         assert_eq!(r("{{range .items}}{{.}},{{end}}", c.clone()), "a,b,c,");
-        assert_eq!(r("{{range $i, $v := .items}}{{$i}}={{$v}} {{end}}", c), "0=a 1=b 2=c ");
+        assert_eq!(
+            r("{{range $i, $v := .items}}{{$i}}={{$v}} {{end}}", c),
+            "0=a 1=b 2=c "
+        );
         let empty = json!({"items": []});
         assert_eq!(r("{{range .items}}x{{else}}none{{end}}", empty), "none");
     }
@@ -1044,7 +1256,13 @@ mod tests {
     #[test]
     fn ranges_over_networks() {
         let c = json!({"NetworkSettings": {"Networks": {"bridge": {"IPAddress": "10.88.0.2"}}}});
-        assert_eq!(r("{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", c), "10.88.0.2");
+        assert_eq!(
+            r(
+                "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                c
+            ),
+            "10.88.0.2"
+        );
     }
 
     #[test]
@@ -1082,7 +1300,10 @@ mod tests {
     #[test]
     fn define_and_template() {
         let c = json!({"Name": "n"});
-        assert_eq!(r("{{define \"t\"}}[{{.Name}}]{{end}}{{template \"t\" .}}", c), "[n]");
+        assert_eq!(
+            r("{{define \"t\"}}[{{.Name}}]{{end}}{{template \"t\" .}}", c),
+            "[n]"
+        );
     }
 
     #[test]
@@ -1109,7 +1330,12 @@ mod tests {
     fn add_func_for_sprig() {
         let mut t = Template::parse("{{upper .name}}").unwrap();
         t.add_func("upper", |args| {
-            Ok(Value::String(args.first().map(super::stringify).unwrap_or_default().to_uppercase()))
+            Ok(Value::String(
+                args.first()
+                    .map(super::stringify)
+                    .unwrap_or_default()
+                    .to_uppercase(),
+            ))
         });
         assert_eq!(t.render(&json!({"name": "abc"})).unwrap(), "ABC");
     }
