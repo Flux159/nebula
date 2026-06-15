@@ -166,7 +166,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.shares.len(), 2);
-        assert_eq!(c.shares[0].path, std::path::PathBuf::from("/Volumes/scratch"));
+        assert_eq!(
+            c.shares[0].path,
+            std::path::PathBuf::from("/Volumes/scratch")
+        );
         assert!(!c.shares[0].read_only);
         assert!(c.shares[1].read_only);
     }
@@ -174,6 +177,9 @@ mod tests {
     #[test]
     fn shares_default_empty() {
         assert!(Config::default().shares.is_empty());
-        assert!(toml::from_str::<Config>("cpus = 2\n").unwrap().shares.is_empty());
+        assert!(toml::from_str::<Config>("cpus = 2\n")
+            .unwrap()
+            .shares
+            .is_empty());
     }
 }

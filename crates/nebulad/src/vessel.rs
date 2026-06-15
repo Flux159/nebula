@@ -64,7 +64,11 @@ impl Vessel {
         // No virtiofs on the Windows fork yet (and HOME is unix-only): home +
         // any configured extra shares. Computed once so the kernel cmdline can
         // hand the guest the SAME tag→path map the host attaches.
-        let shares = if cfg!(windows) { vec![] } else { vessel_shares(cfg) };
+        let shares = if cfg!(windows) {
+            vec![]
+        } else {
+            vessel_shares(cfg)
+        };
         let spec = VmSpec {
             name: "vessel".into(),
             cpus: eff.cpus,
@@ -312,7 +316,13 @@ fn vessel_cmdline(cfg: &Config, shares: &[nebula_core::ShareSpec]) -> String {
     let extras: Vec<String> = shares
         .iter()
         .filter(|s| s.tag != "home")
-        .map(|s| format!("{}={}", s.tag, hex_encode(s.host_path.to_string_lossy().as_bytes())))
+        .map(|s| {
+            format!(
+                "{}={}",
+                s.tag,
+                hex_encode(s.host_path.to_string_lossy().as_bytes())
+            )
+        })
         .collect();
     if !extras.is_empty() {
         cmdline.push_str(&format!(" NEBULA_SHARES={}", extras.join(",")));
@@ -342,8 +352,16 @@ mod tests {
     #[test]
     fn cmdline_encodes_extra_shares_only() {
         let shares = vec![
-            ShareSpec { tag: "home".into(), host_path: "/Users/x".into(), read_only: false },
-            ShareSpec { tag: "share0".into(), host_path: "/Volumes/a b".into(), read_only: false },
+            ShareSpec {
+                tag: "home".into(),
+                host_path: "/Users/x".into(),
+                read_only: false,
+            },
+            ShareSpec {
+                tag: "share0".into(),
+                host_path: "/Volumes/a b".into(),
+                read_only: false,
+            },
         ];
         let cl = vessel_cmdline(&Config::default(), &shares);
         // home is handled via NEBULA_HOME, never re-encoded as an extra share.
@@ -360,7 +378,11 @@ mod tests {
 
     #[test]
     fn cmdline_omits_shares_when_only_home() {
-        let shares = vec![ShareSpec { tag: "home".into(), host_path: "/Users/x".into(), read_only: false }];
+        let shares = vec![ShareSpec {
+            tag: "home".into(),
+            host_path: "/Users/x".into(),
+            read_only: false,
+        }];
         assert!(!vessel_cmdline(&Config::default(), &shares).contains("NEBULA_SHARES="));
     }
 }
