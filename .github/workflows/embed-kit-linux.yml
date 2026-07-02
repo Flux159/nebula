@@ -1,0 +1,137 @@
+name: Embed kit (linux)
+
+# Assembles the nebula-slim embed kit for Linux hosts — the Galaxy release
+# pipeline vendors this tarball so a shipped Galaxy .deb/.AppImage boots
+# agents with no host nebula install (libkrun/KVM microVM, slimd guest).
+# Mirrors what scripts/embed-kit.sh produces on macOS, minus the mac-only
+# bits: lib/libkrun.so.1 instead of dylibs, no codesigning/entitlements.
+# Kit layout (what Galaxy's fetch-nebula.mjs expects at the tarball root):
+#   bin/nebula bin/nebulad
+#   lib/libkrun.so.1
+#   images/kernel-Image.gz  images/rootfs.img.gz   (slim flavor)
+#   config.toml.example  EMBED.md
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read # download guest-images artifacts
+
+jobs:
+  kit:
+    strategy:
+      matrix:
+        include:
+          # Native runners for both arches — no cross toolchain needed.
+          - runner: ubuntu-24.04
+            arch: x86_64
+            img_arch: x86_64 # guest-images.yml artifact naming
+            galaxy_arch: x64 # Galaxy fetch-nebula.mjs naming (node process.arch)
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            img_arch: arm64
+            galaxy_arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build libkrun fork (.so)
+        run: |
+          cd third_party/libkrun
+          cargo build --release -p libkrun --features blk,net
+          ls -la target/release/libkrun.so*
+
+      - name: Build nebula + nebulad
+        run: cargo build --release -p nebula-cli -p nebulad
+
+      - name: Fetch latest guest images (built by guest-images.yml)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id=$(gh run list --workflow guest-images.yml --status success --limit 1 \
+                     --json databaseId -q '.[0].databaseId')
+          if [ -z "$run_id" ]; then
+            echo "::error::no successful guest-images run — dispatch that workflow first"
+            exit 1
+          fi
+          mkdir -p guest
+          gh run download "$run_id" --name "guest-images-${{ matrix.img_arch }}" --dir guest
+          ls -la guest/
+
+      - name: Assemble kit
+        run: |
+          OUT=dist-embed-slim-linux
+          mkdir -p "$OUT/bin" "$OUT/lib" "$OUT/images"
+          cp target/release/nebula target/release/nebulad "$OUT/bin/"
+          # the krun backend looks for lib/libkrun.so.1 next to the binaries
+          # (or NEBULA_LIBKRUN_PATH); plain cargo emits libkrun.so — accept either
+          src=$(ls third_party/libkrun/target/release/libkrun.so.*.* 2>/dev/null \
+                || ls third_party/libkrun/target/release/libkrun.so)
+          cp "$src" "$OUT/lib/libkrun.so.1"
+          cp "guest/kernel-Image-${{ matrix.img_arch }}.gz" "$OUT/images/kernel-Image.gz"
+          cp "guest/rootfs-slim-${{ matrix.img_arch }}.img.gz" "$OUT/images/rootfs.img.gz"
+          cat > "$OUT/config.toml.example" <<'EOF'
+          # Per-instance Nebula settings — copy to $NEBULA_HOME/config.toml before
+          # the first `nebula up`. Every value is optional.
+
+          # Resource ceilings.
+          max_ram_mib = 8192
+          cpus = 4
+          data_disk_gib = 32
+
+          # Isolation from a standalone Nebula install (and other embedders):
+          api_port = 7461          # REST API on 127.0.0.1 (0 disables)
+          dns_port = 42061         # host UDP port for the guest DNS relay
+          k8s_port = 6461          # host forward to this instance's k3s API
+
+          # Brand the container DNS zone: <name>.<zone> resolves on this instance.
+          dns_zone = "galaxy.local"
+          EOF
+          cat > "$OUT/EMBED.md" <<'EOF'
+          # nebula-slim embed kit (Linux)
+
+          Boot (requires /dev/kvm):
+            export NEBULA_HOME=<your instance dir>
+            export NEBULA_LIBKRUN_PATH=<kit>/lib/libkrun.so.1   # or keep lib/ next to bin/
+            bin/nebula install-image --kernel images/kernel-Image.gz --rootfs images/rootfs.img.gz
+            bin/nebula up
+          Docker socket: $NEBULA_HOME/run/docker.sock (slimd, Docker API v1.43).
+          EOF
+          tar -C "$OUT" -czf "nebula-slim-embed-${{ matrix.galaxy_arch }}-unknown-linux.tar.gz" .
+          ls -lh nebula-slim-embed-*.tar.gz
+
+      # The proof: boot the exact assembled kit on the runner (hosted runners
+      # expose /dev/kvm) and hit the slimd Docker socket. Skips with a warning
+      # if the runner has no KVM rather than failing the packaging.
+      - name: Smoke-boot the kit (KVM)
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::warning::no /dev/kvm on this runner — kit packaged but not boot-tested"
+            exit 0
+          fi
+          sudo chmod 666 /dev/kvm || true
+          KIT=$PWD/dist-embed-slim-linux
+          export NEBULA_HOME=$(mktemp -d)
+          export NEBULA_LIBKRUN_PATH="$KIT/lib/libkrun.so.1"
+          "$KIT/bin/nebula" install-image --kernel "$KIT/images/kernel-Image.gz" --rootfs "$KIT/images/rootfs.img.gz"
+          "$KIT/bin/nebula" up
+          ok=""
+          for i in $(seq 1 90); do
+            v=$(curl -sf --max-time 2 --unix-socket "$NEBULA_HOME/run/docker.sock" http://localhost/version 2>/dev/null) && { ok="$v"; break; }
+            sleep 1
+          done
+          "$KIT/bin/nebula" down || true
+          if [ -z "$ok" ]; then
+            echo "::error::engine did not come up from the assembled kit"
+            exit 1
+          fi
+          echo "engine version: $ok"
+          echo "$ok" | grep -qi slim || { echo "::error::expected the slim engine"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nebula-slim-embed-${{ matrix.galaxy_arch }}-unknown-linux
+          path: nebula-slim-embed-*.tar.gz
+          if-no-files-found: error
