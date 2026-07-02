@@ -84,16 +84,16 @@ fn spawn_docker_watcher(
             }
 
             // Reconcile forwarders. macOS dials the guest IP directly (VZ
-            // NAT subnet is host-routable); Linux tunnels through the
-            // agent's vsock TCP proxy (the guest IP is not host-routable
-            // behind the usermode NAT).
-            let target = if cfg!(target_os = "linux") {
-                ForwardTarget::Vsock(vessel.clone())
-            } else {
+            // NAT subnet is host-routable); Linux and Windows tunnel
+            // through the agent's vsock TCP proxy (the guest IP is not
+            // host-routable behind the usermode NAT).
+            let target = if cfg!(target_os = "macos") {
                 match guest_ip {
                     Some(ip) => ForwardTarget::Ip(ip),
                     None => continue,
                 }
+            } else {
+                ForwardTarget::Vsock(vessel.clone())
             };
             let ip = guest_ip.unwrap_or(Ipv4Addr::UNSPECIFIED);
             forwarders.retain(|port, (stop, fwd_ip)| {

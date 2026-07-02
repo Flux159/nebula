@@ -177,9 +177,15 @@ mod agent {
     }
 
     /// Generic host->guest TCP proxy: the first 2 bytes (BE) name a guest
-    /// TCP port; the rest of the stream splices to 127.0.0.1:<port>. This is
-    /// how published container ports reach the host on backends where the
-    /// guest IP is not host-routable (libkrun/KVM today, WHP later).
+    /// TCP port; the rest of the stream splices to that port. This is how
+    /// published container ports reach the host on backends where the guest
+    /// IP is not host-routable (libkrun/KVM, WHP).
+    ///
+    /// Dial eth0, not loopback: published ports exist only as DNAT rules
+    /// (slim-net/dockerd hook nat OUTPUT with `! -d 127.0.0.0/8`), so a
+    /// loopback dial bypasses them — same reason the macOS forwarder dials
+    /// the guest IP. Loopback stays as the fallback for guest-local
+    /// services that bind 127.0.0.1 only.
     fn handle_tcp_proxy(conn: std::fs::File) {
         use std::io::{Read, Write};
         let mut conn = conn;
@@ -188,8 +194,18 @@ mod agent {
             return;
         }
         let port = u16::from_be_bytes(hdr);
-        let Ok(tcp) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
-            return;
+        // Bounded connect: a DNAT whose container died mid-flight would
+        // otherwise hang in SYN retries and stall the host's client.
+        let via_eth0 = eth0_ip()
+            .and_then(|ip| ip.parse::<std::net::Ipv4Addr>().ok())
+            .and_then(|ip| {
+                std::net::TcpStream::connect_timeout(&(ip, port).into(), Duration::from_secs(3))
+                    .ok()
+            });
+        let tcp = match via_eth0.or_else(|| std::net::TcpStream::connect(("127.0.0.1", port)).ok())
+        {
+            Some(t) => t,
+            None => return,
         };
         let mut conn_r = conn.try_clone().expect("clone conn");
         let mut conn_w = conn;
