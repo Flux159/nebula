@@ -534,6 +534,13 @@ limitations; routine TODOs live in code.)
   mac path; now macOS is the special case and everything else tunnels.
   Verified e2e on suyogs-ubuntu-desktop (krun/KVM, slim rootfs):
   `docker run -p 18080:80 nginx:alpine` answers 200 on host 127.0.0.1:18080;
-  forwards reconcile on container rm. Box gotchas: slim/scripts/build-musl.sh
+  forwards reconcile on container rm. Also verified on real Windows hardware
+  (WHP/krun, same slim rootfs): raw Docker API (port-file socket, TCP
+  127.0.0.1:<port from run/docker.sock>) create/start with 80/tcp->18080
+  answers 200 from the Windows host, forward removed on container rm.
+  Windows gotcha: Windows OpenSSH kills the session's process tree on
+  disconnect, so `nebula up` from an ssh session dies with it — start
+  nebulad via WMI/CIM (Invoke-CimMethod Win32_Process Create) to detach.
+  Box gotchas: slim/scripts/build-musl.sh
   defaults ARCH=aarch64 (pass ARCH=x86_64), and zig wasn't on the box (now in
   ~/.local/zig; ring's cc needs it for musl).
