@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc-x86-64-linux-gnu gcc-aarch64-linux-gnu \
     && rm -rf /var/lib/apt/lists/*
 
-ARG KERNEL_VERSION=6.12.58
+ARG KERNEL_VERSION=6.12.94
 ARG ARCH=arm64
 WORKDIR /src
 RUN curl -fsSL "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz" \

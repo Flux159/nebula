@@ -21,7 +21,7 @@ else
 fi
 docker version >/dev/null 2>&1 || { echo "ERROR: no working docker engine for the build" >&2; exit 1; }
 cd "$(dirname "$0")"
-KERNEL_VERSION="${KERNEL_VERSION:-6.12.58}"
+KERNEL_VERSION="${KERNEL_VERSION:-6.12.94}"
 # ARCH=arm64 (raw Image, VZ/HVF) | x86_64 (ELF vmlinux, KVM/WHP).
 # Cross-compiles fine from either container arch.
 case "${ARCH:-$(uname -m)}" in
