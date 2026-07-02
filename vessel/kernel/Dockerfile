@@ -13,8 +13,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG KERNEL_VERSION=6.12.94
 ARG ARCH=arm64
 WORKDIR /src
+# cdn.kernel.org's /pub tree has gone dark before (2026-07: every tarball
+# 404'd, releases.json still pointing at them); the git.kernel.org stable
+# snapshot is the fallback source for the same tagged tree.
 RUN curl -fsSL "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz" \
-    | tar -xJ --strip-components=1
+    | tar -xJ --strip-components=1 \
+    || curl -fsSL "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/snapshot/linux-${KERNEL_VERSION}.tar.gz" \
+    | tar -xz --strip-components=1
 
 COPY nebula.fragment /src/kernel/configs/nebula.config
 COPY apply-fragment.py /src/apply-fragment.py
