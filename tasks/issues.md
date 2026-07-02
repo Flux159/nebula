@@ -517,3 +517,23 @@ limitations; routine TODOs live in code.)
   but not memory snapshots until an aarch64 VcpuState is written (kvm_vcpu
   aarch64 regs via GET_ONE_REG list — follow-up). Verified: fork + workspace
   cargo check on aarch64-unknown-linux-gnu both clean.
+
+- 2026-07-02 — published-port forwarding on Linux/Windows (nebula#7 item 6,
+  the last blocker for cross-platform Galaxy agents). Root cause: the host
+  side was fine (nebulad's docker-watcher already binds 127.0.0.1:<port> and
+  tunnels via the agent's vsock tcp-proxy on Linux), but the guest end of the
+  tunnel dialed 127.0.0.1:<port> — and published ports only exist as DNAT
+  rules, whose nat OUTPUT hook slim-net (and dockerd) install with
+  `! -d 127.0.0.0/8`. Loopback dials bypass DNAT, so nothing ever answered;
+  macOS never noticed because VZ dials the (host-routable) guest IP and
+  enters via PREROUTING. Fix: vessel-agent's handle_tcp_proxy now dials the
+  guest's eth0 IP first (3s connect timeout so a stale DNAT to a dead
+  container can't hang in SYN retries), falling back to loopback for
+  guest-local services (k3s API). Also: nebulad's ForwardTarget selection was
+  `cfg!(linux) → vsock, else → dial guest IP`, which put Windows on the
+  mac path; now macOS is the special case and everything else tunnels.
+  Verified e2e on suyogs-ubuntu-desktop (krun/KVM, slim rootfs):
+  `docker run -p 18080:80 nginx:alpine` answers 200 on host 127.0.0.1:18080;
+  forwards reconcile on container rm. Box gotchas: slim/scripts/build-musl.sh
+  defaults ARCH=aarch64 (pass ARCH=x86_64), and zig wasn't on the box (now in
+  ~/.local/zig; ring's cc needs it for musl).
