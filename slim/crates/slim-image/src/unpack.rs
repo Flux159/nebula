@@ -109,7 +109,8 @@ fn make_whiteout(target: &Path) {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(target.as_os_str().as_bytes()).unwrap();
     unsafe {
-        libc::mknod(c.as_ptr(), libc::S_IFCHR | 0o000, libc::makedev(0, 0));
+        // Whiteout = 0:0 char device with mode 000 (S_IFCHR alone).
+        libc::mknod(c.as_ptr(), libc::S_IFCHR, libc::makedev(0, 0));
     }
 }
 
