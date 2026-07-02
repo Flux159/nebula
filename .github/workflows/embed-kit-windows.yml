@@ -1,0 +1,109 @@
+name: Embed kit (windows)
+
+# Assembles the nebula-slim embed kit for Windows hosts (WHP/Hyper-V) — the
+# Galaxy release pipeline vendors this so a shipped Galaxy .exe boots agents
+# with no Docker Desktop. Mirrors embed-kit-linux minus the smoke boot:
+# GitHub-hosted Windows runners have no nested virtualization, so the kit is
+# packaged here and boot-verified on real hardware (Suyog's Windows box).
+# Kit layout (what Galaxy's fetch-nebula.mjs expects at the tarball root):
+#   bin/nebula.exe bin/nebulad.exe
+#   lib/krun.dll                       (WHP backend, blk+net/usernet)
+#   images/kernel-Image.gz             x86_64 ELF vmlinux
+#   images/rootfs.img.gz               slim guest rootfs (slimd)
+#   config.toml.example  EMBED.md
+#
+# Note: the engine's Docker "socket" on Windows is a FILE holding a loopback
+# TCP port (nebulad's ipc convention) — embedders connect to 127.0.0.1:<port>.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read # download guest-images artifacts
+
+jobs:
+  kit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build krun.dll (fork, WHP backend)
+        shell: pwsh
+        run: |
+          cd third_party/libkrun
+          # init-blob compiles a Linux init.c we never use; bypass on Windows hosts.
+          New-Item -ItemType File -Force -Path stub-init | Out-Null
+          $env:KRUN_INIT_BINARY_PATH = (Resolve-Path stub-init).Path
+          cargo build --release -p libkrun --features blk,net
+          Get-Item target/release/krun.dll
+
+      - name: Build nebula + nebulad
+        run: cargo build --release -p nebula-cli -p nebulad
+
+      - name: Fetch latest guest images (built by guest-images.yml)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id=$(gh run list --workflow guest-images.yml --status success --limit 1 \
+                     --json databaseId -q '.[0].databaseId')
+          if [ -z "$run_id" ]; then
+            echo "::error::no successful guest-images run — dispatch that workflow first"
+            exit 1
+          fi
+          mkdir -p guest
+          gh run download "$run_id" --name "guest-images-x86_64" --dir guest
+          ls -la guest/
+
+      - name: Assemble kit
+        shell: bash
+        run: |
+          OUT=dist-embed-slim-windows
+          mkdir -p "$OUT/bin" "$OUT/lib" "$OUT/images"
+          cp target/release/nebula.exe target/release/nebulad.exe "$OUT/bin/"
+          # the krun backend probes lib/krun.dll next to the binaries
+          # (or NEBULA_LIBKRUN_PATH)
+          cp third_party/libkrun/target/release/krun.dll "$OUT/lib/"
+          cp guest/kernel-Image-x86_64.gz "$OUT/images/kernel-Image.gz"
+          cp guest/rootfs-slim-x86_64.img.gz "$OUT/images/rootfs.img.gz"
+          cat > "$OUT/config.toml.example" <<'EOF'
+          # Per-instance Nebula settings — copy to %NEBULA_HOME%\config.toml before
+          # the first `nebula up`. Every value is optional.
+
+          # Resource ceilings.
+          max_ram_mib = 8192
+          cpus = 4
+          data_disk_gib = 32
+
+          # Isolation from a standalone Nebula install (and other embedders):
+          api_port = 7461          # REST API on 127.0.0.1 (0 disables)
+          dns_port = 42061         # host UDP port for the guest DNS relay
+          k8s_port = 6461          # host forward to this instance's k3s API
+
+          # Brand the container DNS zone: <name>.<zone> resolves on this instance.
+          dns_zone = "galaxy.local"
+          EOF
+          cat > "$OUT/EMBED.md" <<'EOF'
+          # nebula-slim embed kit (Windows, WHP/Hyper-V)
+
+          Requires the Windows Hypervisor Platform feature (no WSL2, no Docker
+          Desktop). Boot:
+            set NEBULA_HOME=<your instance dir>
+            set NEBULA_LIBKRUN_PATH=<kit>\lib\krun.dll   (or keep lib\ next to bin\)
+            bin\nebula.exe install-image --kernel images\kernel-Image.gz --rootfs images\rootfs.img.gz
+            bin\nebula.exe up
+          Docker API: %NEBULA_HOME%\run\docker.sock is a FILE containing a
+          loopback TCP port — connect to http://127.0.0.1:<port>/ (slimd,
+          Docker API v1.43). No virtiofs on Windows yet: host bind mounts are
+          unavailable; use volumes + the archive API to move files in and out.
+          EOF
+          tar -czf "nebula-slim-embed-x64-pc-windows.tar.gz" -C "$OUT" .
+          ls -lh nebula-slim-embed-*.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nebula-slim-embed-x64-pc-windows
+          path: nebula-slim-embed-*.tar.gz
+          if-no-files-found: error
