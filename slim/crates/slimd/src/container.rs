@@ -206,12 +206,15 @@ fn since(rfc3339: &str) -> String {
     }
 }
 
-/// Build the container's /etc/hosts content.
+/// Build the container's /etc/hosts content. `host_gateway` substitutes
+/// docker's `host-gateway` sentinel in --add-host entries ("" = unknown,
+/// keep the literal).
 pub fn hosts_file(
     hostname: &str,
     ip: &str,
     extra: &[(String, Vec<String>)],
     extra_hosts: &[String],
+    host_gateway: &str,
 ) -> String {
     let mut s = String::from("127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n");
     if !ip.is_empty() && !hostname.is_empty() {
@@ -222,10 +225,55 @@ pub fn hosts_file(
     }
     for h in extra_hosts {
         if let Some((host, addr)) = h.split_once(':') {
+            let addr = if addr == "host-gateway" && !host_gateway.is_empty() {
+                host_gateway
+            } else {
+                addr
+            };
             s.push_str(&format!("{addr}\t{host}\n"));
         }
     }
     s
+}
+
+/// The address containers reach the HOST at — what `host-gateway` means
+/// (dockerd substitutes its bridge gateway; ours must cross the microVM
+/// boundary). The slim guest's default gateway is host-side on every
+/// backend: the VZ NAT gateway IS the mac, and libkrun/usernet forwards
+/// gateway-addressed TCP/UDP to the host stack (verified on KVM and WHP).
+/// SLIM_HOST_GATEWAY overrides for exotic setups. Cached after first
+/// success; "" while the guest network is still settling.
+pub fn host_gateway_ip() -> String {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<String> = OnceLock::new();
+    if let Some(v) = CACHE.get() {
+        return v.clone();
+    }
+    let found = std::env::var("SLIM_HOST_GATEWAY")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(default_gateway);
+    match found {
+        Some(v) => CACHE.get_or_init(|| v).clone(),
+        None => String::new(),
+    }
+}
+
+/// Default gateway from /proc/net/route (hex little-endian), like the
+/// vessel-agent's DNS relay does.
+fn default_gateway() -> Option<String> {
+    let route = std::fs::read_to_string("/proc/net/route").ok()?;
+    for line in route.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() >= 3 && cols[1] == "00000000" {
+            if let Ok(gw) = u32::from_str_radix(cols[2], 16) {
+                if gw != 0 {
+                    return Some(std::net::Ipv4Addr::from(gw.to_le_bytes()).to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn resolv_conf(nameserver: &str, dns_override: &[String]) -> String {

@@ -474,6 +474,8 @@ fn setup_stdio(tty: bool, open_stdin: bool) -> io::Result<Stdio> {
                 stdin: None,
                 stdout: None,
                 stderr: None,
+                gate: None,
+                err_pipe: None,
             },
         })
     } else {
@@ -493,6 +495,8 @@ fn setup_stdio(tty: bool, open_stdin: bool) -> io::Result<Stdio> {
                 stdin: in_w.map(|fd| unsafe { File::from_raw_fd(fd) }),
                 stdout: Some(unsafe { File::from_raw_fd(out_r) }),
                 stderr: Some(unsafe { File::from_raw_fd(err_r) }),
+                gate: None,
+                err_pipe: None,
             },
         })
     }
@@ -754,9 +758,19 @@ pub fn start_container(spec: &ContainerSpec) -> io::Result<Handle> {
                         libc::sethostname(plan.hostname.as_ptr(), plan.hostname.as_bytes().len());
                 }
                 child_enter_rootfs(&plan, err_w);
-                // Wait for the parent to finish cgroup placement.
+                // Wait for the parent to finish cgroup placement (and, for
+                // held starts, network setup). Close our inherited copies of
+                // the gate write end / pid pipe first so a dying slimd EOFs
+                // the read instead of deadlocking it.
+                libc::close(gate_w);
+                libc::close(pid_w);
                 let mut b = [0u8; 1];
-                let _ = libc::read(gate_r, b.as_mut_ptr() as *mut libc::c_void, 1);
+                let n = libc::read(gate_r, b.as_mut_ptr() as *mut libc::c_void, 1);
+                if n != 1 {
+                    // Gate closed with no go signal: the start was abandoned
+                    // (network setup failed / slimd died). Never exec.
+                    libc::_exit(127);
+                }
                 child_exec(&plan, err_w)
             }
             let buf = (child as i32).to_ne_bytes();
@@ -791,6 +805,15 @@ pub fn start_container(spec: &ContainerSpec) -> io::Result<Handle> {
     let pid = i32::from_ne_bytes(pid_buf);
 
     cgroup_setup(&spec.id, spec, pid);
+
+    if spec.hold {
+        // The caller wires the network first; Handle::release_exec() then
+        // opens the gate and collects the exec verdict from the err pipe.
+        stdio.handle.pid = pid;
+        stdio.handle.gate = Some(unsafe { File::from_raw_fd(gate_w) });
+        stdio.handle.err_pipe = Some(unsafe { File::from_raw_fd(err_r) });
+        return Ok(stdio.handle);
+    }
 
     // Open the gate: child proceeds to exec.
     unsafe {

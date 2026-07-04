@@ -38,6 +38,13 @@ pub struct ContainerSpec {
     pub nano_cpus: i64,
     pub cpu_shares: i64,
     pub pids_limit: i64,
+
+    /// Keep the entrypoint held at the exec gate until Handle::release_exec().
+    /// slimd wires the container network (veth/IP/routes, /etc/hosts,
+    /// resolv.conf, published ports) between fork and exec, so the first
+    /// instruction never races setup — docker parity: dockerd configures the
+    /// sandbox netns before the process runs.
+    pub hold: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -61,6 +68,32 @@ pub struct Handle {
     /// Pipe mode: child's stdout / stderr read ends.
     pub stdout: Option<File>,
     pub stderr: Option<File>,
+    /// hold mode: write end of the exec gate (release_exec signals it).
+    pub gate: Option<File>,
+    /// hold mode: the runtime error pipe, read after release (EOF = exec'd).
+    pub err_pipe: Option<File>,
+}
+
+impl Handle {
+    /// Open the exec gate (no-op when the spec didn't hold) and collect the
+    /// runtime's verdict: Ok = the entrypoint exec'd, Err = it could not
+    /// (bad argv, missing interpreter, …). Dropping an unreleased Handle
+    /// closes the gate instead, and the held child exits without ever
+    /// running the workload.
+    pub fn release_exec(&mut self) -> std::io::Result<()> {
+        use std::io::{Read, Write};
+        if let Some(mut gate) = self.gate.take() {
+            let _ = gate.write_all(&[1u8]);
+        }
+        if let Some(mut err) = self.err_pipe.take() {
+            let mut msg = String::new();
+            let _ = err.read_to_string(&mut msg);
+            if !msg.is_empty() {
+                return Err(std::io::Error::other(msg));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
