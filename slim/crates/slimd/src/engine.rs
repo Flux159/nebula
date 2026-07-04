@@ -352,7 +352,26 @@ impl Engine {
                 return Ok(()); // idempotent (docker returns 304)
             }
         }
-        self.start_entry(&entry)
+        let r = self.start_entry(&entry);
+        if r.is_err() {
+            // Failed start, docker-parity unwind. docker run attaches and
+            // calls /wait BEFORE start, so a container that never starts
+            // must still release both: drop attach subscribers (streams
+            // EOF), and honor AutoRemove (dockerd removes an --rm container
+            // whose start failed, which is what releases
+            // wait?condition=removal — without it `docker run --rm` blocks
+            // forever on the wait connection).
+            entry.subscribers.lock().unwrap().clear();
+            let auto_remove = {
+                let c = entry.c.lock().unwrap();
+                c.host_config.auto_remove
+            };
+            if auto_remove {
+                let id = entry.c.lock().unwrap().id.clone();
+                let _ = self.remove(&id, true, false);
+            }
+        }
+        r
     }
 
     fn start_entry(self: &Arc<Self>, entry: &Arc<Entry>) -> io::Result<()> {
@@ -419,9 +438,14 @@ impl Engine {
             nano_cpus: c.host_config.nano_cpus,
             cpu_shares: c.host_config.cpu_shares,
             pids_limit: c.host_config.pids_limit.unwrap_or(0),
+            // Hold the entrypoint until the veth/IP/DNAT and /etc/hosts +
+            // resolv.conf below are in place — a fresh netns start must not
+            // race its own network setup (#7). Joiners and network=none have
+            // nothing to wait for.
+            hold: shared_netns.is_none() && c.network != "none",
         };
 
-        let handle = slim_runtime::start_container(&spec).map_err(|e| {
+        let mut handle = slim_runtime::start_container(&spec).map_err(|e| {
             self.store.unmount_rootfs(&base);
             io::Error::other(format!("failed to start container: {e}"))
         })?;
@@ -493,7 +517,13 @@ impl Engine {
             let extra = self.net.hosts_entries(&c.network);
             let _ = std::fs::write(
                 etc.join("hosts"),
-                hosts_file(&c.hostname, &c.ip, &extra, &c.host_config.extra_hosts),
+                hosts_file(
+                    &c.hostname,
+                    &c.ip,
+                    &extra,
+                    &c.host_config.extra_hosts,
+                    &host_gateway_ip(),
+                ),
             );
             if c.network != "none" {
                 let _ = std::fs::write(
@@ -501,6 +531,22 @@ impl Engine {
                     resolv_conf(&gw, &c.host_config.dns),
                 );
             }
+        }
+
+        // Everything the first instruction can observe (veth/routes, DNAT,
+        // /etc/hosts, resolv.conf) is in place — let the entrypoint run. An
+        // error here is exec failure (bad argv, missing interpreter), which
+        // docker also reports at start; unwind like a failed start.
+        if let Err(e) = handle.release_exec() {
+            let _ = slim_runtime::signal_pid(pid, libc::SIGKILL);
+            let _ = slim_runtime::wait_pid(pid);
+            if shared_netns.is_none() && c.network != "none" {
+                self.net.unpublish(&c.id);
+                self.net.disconnect_all(&c.id);
+                self.dns.remove_ip(&c.ip);
+            }
+            self.store.unmount_rootfs(&base);
+            return Err(io::Error::other(format!("failed to start container: {e}")));
         }
 
         // Output plumbing: pump pty/pipes → log + subscribers.
@@ -594,7 +640,13 @@ impl Engine {
                 let etc = PathBuf::from(&c.rootfs_base).join("merged/etc");
                 let _ = std::fs::write(
                     etc.join("hosts"),
-                    hosts_file(&c.hostname, &c.ip, &entries, &c.host_config.extra_hosts),
+                    hosts_file(
+                        &c.hostname,
+                        &c.ip,
+                        &entries,
+                        &c.host_config.extra_hosts,
+                        &host_gateway_ip(),
+                    ),
                 );
             }
         }

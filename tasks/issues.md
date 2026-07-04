@@ -544,3 +544,29 @@ limitations; routine TODOs live in code.)
   Box gotchas: slim/scripts/build-musl.sh
   defaults ARCH=aarch64 (pass ARCH=x86_64), and zig wasn't on the box (now in
   ~/.local/zig; ring's cc needs it for musl).
+
+- 2026-07-02 — slim docker-parity fixes for embedding (nebula#7 ordering +
+  nebula#8 item 1), pre-v0.1.0. (1) Exec gate: slim-runtime's start already
+  had a cgroup-placement gate pipe; ContainerSpec.hold now keeps it closed
+  through slimd's net.connect/publish + hosts/resolv writes, and
+  Handle::release_exec() opens it and collects the exec verdict — the
+  container's first instruction can no longer race its own network setup
+  (was: veth injected after spawn; instant `RUN`/entrypoint commands saw an
+  empty route table). Grandchild treats gate-EOF-without-go as abandonment
+  (_exit 127), so failed setups never exec the workload. (2) host-gateway:
+  hosts_file() substitutes docker's `host-gateway` sentinel with the guest's
+  default gateway (host-side on every backend: VZ NAT gw is the mac;
+  libkrun/usernet forwards gw-addressed TCP to the host — verified KVM+WHP;
+  SLIM_HOST_GATEWAY overrides). Was written literally into /etc/hosts.
+  (3) Found while testing: `docker run --rm` of a container whose start
+  fails blocked forever — docker attaches and calls /wait?condition=removal
+  BEFORE start, and slimd neither EOF'd the attach stream (subscribers only
+  cleared by the waiter, which never runs for a never-started container)
+  nor released the wait (an --rm container that fails to start is
+  auto-removed by dockerd, which is what resolves that wait). engine
+  start() now clears subscribers and honors AutoRemove on error; failed
+  --rm starts no longer leak "Created" husks either. Verified on the Ubuntu box:
+  first-command network OK, sentinel substituted + host reachable through
+  it, bad entrypoint returns a clean 500 with no client hang, published
+  ports + restart policy unaffected. Test-batch gotcha: `pkill -f "docker
+  run"` matches the ssh batch's own bash -c cmdline — anchor it.
