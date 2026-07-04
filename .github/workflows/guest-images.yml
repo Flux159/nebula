@@ -8,6 +8,9 @@ on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: write # attach release assets on tag builds
+
 jobs:
   build-guest-images:
     strategy:
