@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { NebulaMark } from '../components/NebulaMark';
 import { Link } from 'react-router-dom';
 
 const quickStart = `nebula up                 # boots the Vessel (~0.6s to a healthy engine)
@@ -12,6 +13,7 @@ export default function HomePage() {
     <>
       <nav className="navbar">
         <Link to="/" className="navbar-brand">
+          <NebulaMark size={26} />
           Nebula
         </Link>
         <div className="navbar-links">
@@ -24,6 +26,9 @@ export default function HomePage() {
 
       <div style={{ marginTop: 'var(--navbar-height)' }}>
         <section className="hero">
+          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '0.75rem' }}>
+            <NebulaMark size={88} />
+          </div>
           <h1>Nebula</h1>
           <p>
             Open source, simple, and performant container, Kubernetes &amp; microVM
