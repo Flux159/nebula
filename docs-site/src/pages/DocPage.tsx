@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
+import { NebulaMark } from '../components/NebulaMark';
 import { Link, useLocation } from 'react-router-dom';
 import { TableOfContents } from '../components/TableOfContents';
 
@@ -128,6 +129,7 @@ export default function DocPage() {
     <>
       <nav className="navbar">
         <Link to="/" className="navbar-brand">
+          <NebulaMark size={26} />
           Nebula
         </Link>
         <div className="navbar-links">
