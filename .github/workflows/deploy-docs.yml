@@ -1,0 +1,63 @@
+name: Deploy Documentation
+
+# Publishes a WHITELISTED subset of docs/ to GitHub Pages
+# (https://flux159.github.io/nebula/). docs/ also holds internal notes
+# (roadmaps, agent skills) — the site is assembled from an explicit allow
+# list so a new internal file can never leak by default. Add a page to
+# PUBLIC_PAGES when it's ready for the world.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/deploy-docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble public site (allow list)
+        run: |
+          set -euo pipefail
+          PUBLIC_PAGES="index.md httpapi.md embedding.md slim-config.md"
+          mkdir -p sitegen
+          for f in $PUBLIC_PAGES; do cp "docs/$f" sitegen/; done
+          cat > sitegen/_config.yml <<'EOF'
+          title: Nebula
+          description: Containers, Kubernetes & microVMs on macOS, Linux, and Windows
+          theme: jekyll-theme-cayman
+          EOF
+          ls sitegen/
+      - uses: actions/configure-pages@v4
+        with:
+          enablement: true
+      - uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./sitegen
+          destination: ./_site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./_site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
