@@ -27,7 +27,8 @@ export default function HomePage() {
           <h1>Nebula</h1>
           <p>
             Open source, simple, and performant container, Kubernetes &amp; microVM
-            manager for macOS, Linux, and Windows.
+            manager for macOS, Linux, and Windows — and the only one you can
+            <strong> embed in your own app in ~32&nbsp;MB</strong>.
           </p>
 
           <div className="install-tabs">
