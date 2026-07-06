@@ -1,16 +1,16 @@
 name: Deploy Documentation
 
-# Publishes a WHITELISTED subset of docs/ to GitHub Pages
-# (https://flux159.github.io/nebula/). docs/ also holds internal notes
-# (roadmaps, agent skills) — the site is assembled from an explicit allow
-# list so a new internal file can never leak by default. Add a page to
-# PUBLIC_PAGES when it's ready for the world.
+# Builds the Vite/React/MDX site in docs-site/ and publishes it to GitHub
+# Pages (https://flux159.github.io/nebula/). docs/ also holds internal notes
+# (roadmaps, agent skills) — the site only bundles pages that are explicitly
+# copied into docs-site/docs/ and wired into the app, so a new internal file
+# under docs/ can never leak by default.
 
 on:
   push:
     branches: [main]
     paths:
-      - "docs/**"
+      - "docs-site/**"
       - ".github/workflows/deploy-docs.yml"
   workflow_dispatch:
 
@@ -28,28 +28,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Assemble public site (allow list)
-        run: |
-          set -euo pipefail
-          PUBLIC_PAGES="index.md httpapi.md embedding.md slim-config.md"
-          mkdir -p sitegen
-          for f in $PUBLIC_PAGES; do cp "docs/$f" sitegen/; done
-          cat > sitegen/_config.yml <<'EOF'
-          title: Nebula
-          description: Containers, Kubernetes & microVMs on macOS, Linux, and Windows
-          theme: jekyll-theme-cayman
-          EOF
-          ls sitegen/
+      - uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        working-directory: docs-site
+        run: bun install
+      - name: Build site
+        working-directory: docs-site
+        run: bun run build
       - uses: actions/configure-pages@v4
-        with:
-          enablement: true
-      - uses: actions/jekyll-build-pages@v1
-        with:
-          source: ./sitegen
-          destination: ./_site
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: ./_site
+          path: docs-site/dist
 
   deploy:
     environment:

@@ -1,0 +1,115 @@
+# Introduction
+
+Nebula is an open source, simple, and performant container, Kubernetes & microVM
+manager for macOS, Linux, and Windows.
+
+Nebula runs one elastically-sized Linux VM (the **Vessel**) on the platform's
+native hypervisor for your everyday containers and Kubernetes, plus
+millisecond-boot isolated microVMs on a vendored
+[libkrun](https://github.com/containers/libkrun) fork for sandboxes and GPU
+workloads — with memory ballooning so the whole stack only holds the RAM your
+workloads actually use.
+
+Runs on **macOS** (Virtualization.framework), **Linux** (KVM), and **Windows**
+(Hyper-V/WHP) — no WSL2 — with CI/CD release builds for all three.
+
+## Quick start
+
+```bash
+nebula up                 # boots the Vessel (~0.6s to a healthy engine)
+nebula setup docker       # point docker at Nebula (revert anytime)
+docker run -d -p 8080:80 nginx     # localhost:8080 just works
+docker run --platform linux/amd64 alpine uname -m   # x86_64 via Rosetta
+
+nebula setup kubectl      # local k3s, prod-safe context switching
+kubectl get nodes
+
+# or one-off, without touching your contexts at all:
+nebula docker ps
+nebula kubectl get pods -A
+nebula helm install my-redis oci://registry-1.docker.io/bitnamicharts/redis
+
+nebula sandbox run -- uname -a     # isolated microVM, ~250ms total
+nebula sandbox run --gpu -- ls /dev/dri    # virtio-gpu (Venus)
+
+nebula stats              # guest use, balloon, honest host footprint
+nebula revert --all       # put docker/nerdctl/kubectl back exactly
+
+nebula autostart enable   # start the engine at login, restart on failure
+nebula ui                 # open the desktop app (a client of the engine)
+```
+
+On first `nebula up`, the CLI downloads the guest kernel + rootfs (built by CI
+and attached to GitHub Releases as gzip artifacts), verifies SHA-256 checksums,
+and installs to `~/.nebula` — no Docker required to bootstrap.
+
+## Highlights
+
+- **Elastic memory.** Set a max; a balloon controller (deflate-fast,
+  inflate-slow) returns idle RAM. A 32 GiB Vessel idles at ~1.1 GiB
+  host-visible footprint.
+- **Out-of-the-box tooling.** `nebula setup docker|nerdctl|kubectl` configures
+  the standard CLIs; `nebula revert` restores your previous contexts exactly.
+  `nebula docker|kubectl|helm <cmd>` runs a single command against Nebula via
+  environment overrides — your contexts never change.
+- **amd64 via Rosetta.** The Vessel mounts Apple's Rosetta share — mixed
+  arm64/amd64 compose stacks in one VM at near-native speed.
+- **Host-faithful DNS.** Guest and container DNS resolve through the Mac's own
+  resolver (VPN/split-horizon included) plus a `*.nebula.local` zone; published
+  ports appear on `localhost` automatically.
+- **Sandbox microVMs.** `nebula sandbox run` boots, runs, and tears down an
+  isolated VM in ~250ms; `--gpu` attaches virtio-gpu (Vulkan→Metal via Venus).
+- **Snapshots & live branching.** On `--backend vz` vessels,
+  `nebula vessels snapshot` captures disks **and** the live machine state (RAM,
+  running processes, open sockets) by default — ~360ms, without stopping the
+  vessel. `vessels branch` fans out N independent clones that wake
+  mid-execution — the primitive for tree-search over agent runs.
+- **Apps platform.** A catalog of one-click installs in the UI — pick an app
+  and it runs, no compose-file wrangling.
+- **Embeddable.** REST API (`127.0.0.1:7440`, v1alpha1) with TypeScript and
+  Python clients — see [Embedding Nebula](/nebula/docs/embedding) and the
+  [HTTP API](/nebula/docs/http-api).
+- **Daemon-first.** The engine (`nebulad`) runs independently of the app and
+  CLI — close either and your containers keep running.
+
+## Two flavors, one host
+
+**Full** Nebula ships the real Go stack (dockerd/containerd, k3s, kubectl,
+helm) — the genuine article. **Nebula-slim** swaps the guest for `slimd`, a
+from-scratch Rust reimplementation of a useful container + Kubernetes + Helm
+subset that's small enough to **embed**: ~32 MB for a working engine + CLIs,
+no Go runtime.
+
+| | **Nebula-slim** | **Nebula (full)** |
+|---|---|---|
+| Engine | `slimd` — Rust, a subset reimplementation | real dockerd/containerd + k3s |
+| Embed footprint | **~32 MB** (engine + 3 CLIs) | ~140 MB+ (the Go stack) |
+| Kubernetes | apiserver-lite + controller bridge | genuine k3s — the whole ecosystem |
+| RBAC enforcement / admission webhooks / port-forward | no | yes |
+| Best for | **embedding**, size/RAM budgets, CI | you need real k8s: operators, admission, RBAC |
+
+**Pick full when you need real Kubernetes** — the CRD ecosystem, operators,
+admission webhooks, RBAC enforcement — and don't care about a few hundred MB.
+
+**Pick slim to embed a container/k8s engine in your own product** — it was
+built for that: a fraction of the size, no Go runtime, and host CLIs
+(`docker-slim`, `kubectl-slim`, `helm-slim`) in pure Rust that cross-compile
+to macOS, Linux, and **Windows without WSL2**. The slim engine speaks the same
+APIs your tools already know: the unmodified `docker` CLI works via
+`DOCKER_HOST`, and stock `kubectl apply` works flagless against its TLS
+apiserver. slim is configured entirely by environment variables — see
+[Slim Configuration](/nebula/docs/slim-config).
+
+The two flavors share the same Nebula host (VM lifecycle, networking,
+virtiofs, the socket proxy); slim just swaps the guest engine.
+
+## Status
+
+Phases 0–10 of the plan are implemented and tested (VMM backends, Vessel,
+docker/nerdctl, networking/virtiofs, elastic memory, k3s, reliability rig,
+sandboxes, GPU device support, REST API + SDKs, UI), plus the Apps platform
+and a signed/notarized release pipeline. Tested on macOS (Apple Silicon,
+Virtualization.framework), Linux (x86_64, KVM), and Windows (x86_64,
+Hyper-V/WHP — no WSL2). Nebula-slim is validated on the same three.
+
+The source will be open-sourced in this repository. License: MIT.
