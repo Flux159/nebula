@@ -1,0 +1,146 @@
+# Why Nebula
+
+We built Nebula because we needed to ship a container + Kubernetes + microVM
+engine **inside our own apps**, on macOS, Linux, and Windows — and nothing on
+the market was simultaneously embeddable, cross-platform, and VM-isolated.
+The desktop container apps are end-user products you can't redistribute; the
+embeddable microVM runtimes don't give you a container engine or Kubernetes.
+Nebula is both: a daemon-first engine your tools already speak to (`docker`,
+`kubectl`, `helm`), with a slim flavor small enough (~32 MB) to bundle in
+another product.
+
+## Comparison matrix
+
+Facts below were checked against each project's own docs and license terms in
+July 2026 — sources are linked in the per-tool sections. If something has
+changed, [file an issue](https://github.com/Flux159/nebula/issues).
+
+| | **Nebula** | **smolvm** | **Docker Desktop** | **OrbStack** | **Rancher Desktop** | **Colima** | **Podman Desktop** |
+|---|---|---|---|---|---|---|---|
+| **Platforms** | macOS, Linux, Windows (Hyper-V/WHP, no WSL2) | macOS, Linux, Windows (WHP) | macOS, Linux, Windows | macOS only | macOS, Linux, Windows (WSL2) | macOS, Linux | macOS, Linux, Windows (WSL2) |
+| **Embeddable in your app** | Yes — redistributable engine, REST API, TS/Python SDKs | Yes — SDK, but microVMs only (no container engine) | No — license forbids redistribution | No — closed source, per-seat commercial license | No — end-user Electron app | No — CLI atop the Lima toolchain | No — end-user Electron app |
+| **Size to embed** | **~32 MB** (slim engine + 3 CLIs) | ~30 MB release artifact | n/a | n/a | n/a | n/a | n/a |
+| **Isolation model** | Shared Vessel VM for containers/k8s **+** per-workload libkrun microVMs (~250 ms) | libkrun microVM per workload (&lt;200 ms) | Containers share one Linux VM | Containers share one Linux VM | Containers share one VM (Lima / WSL2) | Containers share one VM (Lima) | Containers share podman-machine VM(s) |
+| **Docker-API engine** | Yes — unmodified `docker` CLI works | No — boots OCI images as VMs; image builds delegated to your tooling | Yes | Yes | Yes (dockerd or containerd) | Yes | Podman API (Docker-compatible socket) |
+| **Kubernetes** | k3s (full) / apiserver-lite (slim) | No | Single-node, built in | Single-node, built in | k3s, built in | Optional k3s flag | Via extensions (kind/minikube) |
+| **License / cost** | MIT, free | Apache-2.0, free | Proprietary; paid if ≥250 employees **or** ≥$10M revenue ($9–24/user/mo) | Proprietary; paid for any commercial use ($8/user/mo) | Apache-2.0, free | MIT, free | Apache-2.0, free |
+
+"Embeddable" here means: can another application legally redistribute it and
+drive it programmatically as a component, without asking the user to install
+and license a separate product?
+
+## The desktop apps
+
+### Docker Desktop
+
+The default. macOS, Windows, and Linux; runs your containers in a managed
+Linux VM ([Hyper-V or WSL2 on Windows](https://docs.docker.com/desktop/)) and
+bundles single-node Kubernetes. Two structural problems for our use case:
+
+1. **You can't ship it.** The
+   [subscription agreement](https://www.docker.com/legal/docker-subscription-service-agreement/)
+   prohibits distributing, sublicensing, or transferring Docker Desktop —
+   there is no path to bundling it inside another product. Every product that
+   "integrates Docker" is really asking each user to install and license
+   Docker Desktop themselves.
+2. **It's not free at work.** Commercial use requires a
+   [paid subscription](https://docs.docker.com/subscription/desktop-license/)
+   once your company crosses 250 employees **or** $10M annual revenue —
+   which includes most of the users an embedded product would reach.
+
+**Pick it instead** if you want the most widely documented, batteries-included
+desktop experience and your organization already pays for (or qualifies for
+free) Docker Desktop.
+
+### OrbStack
+
+The best-engineered Mac container app: fast, light, great networking, built-in
+single-node [Kubernetes](https://docs.orbstack.dev/kubernetes/). But it is
+[macOS-only by design](https://orbstack.dev/docs/faq) ("OrbStack is, and will
+remain, a macOS-only product"), the app is closed source, and
+[commercial use requires a per-seat license](https://docs.orbstack.dev/licensing)
+(~$8/user/mo) — so like Docker Desktop, it's an end-user product you can point
+people at, not a component you can build on or redistribute.
+
+**Pick it instead** if you're a Mac-only individual or team that wants the
+smoothest local Docker/k8s experience and doesn't need Windows, Linux, or
+embedding.
+
+### Rancher Desktop
+
+Free and Apache-2.0 licensed, on all three OSes, with k3s and your choice of
+dockerd or containerd. It runs its VM via
+[Lima on macOS/Linux and WSL2 on Windows](https://docs.rancherdesktop.io/faq/).
+It's an Electron desktop application, not an engine you can vendor: no
+embedding story, and the Windows path inherits WSL2 (a global, user-visible
+Windows feature with its own lifecycle) rather than driving the hypervisor
+directly.
+
+**Pick it instead** if you want a zero-cost, open-source Docker Desktop
+replacement for interactive developer use and WSL2 is acceptable on Windows.
+
+### Podman Desktop
+
+Apache-2.0, cross-platform, and daemonless on Linux; on macOS and Windows it
+manages `podman machine` VMs (WSL2 on Windows). Kubernetes arrives via
+extensions (kind, minikube) rather than built in. Like Rancher Desktop it's an
+[Electron GUI for developers](https://github.com/podman-desktop/podman-desktop),
+not an embeddable engine — the moving parts underneath (podman, gvproxy, a VM
+provider) are a toolchain to install, not a component to bundle.
+
+**Pick it instead** if you're standardized on Podman (e.g. Red Hat shops) or
+want rootless containers on Linux with a GUI.
+
+### Colima
+
+A minimal, MIT-licensed CLI that gives macOS and Linux users
+[container runtimes on Lima](https://github.com/abiosoft/colima) with an
+optional k3s flag. No Windows support at all, and no API surface for
+embedding — it's a personal-workstation tool, and a good one.
+
+**Pick it instead** if you live in a terminal on macOS/Linux and just want
+`docker` working with the fewest moving parts.
+
+## The closest neighbor: smolvm
+
+[smolvm](https://github.com/smol-machines/smolvm) is the project most similar
+to Nebula's sandbox layer — it shares the same lineage (a
+[libkrun](https://github.com/containers/libkrun)-based VMM), boots OCI images
+as hardware-isolated microVMs in under 200 ms, has elastic memory via virtio
+balloon, offers an embeddable SDK, and ships on macOS, Linux, **and Windows**
+(its Windows release bundles `krun.dll` on the Windows Hypervisor Platform).
+Release artifacts are ~30 MB — the same ballpark as nebula-slim.
+
+The difference is scope. smolvm is a microVM sandbox runtime, deliberately:
+there is no Docker-API daemon (image builds are delegated to your existing
+container tooling), no persistent shared engine, and no Kubernetes. Nebula
+gives you that same per-workload microVM primitive (`nebula sandbox run`,
+[vendored libkrun](https://github.com/Flux159/nebula)) **plus** a real
+container engine the unmodified `docker` CLI talks to, k3s or apiserver-lite
+Kubernetes with `kubectl`/`helm`, host-faithful DNS and `localhost` port
+publishing, and VM snapshots with live branching — one embeddable engine
+instead of a sandbox runtime next to a separately-installed container stack.
+
+**Pick it instead** if all you need is ephemeral, isolated execution of OCI
+images — sandboxing untrusted code, packing workloads into portable
+single-file VMs — and you already have container tooling for everything else.
+
+## Where that leaves Nebula
+
+Nebula is the only tool in the table that is at once:
+
+- **A full engine** — Docker-API containers, Kubernetes, helm — not just a
+  sandbox runtime;
+- **Embeddable** — MIT-licensed, driven over a
+  [REST API](/nebula/docs/http-api) with TypeScript/Python SDKs, with a
+  [slim flavor](/nebula/docs/getting-started) at ~32 MB built specifically to
+  ship inside other products (see [Embedding Nebula](/nebula/docs/embedding));
+- **Cross-platform without compromise** — macOS (Virtualization.framework),
+  Linux (KVM), and Windows (Hyper-V/WHP) natively, no WSL2 dependency;
+- **VM-isolated at two granularities** — one elastic, memory-ballooned Vessel
+  for everyday containers/k8s, and ~250 ms libkrun microVMs when workloads
+  must not share a kernel.
+
+If you only need one of those properties, one of the tools above may serve
+you better — that's what the honest recommendations are for. Needing all of
+them at once is why Nebula exists.
