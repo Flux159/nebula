@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/nebula/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Nebula - open source, simple, and performant container, Kubernetes & microVM manager for macOS, Linux, and Windows."
+    />
+    <title>Nebula - Containers, Kubernetes &amp; microVMs on macOS, Linux, and Windows</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // SPA redirect restoration for GitHub Pages
+      // Reads the path stored by 404.html and restores it via history.replaceState
+      var redirect = sessionStorage.getItem('spa-redirect');
+      if (redirect) {
+        sessionStorage.removeItem('spa-redirect');
+        try {
+          var data = JSON.parse(redirect);
+          var newPath = data.path ? '/' + data.path : '';
+          window.history.replaceState(null, '',
+            '/nebula' + newPath + (data.search || '') + (data.hash || '')
+          );
+        } catch (e) {
+          console.error('Failed to restore redirect path:', e);
+        }
+      }
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
