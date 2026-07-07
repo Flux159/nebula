@@ -1,0 +1,102 @@
+import { InstallTabs, VerifyTabs } from '../src/components/InstallTabs';
+
+# Installation
+
+Nebula runs on **macOS** (Apple Silicon, Virtualization.framework), **Linux**
+(x64/arm64, KVM), and **Windows** (x64, Hyper-V/WHP — no WSL2).
+
+## Quick Install (Recommended)
+
+<InstallTabs />
+
+What the installer does per platform:
+
+- **macOS** — installs `Nebula.app` to `/Applications` (the desktop app plus
+  the `nebula`/`nebulad` engine binaries and guest images, all in one signed
+  bundle) and puts the `nebula` CLI on your PATH via `~/.nebula/bin`.
+- **Linux** — downloads the engine tarball (`nebula`, `nebulad`,
+  `lib/libkrun.so.1`), verifies its SHA-256 checksum, installs to
+  `~/.nebula/engine`, and links the CLIs into `~/.nebula/bin`.
+- **Windows** — downloads the engine zip (`nebula.exe`, `nebulad.exe`,
+  `krun.dll`), verifies its SHA-256 checksum, installs to
+  `$HOME\.nebula\engine`, and adds it to your user PATH.
+
+To pin a specific version instead of the latest release:
+
+```bash
+# macOS / Linux
+NEBULA_VERSION=v0.1.0 curl -fsSL https://flux159.github.io/nebula/install.sh | bash
+```
+
+```powershell
+# Windows (PowerShell)
+$env:NEBULA_VERSION = "v0.1.0"; irm https://flux159.github.io/nebula/install.ps1 | iex
+```
+
+## Manual Download
+
+Download the artifact for your platform from the
+[releases page](https://github.com/Flux159/nebula/releases):
+
+| Platform | Requirements | Artifact |
+|----------|--------------|----------|
+| macOS (Apple Silicon) | Virtualization.framework | `Nebula_<version>_aarch64.dmg` |
+| Linux (x64) | KVM (`/dev/kvm`) | `nebula-<version>-linux-x86_64.tar.gz` |
+| Linux (arm64) | KVM (`/dev/kvm`) | `nebula-<version>-linux-aarch64.tar.gz` |
+| Windows (x64) | Hyper-V / WHP | `nebula-<version>-windows-x86_64.zip` |
+
+Every tarball/zip has a `.sha256` sidecar file for verification.
+
+### After Download
+
+**macOS** — open the DMG and drag `Nebula.app` to Applications. The app
+contains everything; to also use the CLI from a terminal:
+
+```bash
+mkdir -p ~/.nebula/bin
+printf '#!/bin/sh\nexec "/Applications/Nebula.app/Contents/MacOS/nebula" "$@"\n' > ~/.nebula/bin/nebula
+chmod +x ~/.nebula/bin/nebula
+export PATH="$PATH:$HOME/.nebula/bin"   # add to your shell config to persist
+```
+
+**Linux**:
+
+```bash
+sha256sum -c nebula-0.1.0-linux-x86_64.tar.gz.sha256
+tar -xzf nebula-0.1.0-linux-x86_64.tar.gz
+# keep nebula, nebulad, and lib/ together — the engine loads lib/libkrun.so.1
+# relative to the binaries
+mv nebula-0.1.0-linux-x86_64 ~/.nebula/engine
+export PATH="$PATH:$HOME/.nebula/engine"
+```
+
+**Windows (PowerShell)**:
+
+```powershell
+Expand-Archive nebula-0.1.0-windows-x86_64.zip
+# keep nebula.exe, nebulad.exe, and krun.dll together in one directory,
+# then add that directory to your user PATH
+```
+
+On first `nebula up`, the CLI downloads the guest kernel + rootfs (built by CI
+and attached to GitHub Releases as gzip artifacts), verifies SHA-256 checksums,
+and installs to `~/.nebula` — no Docker required to bootstrap.
+
+## Nebula-slim (embedding)
+
+Embedding Nebula in your own product? The slim engine (~32 MB engine + CLIs,
+no Go runtime) ships as separate `nebula-slim-embed-*` kits and
+`nebula-slim-clis-*` CLI bundles on the same releases page — see
+[Embedding Nebula](/nebula/docs/embedding).
+
+## Verify Installation
+
+Open a new terminal, then:
+
+<VerifyTabs />
+
+## Next Steps
+
+- [Introduction](/nebula/docs/getting-started) — the full quick start
+- [Why Nebula](/nebula/docs/why-nebula) — comparison with Docker Desktop, OrbStack & co.
+- [Embedding Nebula](/nebula/docs/embedding) — REST API, SDKs, and slim kits

@@ -2,12 +2,27 @@ import { useState } from 'react';
 import { NebulaMark } from '../components/NebulaMark';
 import { Link } from 'react-router-dom';
 
-const quickStart = `nebula up                 # boots the Vessel (~0.6s to a healthy engine)
+const quickStart = {
+  unix: `curl -fsSL https://flux159.github.io/nebula/install.sh | bash
+
+nebula up                 # boots the Vessel (~0.6s to a healthy engine)
 nebula setup docker       # point docker at Nebula (revert anytime)
-docker run -d -p 8080:80 nginx     # localhost:8080 just works`;
+docker run -d -p 8080:80 nginx     # localhost:8080 just works`,
+  windows: `irm https://flux159.github.io/nebula/install.ps1 | iex
+
+nebula up                 # boots the Vessel (~0.6s to a healthy engine)
+nebula setup docker       # point docker at Nebula (revert anytime)
+docker run -d -p 8080:80 nginx     # localhost:8080 just works`,
+};
+
+function detectOS(): 'unix' | 'windows' {
+  if (typeof navigator === 'undefined') return 'unix';
+  return navigator.userAgent.toLowerCase().includes('win') ? 'windows' : 'unix';
+}
 
 export default function HomePage() {
   const [copied, setCopied] = useState(false);
+  const [tab, setTab] = useState<'unix' | 'windows'>(detectOS);
 
   return (
     <>
@@ -38,11 +53,22 @@ export default function HomePage() {
 
           <div className="install-tabs">
             <div className="install-tab-buttons">
-              <span className="install-tab-btn active">Quick start</span>
+              <button
+                className={`install-tab-btn ${tab === 'unix' ? 'active' : ''}`}
+                onClick={() => setTab('unix')}
+              >
+                macOS / Linux
+              </button>
+              <button
+                className={`install-tab-btn ${tab === 'windows' ? 'active' : ''}`}
+                onClick={() => setTab('windows')}
+              >
+                Windows
+              </button>
               <button
                 className="install-copy-btn"
                 onClick={async () => {
-                  await navigator.clipboard.writeText(quickStart);
+                  await navigator.clipboard.writeText(quickStart[tab]);
                   setCopied(true);
                   setTimeout(() => setCopied(false), 1000);
                 }}
@@ -52,13 +78,13 @@ export default function HomePage() {
             </div>
             <div className="install-command">
               <code style={{ whiteSpace: 'pre', display: 'block', textAlign: 'left' }}>
-                {quickStart}
+                {quickStart[tab]}
               </code>
             </div>
           </div>
 
           <div className="hero-buttons">
-            <Link to="/docs/getting-started" className="btn btn-primary">
+            <Link to="/docs/installation" className="btn btn-primary">
               Get Started
             </Link>
             <Link to="/docs/http-api" className="btn btn-secondary">

@@ -16,6 +16,7 @@ const sidebarItems = [
     title: 'Getting Started',
     items: [
       { label: 'Introduction', path: 'getting-started' },
+      { label: 'Installation', path: 'installation' },
       { label: 'Why Nebula', path: 'why-nebula' },
     ],
   },
