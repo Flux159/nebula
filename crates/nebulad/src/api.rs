@@ -512,6 +512,10 @@ async fn vessels_route(
                 /// "name:GiB" strings, same shape as the CLI's --volume.
                 #[serde(default)]
                 volumes: Vec<String>,
+                /// Host directories to share in at their identical absolute
+                /// paths, same shape as the CLI's --mount ("/path" or "/path:ro").
+                #[serde(default)]
+                mounts: Vec<String>,
                 /// Build the rootfs from a docker image ref (pulled into the
                 /// engine if absent) — `vessels new --from-image` over HTTP.
                 #[serde(default)]
@@ -611,6 +615,7 @@ async fn vessels_route(
 
             blocking!((|| -> anyhow::Result<serde_json::Value> {
                 let volumes = v::parse_volumes(&body.volumes)?;
+                let mounts = v::parse_mounts(&body.mounts)?;
                 let opts = v::CreateOpts {
                     name: body.name.clone(),
                     cpus: body.cpus,
@@ -619,6 +624,7 @@ async fn vessels_route(
                     data_gib: body.data_gib,
                     backend: body.backend.clone(),
                     volumes,
+                    mounts,
                 };
                 let created = v::create(&opts, rootfs);
                 if created.is_err() {

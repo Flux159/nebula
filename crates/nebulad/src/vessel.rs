@@ -318,9 +318,10 @@ fn vessel_cmdline(cfg: &Config, shares: &[nebula_core::ShareSpec]) -> String {
         .filter(|s| s.tag != "home")
         .map(|s| {
             format!(
-                "{}={}",
+                "{}={}{}",
                 s.tag,
-                hex_encode(s.host_path.to_string_lossy().as_bytes())
+                hex_encode(s.host_path.to_string_lossy().as_bytes()),
+                if s.read_only { ":ro" } else { "" }
             )
         })
         .collect();

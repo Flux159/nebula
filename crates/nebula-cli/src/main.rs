@@ -195,6 +195,11 @@ enum VesselsAction {
         /// included in snapshots/branches.
         #[arg(long = "volume")]
         volumes: Vec<String>,
+        /// Share a host directory into the vessel at the same absolute path
+        /// (repeatable). Append `:ro` for read-only, e.g.
+        /// `--mount ~/Games/ragnarok:ro`.
+        #[arg(long = "mount")]
+        mounts: Vec<String>,
     },
     /// Convert a docker image (local or remote) into a bootable vessel rootfs
     /// file. Ship it with your app; create vessels offline via --rootfs-img.
@@ -370,6 +375,7 @@ fn main() -> anyhow::Result<()> {
                 rootfs_size,
                 backend,
                 volumes,
+                mounts,
             } => vessels::new(vessels::NewOpts {
                 name,
                 cpus,
@@ -381,6 +387,7 @@ fn main() -> anyhow::Result<()> {
                 rootfs_mb: rootfs_size,
                 backend,
                 volumes,
+                mounts,
             }),
             VesselsAction::ConvertImage {
                 image,
