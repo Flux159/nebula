@@ -37,6 +37,8 @@ pub struct NewOpts {
     pub backend: String,
     /// Extra persistent volumes (`name:GiB`), mounted at /mnt/<name>.
     pub volumes: Vec<String>,
+    /// Host directories to share in at their identical paths (`/path[:ro]`).
+    pub mounts: Vec<String>,
 }
 
 pub fn new(opts: NewOpts) -> anyhow::Result<()> {
@@ -45,6 +47,7 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
         "--from-image and --rootfs-img are mutually exclusive"
     );
     let volumes = core::parse_volumes(&opts.volumes)?;
+    let mounts = core::parse_mounts(&opts.mounts)?;
     let dir = dir_of(&opts.name)?;
     anyhow::ensure!(
         !dir.exists(),
@@ -84,6 +87,7 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
         data_gib: opts.data_gib,
         backend: opts.backend.clone(),
         volumes: volumes.clone(),
+        mounts: mounts.clone(),
     };
     let created = core::create(&create, rootfs);
     if created.is_err() {
@@ -93,11 +97,23 @@ pub fn new(opts: NewOpts) -> anyhow::Result<()> {
     created?;
 
     println!(
-        "created vessel `{}` ({} cpus, {} MiB{}{})",
+        "created vessel `{}` ({} cpus, {} MiB{}{}{})",
         opts.name,
         opts.cpus,
         opts.mem.max(1024),
         if opts.gpu { ", gpu" } else { "" },
+        if mounts.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ", mounts: {}",
+                mounts
+                    .iter()
+                    .map(|(p, ro)| format!("{}{}", p.display(), if *ro { " (ro)" } else { "" }))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        },
         if volumes.is_empty() {
             String::new()
         } else {

@@ -414,28 +414,42 @@ mod init {
         String::from_utf8(out).ok()
     }
 
-    /// Mount the extra host shares the host attached (config `[[shares]]`), each
-    /// at its identical absolute path — same contract as the home share — so
-    /// `docker -v /host/path:/ctr` binds resolve on both sides. The host passes
-    /// the tag→path map on the kernel cmdline as `NEBULA_SHARES=tag=hexpath,…`.
+    /// Mount the extra host shares the host attached (config `[[shares]]`, or
+    /// `vessels new --mount`), each at its identical absolute path — same
+    /// contract as the home share — so `docker -v /host/path:/ctr` binds
+    /// resolve on both sides. The host passes the tag→path map on the kernel
+    /// cmdline as `NEBULA_SHARES=tag=hexpath[:ro],…`.
+    ///
+    /// Read-only is applied here rather than relying on the host: VZ exports it
+    /// on the share itself, but libkrun's `krun_add_virtiofs` takes no such
+    /// flag, so mounting `-o ro` is the only thing that holds on both backends.
     fn setup_extra_shares() {
         let Ok(spec) = std::env::var("NEBULA_SHARES") else {
             return;
         };
         for pair in spec.split(',').filter(|p| !p.is_empty()) {
-            let Some((tag, hexpath)) = pair.split_once('=') else {
+            let Some((tag, rest)) = pair.split_once('=') else {
                 continue;
+            };
+            let (hexpath, read_only) = match rest.split_once(':') {
+                Some((head, "ro")) => (head, true),
+                _ => (rest, false),
             };
             let Some(path) = hex_decode(hexpath) else {
                 eprintln!("nebula-init: bad share path for tag {tag}");
                 continue;
             };
             let _ = std::fs::create_dir_all(&path);
-            let status = std::process::Command::new("/bin/mount")
-                .args(["-t", "virtiofs", tag, &path])
-                .status();
-            match status {
-                Ok(s) if s.success() => println!("nebula-init: share {tag} mounted at {path}"),
+            let mut cmd = std::process::Command::new("/bin/mount");
+            cmd.args(["-t", "virtiofs", tag, &path]);
+            if read_only {
+                cmd.args(["-o", "ro"]);
+            }
+            match cmd.status() {
+                Ok(s) if s.success() => println!(
+                    "nebula-init: share {tag} mounted at {path}{}",
+                    if read_only { " (ro)" } else { "" }
+                ),
                 _ => eprintln!("nebula-init: share {tag} mount at {path} failed"),
             }
         }

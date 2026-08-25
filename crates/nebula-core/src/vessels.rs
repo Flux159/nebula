@@ -13,7 +13,7 @@ use anyhow::{bail, Context};
 
 use crate::ipc::{self, IpcStream};
 use crate::proto::*;
-use crate::spec::{BootSpec, ConsoleSpec, DiskSpec, NetSpec, VmSpec, VsockPortMap};
+use crate::spec::{BootSpec, ConsoleSpec, DiskSpec, NetSpec, ShareSpec, VmSpec, VsockPortMap};
 
 /// Names that refer to the engine vessel (docker/k8s). The engine is owned
 /// by `nebula up`/`down`; vessel ops refuse it.
@@ -89,6 +89,34 @@ pub fn disk_images(dir: &Path) -> Vec<String> {
 
 /// Parse `--volume name:GiB` specs. Names become mount points (/mnt/<name>)
 /// and disk files (vol-<name>.img), so they're strictly validated.
+/// Parse `--mount /host/path[:ro]` into (canonical path, read_only).
+///
+/// The guest mounts each share at the *same absolute path* it has on the host,
+/// which is the contract the engine vessel's `$HOME` share already uses — a
+/// path that works on one side works verbatim on the other.
+pub fn parse_mounts(specs: &[String]) -> anyhow::Result<Vec<(PathBuf, bool)>> {
+    let mut out: Vec<(PathBuf, bool)> = Vec::new();
+    for s in specs {
+        let (raw, read_only) = match s.rsplit_once(':') {
+            Some((head, "ro")) => (head, true),
+            Some((head, "rw")) => (head, false),
+            _ => (s.as_str(), false),
+        };
+        let path = Path::new(raw)
+            .canonicalize()
+            .with_context(|| format!("--mount path does not exist: `{raw}`"))?;
+        anyhow::ensure!(
+            path.is_dir(),
+            "--mount wants a directory, got `{}`",
+            path.display()
+        );
+        if !out.iter().any(|(p, _)| p == &path) {
+            out.push((path, read_only));
+        }
+    }
+    Ok(out)
+}
+
 pub fn parse_volumes(specs: &[String]) -> anyhow::Result<Vec<(String, u64)>> {
     let mut out: Vec<(String, u64)> = Vec::new();
     for s in specs {
@@ -320,6 +348,9 @@ pub struct CreateOpts {
     pub backend: String,
     /// Extra persistent volumes: (name, GiB), mounted at /mnt/<name>.
     pub volumes: Vec<(String, u64)>,
+    /// Host directories shared into the guest at their identical absolute
+    /// paths: (path, read_only).
+    pub mounts: Vec<(PathBuf, bool)>,
 }
 
 /// Where the rootfs comes from.
@@ -421,6 +452,41 @@ pub fn create(opts: &CreateOpts, rootfs: Rootfs) -> anyhow::Result<PathBuf> {
         );
     }
 
+    // Same contract as the engine vessel: hand vessel-init a tag→path map and
+    // let it mount each share at the identical absolute path.
+    let shares: Vec<ShareSpec> = opts
+        .mounts
+        .iter()
+        .enumerate()
+        .map(|(n, (path, read_only))| ShareSpec {
+            tag: format!("mount{n}"),
+            host_path: path.clone(),
+            read_only: *read_only,
+        })
+        .collect();
+    if !shares.is_empty() {
+        cmdline.push_str(" NEBULA_SHARES=");
+        cmdline.push_str(
+            &shares
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{}={}{}",
+                        s.tag,
+                        s.host_path
+                            .to_string_lossy()
+                            .as_bytes()
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<String>(),
+                        if s.read_only { ":ro" } else { "" }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+
     let vz = opts.backend == "vz";
     let spec = VmSpec {
         name: format!("vessel-{}", opts.name),
@@ -432,7 +498,7 @@ pub fn create(opts: &CreateOpts, rootfs: Rootfs) -> anyhow::Result<PathBuf> {
             cmdline,
         },
         disks,
-        shares: vec![],
+        shares,
         // NICs everywhere: VZ NAT on vz; the fork's in-process usernet NAT
         // on krun (TSI never applied to our own-init disk boots).
         net: NetSpec::Nat,
