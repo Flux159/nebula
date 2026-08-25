@@ -146,3 +146,34 @@ scripts/stack.sh status     # expect four containers Up
 ```
 
 If that comes up and the game connects, slim can host the stack.
+
+---
+
+## Status — implemented in nebula-slim (2026-08-25)
+
+Everything in "Suggested order" is done and covered by `slim/test/appstack.sh`
+(run by `scripts/test-slim.sh`) plus corpus cases 105/115/155:
+
+1. **Directory bind mounts, spaces included** — `-v` and `--mount type=bind`,
+   read-only and read-write, any path on the `$HOME` virtiofs share. Nothing
+   shell-splits the spec, so `~/Library/Application Support/<id>/conf` works.
+   A missing `-v` source is created; unlike docker, slim makes a *file* when
+   the image has a file at the target, so the single-file case does not leave
+   a shadowing directory behind. `--mount type=bind` refuses a missing source.
+2. **`docker load`** — docker-save and OCI-layout archives, plain or gzipped,
+   `-i FILE` or stdin. `save` stays a real-docker dependency by design (slim
+   stores layers unpacked; the original layer tars no longer exist) and now
+   says exactly that instead of 404ing.
+3. **Host-IP-scoped publishing** — `-p 127.0.0.1:6900:6900` publishes on
+   loopback only (no wildcard DNAT rule) and `ps`/`port`/`inspect` report
+   `127.0.0.1`. A userland proxy per published port makes the loopback path
+   actually reachable, the way dockerd's docker-proxy does.
+4. **Named volumes, container DNS, lifecycle/inspection** — named volumes
+   outlive container removal (`rm -v` only drops anonymous ones); image
+   `VOLUME`s get anonymous volumes seeded from the image; peers resolve by
+   container name and by `--network-alias` on a user-defined network;
+   `run -d -t`, `stop -t`, `logs --tail`, `inspect -f '{{.State.Status}}'` /
+   `'{{.Id}}'`, `exec`, `cp`, `create`, `rm -f` all verified.
+
+Not done, deliberately: `docker save`, `--health-cmd`, compose. The readiness
+probe pattern in the report (`exec` + the real query) is the supported answer.

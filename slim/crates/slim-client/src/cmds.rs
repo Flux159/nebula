@@ -21,6 +21,7 @@ fn url_encode(s: &str) -> String {
     out
 }
 
+#[derive(Debug)]
 pub enum CmdError {
     /// Already printed something; exit with this code.
     Handled(i32),
@@ -137,6 +138,72 @@ pub fn pull_image(client: &Client, image: &str) -> CmdResult {
     Ok(())
 }
 
+/// `docker load [-i FILE] [-q]` — import a docker-save / OCI-layout archive
+/// (plain or gzipped). Reads stdin when no `-i` is given, exactly like docker.
+pub fn load(client: &Client, cargs: &[String]) -> CmdResult {
+    let p = parse(
+        cargs,
+        &["-q", "--quiet"],
+        &["-i", "--input"],
+        &[("-i", "--input"), ("-q", "--quiet")],
+        false,
+    )?;
+    let quiet = p.flag("-q");
+    let path = format!("{V}/images/load?quiet={}", if quiet { "1" } else { "0" });
+    let headers = [("Content-Type", "application/x-tar")];
+
+    // A file gets a real Content-Length and is streamed from disk; stdin has
+    // no length, so it is spooled to a temp file first (the engine has to seek
+    // the archive anyway — the manifest is written last).
+    let mut resp = match p.first("-i").filter(|f| *f != "-") {
+        Some(file) => {
+            let mut f = std::fs::File::open(file).map_err(|e| msg(format!("open {file}: {e}")))?;
+            let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+            client.request_reader("POST", &path, &headers, len, &mut f)?
+        }
+        None => {
+            let tmp = std::env::temp_dir().join(format!("docker-slim-load-{}", std::process::id()));
+            let mut f = std::fs::File::create(&tmp)?;
+            std::io::copy(&mut std::io::stdin().lock(), &mut f)?;
+            let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+            drop(f);
+            let mut f = std::fs::File::open(&tmp)?;
+            let r = client.request_reader("POST", &path, &headers, len, &mut f);
+            let _ = std::fs::remove_file(&tmp);
+            r?
+        }
+    };
+    if !(200..300).contains(&resp.status) {
+        let body = resp.read_body().unwrap_or_default();
+        return Err(msg(String::from_utf8_lossy(&body).into_owned()));
+    }
+    let mut buf = Vec::new();
+    resp.stream_body(|chunk| buf.extend_from_slice(chunk))?;
+    let mut failed = None;
+    for line in buf.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        if let Ok(m) = serde_json::from_slice::<slim_api::ProgressMessage>(line) {
+            if let Some(e) = m.error {
+                failed = Some(e);
+            } else if let Some(s) = m.stream {
+                print!("{s}");
+            }
+        }
+    }
+    if let Some(e) = failed {
+        return Err(msg(e));
+    }
+    Ok(())
+}
+
+pub fn save(_client: &Client, _cargs: &[String]) -> CmdResult {
+    Err(msg(
+        "save is not supported by the slim engine: layers are stored unpacked, so \
+         the original layer tars (and their digests) no longer exist. Produce the \
+         archive with `docker save` where the image was built, then `docker-slim \
+         load -i <archive>` here.",
+    ))
+}
+
 pub fn push(_client: &Client, _cargs: &[String]) -> CmdResult {
     Err(msg("push is not yet supported by the slim engine"))
 }
@@ -224,6 +291,8 @@ pub fn image_sub(client: &Client, cargs: &[String]) -> CmdResult {
         Some("rm") => rmi(client, &cargs[1..]),
         Some("inspect") => inspect(client, &cargs[1..]),
         Some("tag") => tag(client, &cargs[1..]),
+        Some("load") => load(client, &cargs[1..]),
+        Some("save") => save(client, &cargs[1..]),
         Some(o) => Err(msg(format!("unknown image command: {o}"))),
     }
 }
@@ -526,8 +595,11 @@ fn ports_summary(c: &slim_api::container::ContainerSummary) -> String {
     let mut parts = Vec::new();
     for p in &c.ports {
         if p.public_port != 0 {
+            // Show the address the port is actually bound to: "0.0.0.0" for a
+            // wildcard publish, but "127.0.0.1" when that is all it is.
+            let ip = if p.ip.is_empty() { "0.0.0.0" } else { &p.ip };
             parts.push(format!(
-                "0.0.0.0:{}->{}/{}",
+                "{ip}:{}->{}/{}",
                 p.public_port, p.private_port, p.typ
             ));
         } else {
@@ -1323,6 +1395,10 @@ fn parse_run_flags(cargs: &[String]) -> Result<Parsed, CmdError> {
             "--stop-signal",
             "--memory-swap",
             "--cpu-shares",
+            "--mount",
+            "--network-alias",
+            "--dns",
+            "--tmpfs",
         ],
         &[
             ("-d", "--detach"),
@@ -1420,8 +1496,21 @@ fn build_create_body(p: &Parsed, image: &str, cmd: &[String]) -> Result<Value, C
     // restart
     let (restart_name, restart_max) = parse_restart(p.first("restart").unwrap_or(""));
 
+    let mut mounts = Vec::new();
+    for m in p.all("--mount") {
+        mounts.push(parse_mount(&m)?);
+    }
+    let mut tmpfs = serde_json::Map::new();
+    for t in p.all("--tmpfs") {
+        let (path, opts) = t.split_once(':').unwrap_or((t.as_str(), ""));
+        tmpfs.insert(path.to_string(), Value::String(opts.to_string()));
+    }
+
     let mut host_config = json!({
         "Binds": p.all("-v"),
+        "Mounts": mounts,
+        "Tmpfs": tmpfs,
+        "Dns": p.all("--dns"),
         "PortBindings": port_bindings,
         "PublishAllPorts": p.flag("-P"),
         "NetworkMode": p.first("network").unwrap_or("bridge"),
@@ -1473,30 +1562,86 @@ fn build_create_body(p: &Parsed, image: &str, cmd: &[String]) -> Result<Value, C
     if let Some(sig) = p.first("stop-signal") {
         config["StopSignal"] = json!(sig);
     }
+    let aliases = p.all("--network-alias");
+    if !aliases.is_empty() {
+        let net = p.first("network").unwrap_or("bridge").to_string();
+        config["NetworkingConfig"] = json!({"EndpointsConfig": {net: {"Aliases": aliases}}});
+    }
     Ok(config)
 }
 
+/// `[ip:][hostPort:]containerPort[/proto]` → (PortBindings, ExposedPorts).
+///
+/// The host IP is preserved: `-p 127.0.0.1:6900:6900` publishes on loopback
+/// only, and reporting it as `0.0.0.0` would be a lie about who can reach the
+/// container. IPv6 literals come bracketed (`[::1]:8080:80`).
 fn parse_ports(specs: &[String]) -> (Value, Value) {
-    let mut bindings = serde_json::Map::new();
+    let mut bindings: serde_json::Map<String, Value> = serde_json::Map::new();
     let mut exposed = serde_json::Map::new();
     for spec in specs {
-        // [ip:][hostPort:]containerPort[/proto]
         let (spec, proto) = match spec.rsplit_once('/') {
             Some((s, p)) if p == "tcp" || p == "udp" => (s, p),
             _ => (spec.as_str(), "tcp"),
         };
-        let parts: Vec<&str> = spec.split(':').collect();
-        let (host_ip, host_port, cport) = match parts.as_slice() {
-            [c] => ("", "", *c),
-            [h, c] => ("", *h, *c),
-            [ip, h, c] => (*ip, *h, *c),
-            _ => continue,
+        // Split off a bracketed IPv6 host first; the rest is colon-separated.
+        let (host_ip, rest) = match spec.strip_prefix('[').and_then(|r| r.split_once("]:")) {
+            Some((ip, rest)) => (ip.to_string(), rest.to_string()),
+            None => {
+                let parts: Vec<&str> = spec.split(':').collect();
+                match parts.as_slice() {
+                    [ip, h, c] => (ip.to_string(), format!("{h}:{c}")),
+                    _ => (String::new(), spec.to_string()),
+                }
+            }
         };
+        let (host_port, cport) = match rest.split_once(':') {
+            Some((h, c)) => (h.to_string(), c.to_string()),
+            None => (String::new(), rest.clone()),
+        };
+        if cport.is_empty() {
+            continue;
+        }
         let key = format!("{cport}/{proto}");
         exposed.insert(key.clone(), json!({}));
-        bindings.insert(key, json!([{"HostIp": host_ip, "HostPort": host_port}]));
+        // Docker keeps every binding for a port (`-p 127.0.0.1:80:80 -p
+        // 192.168.1.5:80:80` is two), so append rather than replace.
+        let entry = bindings.entry(key).or_insert_with(|| json!([]));
+        if let Some(arr) = entry.as_array_mut() {
+            arr.push(json!({"HostIp": host_ip, "HostPort": host_port}));
+        }
     }
     (Value::Object(bindings), Value::Object(exposed))
+}
+
+/// `--mount type=bind,source=/a,target=/b,readonly` → an Engine API Mount.
+fn parse_mount(spec: &str) -> Result<Value, CmdError> {
+    let mut typ = "volume".to_string();
+    let mut source = String::new();
+    let mut target = String::new();
+    let mut read_only = false;
+    for field in spec.split(',') {
+        let (k, v) = match field.split_once('=') {
+            Some((k, v)) => (k.trim(), v.trim().to_string()),
+            None => (field.trim(), String::new()),
+        };
+        match k {
+            "type" => typ = v,
+            "source" | "src" => source = v,
+            "target" | "dst" | "destination" => target = v,
+            "readonly" | "read-only" | "ro" => read_only = v.is_empty() || v == "true" || v == "1",
+            "volume-nocopy" | "bind-propagation" | "consistency" | "bind-nonrecursive" => {}
+            other => return Err(msg(format!("invalid field '{other}' in --mount"))),
+        }
+    }
+    if target.is_empty() {
+        return Err(msg(format!("--mount requires a target: {spec:?}")));
+    }
+    Ok(json!({
+        "Type": typ,
+        "Source": source,
+        "Target": target,
+        "ReadOnly": read_only,
+    }))
 }
 
 fn parse_restart(spec: &str) -> (String, i64) {
@@ -1682,4 +1827,58 @@ fn slim_b64_decode(s: &str) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ports(specs: &[&str]) -> Value {
+        let owned: Vec<String> = specs.iter().map(|s| s.to_string()).collect();
+        parse_ports(&owned).0
+    }
+
+    #[test]
+    fn host_ip_is_preserved() {
+        let b = ports(&["127.0.0.1:6900:6900"]);
+        assert_eq!(b["6900/tcp"][0]["HostIp"], "127.0.0.1");
+        assert_eq!(b["6900/tcp"][0]["HostPort"], "6900");
+    }
+
+    #[test]
+    fn plain_and_container_only_forms() {
+        let b = ports(&["8080:80", "5432"]);
+        assert_eq!(b["80/tcp"][0]["HostIp"], "");
+        assert_eq!(b["80/tcp"][0]["HostPort"], "8080");
+        assert_eq!(b["5432/tcp"][0]["HostPort"], "");
+    }
+
+    #[test]
+    fn udp_and_ipv6_and_repeats() {
+        let b = ports(&[
+            "127.0.0.1:53:53/udp",
+            "[::1]:8080:80",
+            "192.168.1.5:8080:80",
+        ]);
+        assert_eq!(b["53/udp"][0]["HostIp"], "127.0.0.1");
+        assert_eq!(b["80/tcp"][0]["HostIp"], "::1");
+        assert_eq!(b["80/tcp"][1]["HostIp"], "192.168.1.5");
+    }
+
+    #[test]
+    fn mount_spec_bind_readonly() {
+        let m =
+            parse_mount("type=bind,source=/Users/me/Application Support/x,target=/conf,readonly")
+                .unwrap();
+        assert_eq!(m["Type"], "bind");
+        assert_eq!(m["Source"], "/Users/me/Application Support/x");
+        assert_eq!(m["Target"], "/conf");
+        assert_eq!(m["ReadOnly"], true);
+    }
+
+    #[test]
+    fn mount_spec_rejects_junk() {
+        assert!(parse_mount("type=bind,source=/a").is_err());
+        assert!(parse_mount("type=bind,srcx=/a,target=/b").is_err());
+    }
 }

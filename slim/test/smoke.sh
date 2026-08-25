@@ -17,6 +17,27 @@ ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 DS=/slim/docker-slim
 
+# Poll instead of sleeping: a loaded 2-core CI runner needs longer than any
+# fixed sleep to mount an overlay, wire a veth and exec the entrypoint.
+wait_running() {
+    for _ in $(seq 1 60); do
+        [ "$($DS inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = "true" ] && return 0
+        sleep 0.25
+    done
+    return 1
+}
+# retry_out <tries> <pattern> <cmd...> — run cmd until its output matches.
+retry_out() {
+    _n=$1; _pat=$2; shift 2
+    while [ "$_n" -gt 0 ]; do
+        "$@" >/tmp/o 2>&1
+        grep -q "$_pat" /tmp/o && return 0
+        _n=$((_n - 1))
+        sleep 0.5
+    done
+    return 1
+}
+
 echo "== booting slimd =="
 /slim/slimd > /tmp/slimd.log 2>&1 &
 SLIMD_PID=$!
@@ -41,15 +62,16 @@ $DS run --rm alpine:3.19 sh -c 'exit 7' >/tmp/o 2>&1; [ $? -eq 7 ] && ok "exit c
 
 echo "== run -d + logs + exec + stop + rm =="
 $DS run -d --name s1 alpine:3.19 sh -c 'echo started; sleep 30' >/tmp/o 2>&1 && ok "run -d" || { bad "run -d"; cat /tmp/o; tail -20 /tmp/slimd.log; }
-sleep 1
+wait_running s1 || { bad "s1 never reached running"; tail -20 /tmp/slimd.log; }
 $DS ps >/tmp/o 2>&1 && grep -q "s1" /tmp/o && ok "ps shows s1" || { bad "ps"; cat /tmp/o; }
-$DS logs s1 >/tmp/o 2>&1 && grep -q "started" /tmp/o && ok "logs" || { bad "logs"; cat /tmp/o; }
-$DS exec s1 echo from-exec >/tmp/o 2>&1 && grep -q "from-exec" /tmp/o && ok "exec" || { bad "exec"; cat /tmp/o; tail -20 /tmp/slimd.log; }
+retry_out 10 "started" $DS logs s1 && ok "logs" || { bad "logs"; cat /tmp/o; }
+retry_out 10 "from-exec" $DS exec s1 echo from-exec && ok "exec" || { bad "exec"; cat /tmp/o; tail -20 /tmp/slimd.log; }
 $DS stop s1 >/tmp/o 2>&1 && ok "stop" || { bad "stop"; cat /tmp/o; }
 $DS rm s1 >/tmp/o 2>&1 && ok "rm" || { bad "rm"; cat /tmp/o; }
 
 echo "== inspect -f =="
 $DS run -d --name s2 alpine:3.19 sleep 30 >/dev/null 2>&1
+wait_running s2 || true
 RUNNING=$($DS inspect -f '{{.State.Running}}' s2 2>/dev/null)
 [ "$RUNNING" = "true" ] && ok "inspect -f State.Running" || bad "inspect -f (got '$RUNNING')"
 $DS rm -f s2 >/dev/null 2>&1

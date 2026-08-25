@@ -40,9 +40,14 @@ if you don't need ephemeral sandbox/GPU sidecars), and the UI binary (8 MB, irre
 
 On the booted slim microVM, `DOCKER_HOST=unix://…/run/docker.sock docker …`:
 
-- `pull` (Docker Hub), `images`, `run -d`, `run` foreground (stdout/stderr
-  streamed via attach), exit-code propagation, `logs`, `exec`, `ps`,
-  `create`/`start`/`stop`/`rm`, `inspect -f`, volumes.
+- `pull` (Docker Hub), `images`, `load`, `run -d`, `run -t`, `run` foreground
+  (stdout/stderr streamed via attach), exit-code propagation, `logs`, `exec`,
+  `cp`, `ps`, `create`/`start`/`stop -t`/`rm`, `inspect -f`, volumes.
+- Host bind mounts (`-v`, `--mount type=bind`) of directories and files,
+  read-only and read-write, from paths containing spaces; named + anonymous +
+  image `VOLUME`s; container-to-container DNS on user networks; published
+  ports scoped to a host address (`-p 127.0.0.1:…`). Covered by
+  `slim/test/appstack.sh` and corpus cases 105/115/155.
 - `docker build` (multi-step, layer commit, run-the-built-image).
 - The slim CLIs (`docker-slim`/`kubectl-slim`/`helm-slim`) — and the
   k8s-facade / helm flows (apply/get/scale/delete, helm install/template/

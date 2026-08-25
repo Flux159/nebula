@@ -105,6 +105,17 @@ fn route(engine: &EngineRef, ctx: &mut Ctx, method: &str, segs: &[&str]) -> R {
         // ----- images -----
         ("GET", ["images", "json"]) => list_images(engine, ctx),
         ("POST", ["images", "create"]) => pull_image(engine, ctx),
+        ("POST", ["images", "load"]) => load_image(engine, ctx),
+        ("GET", ["images", rest @ ..]) if rest.last() == Some(&"get") => {
+            let _ = rest;
+            ctx.respond_error(
+                501,
+                "image save is not supported in slim: layers are stored unpacked, \
+                 so the original layer tars (and their digests) no longer exist. \
+                 Use `docker save` on a machine with the real engine and \
+                 `docker-slim load` here.",
+            )
+        }
         ("GET", ["images", rest @ ..]) if rest.last() == Some(&"json") => {
             let name = rest[..rest.len() - 1].join("/");
             image_inspect(engine, ctx, &name)
@@ -544,6 +555,51 @@ fn pull_image(engine: &EngineRef, ctx: &mut Ctx) -> R {
             Ok(())
         }
     }
+}
+
+/// POST /images/load — import a docker-save / OCI-layout tar. The body is
+/// spooled to the image store's own filesystem first: the archive can be
+/// hundreds of MB and is read twice (index, then per-layer seeks).
+fn load_image(engine: &EngineRef, ctx: &mut Ctx) -> R {
+    let quiet = ctx.head.query_bool("quiet");
+    let spool = engine
+        .paths
+        .images
+        .join(format!("blobs/.upload-{}.tar", slim_net::rand_id()));
+    {
+        let mut file = match std::fs::File::create(&spool) {
+            Ok(f) => f,
+            Err(e) => return ctx.respond_error(500, format!("cannot buffer archive: {e}")),
+        };
+        let mut body = ctx.body_reader();
+        if let Err(e) = std::io::copy(&mut body, &mut file) {
+            let _ = std::fs::remove_file(&spool);
+            return ctx.respond_error(400, format!("error reading archive: {e}"));
+        }
+    }
+    let mut w = ctx.stream(200, "application/json")?;
+    let mut emit = |line: String| {
+        if quiet && !line.starts_with("Loaded image") {
+            return;
+        }
+        let msg = slim_api::ProgressMessage {
+            stream: Some(format!("{line}\n")),
+            ..Default::default()
+        };
+        if let Ok(mut b) = serde_json::to_vec(&msg) {
+            b.push(b'\n');
+            let _ = w.write_all(&b);
+        }
+    };
+    let res = engine.store.load_tar(&spool, &mut emit);
+    let _ = std::fs::remove_file(&spool);
+    if let Err(e) = res {
+        let err = slim_api::ProgressMessage::from_error(e.to_string());
+        let mut line = serde_json::to_vec(&err).unwrap_or_default();
+        line.push(b'\n');
+        let _ = w.write_all(&line);
+    }
+    Ok(())
 }
 
 fn pull_event_to_json(ev: slim_image::PullEvent) -> slim_api::ProgressMessage {

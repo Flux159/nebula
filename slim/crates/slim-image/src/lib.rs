@@ -8,6 +8,7 @@
 //!                           across images)
 //!   db.json                 images + repo:tag table
 
+pub mod load;
 pub mod refs;
 pub mod registry;
 pub mod unpack;
@@ -88,7 +89,7 @@ pub enum PullEvent {
     },
 }
 
-fn other(e: impl std::fmt::Display) -> io::Error {
+pub(crate) fn other(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }
 

@@ -70,6 +70,8 @@ pub fn run(argv: &[String]) -> i32 {
         "cp" => cmds::cp(&client, cargs),
         "build" => cmds::build(&client, cargs),
         "tag" => cmds::tag(&client, cargs),
+        "load" => cmds::load(&client, cargs),
+        "save" => cmds::save(&client, cargs),
         "rmi" => cmds::rmi(&client, cargs),
         "wait" => cmds::wait(&client, cargs),
         "port" => cmds::port(&client, cargs),
@@ -108,6 +110,7 @@ fn print_usage() {
         \x20 build     Build an image from a Dockerfile\n\
         \x20 pull      Download an image from a registry\n\
         \x20 images    List images\n\
+        \x20 load      Load an image from a docker-save archive\n\
         \x20 logs      Fetch the logs of a container\n\
         \x20 inspect   Return low-level information on objects\n\n\
         Management Commands:\n\

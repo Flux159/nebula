@@ -387,6 +387,21 @@ fn parse_operand(s: &str) -> Result<Expr, TmplError> {
     if s.starts_with('(') && balanced(s) {
         return parse_pipeline(&s[1..s.len() - 1]);
     }
+    // `(pipeline).Field.Sub` — Go allows a field selector on a parenthesized
+    // expression, and docker's own documented templates use it
+    // (`{{(index .NetworkSettings.Ports "80/tcp" 0).HostIp}}`). Field
+    // selection on a map is exactly `index`, so desugar to that.
+    if s.starts_with('(') {
+        if let Some(close) = close_paren(s) {
+            if let Some(rest) = s[close + 1..].strip_prefix('.') {
+                let mut expr = parse_pipeline(&s[1..close])?;
+                for seg in rest.split('.').filter(|p| !p.is_empty()) {
+                    expr = Expr::Call("index".into(), vec![expr, Expr::Str(seg.to_string())]);
+                }
+                return Ok(expr);
+            }
+        }
+    }
     match s {
         "." => return Ok(Expr::Dot),
         "$" => return Ok(Expr::Root),
@@ -1046,6 +1061,36 @@ fn is_ident(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Byte index of the `)` that closes the `(` at position 0, quotes aware.
+fn close_paren(s: &str) -> Option<usize> {
+    let mut depth = 0;
+    let mut in_str = false;
+    let mut quote = '"';
+    for (i, c) in s.char_indices() {
+        if in_str {
+            if c == quote {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            '"' | '`' => {
+                in_str = true;
+                quote = c;
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn balanced(s: &str) -> bool {
     if !s.starts_with('(') || !s.ends_with(')') {
         return false;
@@ -1195,6 +1240,30 @@ fn unescape(s: &str, process: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn field_selector_on_a_parenthesized_expression() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"NetworkSettings":{"Ports":{"80/tcp":[{"HostIp":"127.0.0.1","HostPort":"18081"}]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            render(
+                r#"{{(index .NetworkSettings.Ports "80/tcp" 0).HostIp}}"#,
+                &v
+            )
+            .unwrap(),
+            "127.0.0.1"
+        );
+        assert_eq!(
+            render(
+                r#"{{(index .NetworkSettings.Ports "80/tcp" 0).HostPort}}"#,
+                &v
+            )
+            .unwrap(),
+            "18081"
+        );
+    }
     use super::*;
     use serde_json::json;
 

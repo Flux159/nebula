@@ -13,6 +13,7 @@ mod engine;
 mod exec;
 mod inspect;
 mod kube_bridge;
+mod mounts;
 mod names;
 mod router;
 mod streams;

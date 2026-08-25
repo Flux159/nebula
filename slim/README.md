@@ -35,7 +35,19 @@ socket proxy); slim just swaps the guest engine.
 **Containers (`docker-slim`, or the unmodified `docker` CLI via `DOCKER_HOST`)**
 - `pull` (Docker Hub + any registry), `images`, content-addressed per-layer store
 - `run`/`create`/`start`/`stop`/`rm`, foreground attach with exit-code
-  propagation, `-d`, `logs`, `exec`, `ps`, `inspect -f`, volumes, published ports
+  propagation, `-d`, `-t`, `logs`, `exec`, `cp`, `ps`, `inspect -f`
+- **host bind mounts** (`-v` and `--mount type=bind`), directories or files,
+  read-only or read-write, from any path on the `$HOME` share — **including
+  paths with spaces**, which is where a macOS app keeps its state
+- **volumes**: named (they outlive the container), anonymous, and the image's
+  own `VOLUME`s — a fresh volume is seeded from the image, like docker
+- **published ports that honour the host address**: `-p 127.0.0.1:6900:6900`
+  stays on loopback (and reports itself that way) instead of quietly binding
+  every interface
+- `docker load` — a docker-save or OCI-layout archive, plain or gzipped, so a
+  packaged app can install its own images with no registry. (`save` is not
+  implemented: slim stores layers unpacked, so the original layer tars are
+  gone. Produce archives with the real `docker save`.)
 - `docker build` — the **classic** builder (multi-step, layer commit). Needs
   `DOCKER_BUILDKIT=0` with the real CLI; `docker-slim build` always uses it
 - Validated against **real dockerd** as a compatibility oracle

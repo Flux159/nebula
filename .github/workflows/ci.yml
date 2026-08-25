@@ -73,3 +73,56 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Unit tests
         run: cargo test
+
+  slim-engine:
+    # The slim engine only exists on real Linux (namespaces, overlayfs,
+    # cgroup2, iptables), so lint+unit tests can't tell us whether it still
+    # runs containers. This job boots slimd inside a privileged container on
+    # the runner — the same harness scripts/test-slim.sh uses inside the
+    # vessel — and drives it with docker-slim.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: slim
+      # zig is the musl C compiler for ring (see slim/scripts/build-musl.sh).
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+      - name: Build slimd + docker-slim (musl)
+        run: |
+          ARCH=x86_64 slim/scripts/build-musl.sh
+          (cd slim && cargo build --release --target x86_64-unknown-linux-musl -p docker-slim)
+      - name: Stage the suites
+        run: |
+          mkdir -p stage
+          cp slim/target/x86_64-unknown-linux-musl/release/{slimd,docker-slim,pause} stage/
+          cp slim/test/smoke.sh slim/test/appstack.sh stage/
+          # `docker load` needs a real archive; the runner has a real docker.
+          docker pull alpine:3.19
+          docker save alpine:3.19 -o stage/load-image.tar
+          gzip -9 -c stage/load-image.tar > stage/load-image.tar.gz
+      - name: Engine smoke + app-stack suites
+        env:
+          # Anonymous Docker Hub pulls are rate limited on shared CI IPs.
+          SLIM_REGISTRY_MIRROR: mirror.gcr.io
+        run: |
+          set -o pipefail
+          fail=0
+          for suite in smoke appstack; do
+            echo "::group::$suite"
+            docker run --rm --privileged -e SLIM_REGISTRY_MIRROR \
+              -v "$PWD/stage:/slim" alpine:3.19 sh -c \
+              "apk add --no-cache iptables ip6tables iproute2 >/dev/null 2>&1; sh /slim/$suite.sh" \
+              > "$suite.log" 2>&1 || true
+            cat "$suite.log"
+            echo "::endgroup::"
+            line=$(grep "RESULT:" "$suite.log" || echo "RESULT: no result line, 1 failed")
+            echo "$suite: $line"
+            case "$line" in *" 0 failed"*) ;; *) fail=1 ;; esac
+          done
+          exit $fail

@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 const OWNER: &str = "io.nebula.kube.owner"; // "<kind>/<ns>/<name>"
 const POD_OF: &str = "io.nebula.kube.pod"; // "<ns>/<podname>"
-const MANAGED: &str = "io.nebula.kube.bridge"; // "true"
+const MANAGED: &str = "io.nebula.kube.bridge"; // "true" (see mounts::KUBE_MANAGED_LABEL)
 const POD_HOLDER: &str = "io.nebula.kube.holder"; // holder cname (pod netns owner)
 const CNAME: &str = "io.nebula.kube.container"; // k8s container name
 
@@ -1713,14 +1713,13 @@ fn parse_probe(v: &Value) -> Option<Probe> {
         ProbeKind::Tcp {
             port: probe_port(t.get("port"))?,
         }
-    } else if let Some(e) = v.get("exec") {
+    } else {
+        let e = v.get("exec")?;
         let cmd = strs(e.get("command"));
         if cmd.is_empty() {
             return None;
         }
         ProbeKind::Exec { cmd }
-    } else {
-        return None;
     };
     Some(Probe {
         kind,
