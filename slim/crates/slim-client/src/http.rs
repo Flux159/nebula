@@ -487,7 +487,14 @@ impl Response {
 fn api_error(status: u16, bytes: &[u8]) -> ApiError {
     let message = serde_json::from_slice::<slim_api::ErrorResponse>(bytes)
         .map(|e| e.message)
-        .unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned());
+        .unwrap_or_else(|_| String::from_utf8_lossy(bytes).trim().to_string());
+    // A bodyless error (a socket proxy in front of an engine that isn't
+    // listening yet) would otherwise print as a bare "Error: ".
+    let message = if message.is_empty() {
+        format!("engine returned HTTP {status} with no message")
+    } else {
+        message
+    };
     ApiError { status, message }
 }
 

@@ -175,7 +175,14 @@ pub fn load(client: &Client, cargs: &[String]) -> CmdResult {
     };
     if !(200..300).contains(&resp.status) {
         let body = resp.read_body().unwrap_or_default();
-        return Err(msg(String::from_utf8_lossy(&body).into_owned()));
+        let text = String::from_utf8_lossy(&body).trim().to_string();
+        // An empty body is what a proxy in front of a not-yet-listening engine
+        // returns; "Error: " on its own tells the user nothing.
+        return Err(msg(if text.is_empty() {
+            format!("engine returned HTTP {} with no message", resp.status)
+        } else {
+            text
+        }));
     }
     let mut buf = Vec::new();
     resp.stream_body(|chunk| buf.extend_from_slice(chunk))?;
