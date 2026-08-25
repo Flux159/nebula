@@ -41,21 +41,28 @@ jobs:
             echo "::error::no successful guest-images run — dispatch that workflow first"
             exit 1
           fi
-          mkdir -p dist
-          gh run download "$run_id" --name guest-images --dir dist
+          mkdir -p dist vessel/out
+          # guest-images.yml uploads one artifact per arch, with arch-suffixed
+          # filenames inside. This runner is arm64.
+          gh run download "$run_id" --name guest-images-arm64 --dir dist
           ls -la dist
-          # embed-kit consumes the raw images from vessel/out
-          mkdir -p vessel/out
-          gzip -dc dist/kernel-Image.gz > vessel/out/Image
-          gzip -dc dist/rootfs.img.gz > vessel/out/rootfs.img
+          # bundle-app + embed-kit consume the raw images from vessel/out
+          gzip -dc dist/kernel-Image-arm64.gz > vessel/out/Image
+          gzip -dc dist/rootfs-arm64.img.gz > vessel/out/rootfs.img
+          gzip -dc dist/rootfs-slim-arm64.img.gz > vessel/out/rootfs-slim.img
 
       - name: Build Nebula.app + DMG (ad-hoc signed)
         run: scripts/bundle-app.sh
 
-      - name: Build embed kit
+      - name: Build embed kits (full + slim)
         run: |
           scripts/embed-kit.sh --flavor full --out dist-embed
           ditto -c -k dist-embed nebula-embed-kit.zip
+          # The slim kit is the small one: slimd in the guest, slim CLIs in
+          # bin/ — ~32 MB of engine instead of ~140 MB of Go stack.
+          scripts/embed-kit.sh --flavor slim --out dist-embed-slim
+          ditto -c -k dist-embed-slim nebula-slim-embed-kit.zip
+          ls -lh nebula-embed-kit.zip nebula-slim-embed-kit.zip
 
       - uses: actions/upload-artifact@v4
         with:
@@ -67,3 +74,8 @@ jobs:
         with:
           name: nebula-embed-kit
           path: nebula-embed-kit.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nebula-slim-embed-kit
+          path: nebula-slim-embed-kit.zip

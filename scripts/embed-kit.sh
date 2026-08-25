@@ -47,10 +47,22 @@ test -f vessel/out/Image || vessel/build-kernel.sh
 echo "==> relocatable libkrun"
 scripts/package-libkrun.sh dist/libkrun
 
+# The slim flavor's engine speaks the same APIs, but an embedder has no
+# docker/kubectl/helm binaries to talk to it with — ship the slim clients
+# (pure Rust, ~2.5 MB for all three) in the same bin/.
+if [ "$FLAVOR" = "slim" ]; then
+    echo "==> slim host CLIs"
+    ( cd slim && cargo build --release -p docker-slim -p kubectl-slim -p helm-slim )
+fi
+
 echo "==> assembling $OUT/"
 rm -rf "$OUT"
 mkdir -p "$OUT/bin" "$OUT/images" "$OUT/lib"
 cp target/release/nebula target/release/nebulad "$OUT/bin/"
+if [ "$FLAVOR" = "slim" ]; then
+    cp slim/target/release/docker-slim slim/target/release/kubectl-slim \
+       slim/target/release/helm-slim "$OUT/bin/"
+fi
 cp dist/libkrun/*.dylib "$OUT/lib/"
 gzip -9 -c vessel/out/Image > "$OUT/images/kernel-Image.gz"
 gzip -9 -c "$IMG" > "$OUT/images/rootfs.img.gz"
@@ -121,6 +133,20 @@ cat > "$OUT/EMBED.md" <<'EOF'
 
 Full guide: docs/embedding.md in the Nebula repo.
 EOF
+
+if [ "$FLAVOR" = "slim" ]; then
+    cat >> "$OUT/EMBED.md" <<'EOF'
+
+## This is the slim flavor
+
+The guest runs `slimd` (Rust) instead of dockerd/containerd/k3s, so `bin/`
+also carries `docker-slim`, `kubectl-slim` and `helm-slim`. They speak the
+same sockets as the real CLIs — point any docker client library at
+`unix://$NEBULA_HOME/run/docker.sock` as usual, or use these when you'd
+rather not make your users install anything. What slim does and doesn't do:
+slim/README.md in the Nebula repo.
+EOF
+fi
 
 ls -lhR "$OUT" | grep -vE "^$|^total"
 echo "==> embed kit ready: $OUT/"
