@@ -54,7 +54,11 @@ fn spawn_docker_watcher(
     std::thread::spawn(move || {
         // port -> (stop flag, target ip). Recreated when the guest IP moves
         // (DHCP hands out a fresh address on every boot).
-        let mut forwarders: HashMap<u16, (Arc<AtomicBool>, Ipv4Addr)> = HashMap::new();
+        // port -> (stop flag, target ip, was the publish loopback-scoped)
+        let mut forwarders: HashMap<u16, (Arc<AtomicBool>, Ipv4Addr, bool)> = HashMap::new();
+        // Consecutive failed container listings; only used to keep the log quiet
+        // while the engine is down.
+        let mut list_failures: u32 = 0;
         loop {
             std::thread::sleep(Duration::from_secs(2));
 
@@ -64,14 +68,44 @@ fn spawn_docker_watcher(
                 _ => None,
             };
 
-            let containers = list_containers(&docker_sock).unwrap_or_default();
+            // A failed query is not an empty engine. Treating the two alike used
+            // to tear down every forward on a single hiccup and rebuild it two
+            // seconds later, which is invisible to short HTTP requests but
+            // kills any long-lived connection through a published port. Skip
+            // the tick instead and leave the existing forwards (and the DNS
+            // name set) exactly as they are.
+            let containers = match list_containers(&docker_sock) {
+                Ok(containers) => {
+                    if list_failures > 0 {
+                        tracing::info!(
+                            failures = list_failures,
+                            "container list recovered; reconciling port forwards"
+                        );
+                        list_failures = 0;
+                    }
+                    containers
+                }
+                Err(e) => {
+                    list_failures += 1;
+                    if list_failures == 1 {
+                        tracing::warn!("container list failed ({e}); keeping existing port forwards");
+                    }
+                    continue;
+                }
+            };
             let mut names = HashSet::new();
             let mut ports = HashSet::new();
+            let mut loopback_only = HashSet::new();
             for c in &containers {
                 for n in &c.names {
                     names.insert(n.clone());
                 }
-                ports.extend(c.tcp_ports.iter().copied());
+                for &(port, loopback) in &c.tcp_ports {
+                    ports.insert(port);
+                    if loopback {
+                        loopback_only.insert(port);
+                    }
+                }
             }
             // Static service forwards (k3s API; certs cover 127.0.0.1).
             ports.insert(k8s_port);
@@ -83,21 +117,33 @@ fn spawn_docker_watcher(
                 st.published_tcp = ports.clone();
             }
 
-            // Reconcile forwarders. macOS dials the guest IP directly (VZ
-            // NAT subnet is host-routable); Linux and Windows tunnel
-            // through the agent's vsock TCP proxy (the guest IP is not
-            // host-routable behind the usermode NAT).
-            let target = if cfg!(target_os = "macos") {
+            // Reconcile forwarders. macOS dials the guest IP directly (the VZ
+            // NAT subnet is host-routable); Linux and Windows tunnel through
+            // the agent's vsock TCP proxy (the guest IP is not host-routable
+            // behind the usermode NAT).
+            //
+            // A loopback-scoped publish is the exception: dockerd bound it to
+            // the guest's own 127.0.0.1, so dialling the NAT address just hangs
+            // and the host's connection dies a second later with no
+            // explanation. Those go through the vsock proxy on every platform —
+            // it already falls back to the guest's loopback.
+            if cfg!(target_os = "macos") && guest_ip.is_none() {
+                continue;
+            }
+            let target_for = |port: u16| -> ForwardTarget {
                 match guest_ip {
-                    Some(ip) => ForwardTarget::Ip(ip),
-                    None => continue,
+                    Some(ip) if cfg!(target_os = "macos") && !loopback_only.contains(&port) => {
+                        ForwardTarget::Ip(ip)
+                    }
+                    _ => ForwardTarget::Vsock(vessel.clone()),
                 }
-            } else {
-                ForwardTarget::Vsock(vessel.clone())
             };
             let ip = guest_ip.unwrap_or(Ipv4Addr::UNSPECIFIED);
-            forwarders.retain(|port, (stop, fwd_ip)| {
-                if ports.contains(port) && *fwd_ip == ip {
+            forwarders.retain(|port, (stop, fwd_ip, was_loopback)| {
+                if ports.contains(port)
+                    && *fwd_ip == ip
+                    && *was_loopback == loopback_only.contains(port)
+                {
                     true
                 } else {
                     stop.store(true, Ordering::SeqCst);
@@ -110,12 +156,12 @@ fn spawn_docker_watcher(
             for port in ports {
                 if let std::collections::hash_map::Entry::Vacant(e) = forwarders.entry(port) {
                     let stop = Arc::new(AtomicBool::new(false));
-                    if spawn_port_forward(port, target.clone(), stop.clone()) {
+                    if spawn_port_forward(port, target_for(port), stop.clone()) {
                         tracing::info!(
                             port,
                             "port forward added (127.0.0.1:{port} -> {ip}:{port})"
                         );
-                        e.insert((stop, ip));
+                        e.insert((stop, ip, loopback_only.contains(&port)));
                     }
                 }
             }
@@ -300,7 +346,11 @@ use std::net::ToSocketAddrs;
 
 pub struct ContainerInfo {
     pub names: Vec<String>,
-    pub tcp_ports: Vec<u16>,
+    /// (published port, bound only to the guest's loopback). Docker reports a
+    /// `HostIp` per mapping: `-p 8080:80` binds the wildcard, while
+    /// `-p 127.0.0.1:8080:80` binds the *guest's* 127.0.0.1 and is therefore
+    /// invisible on the guest's NAT address.
+    pub tcp_ports: Vec<(u16, bool)>,
 }
 
 fn list_containers(docker_sock: &std::path::Path) -> anyhow::Result<Vec<ContainerInfo>> {
@@ -317,14 +367,24 @@ fn list_containers(docker_sock: &std::path::Path) -> anyhow::Result<Vec<Containe
                     .collect()
             })
             .unwrap_or_default();
-        let mut tcp_ports = Vec::new();
+        // A port can appear twice (v4 and v6); it is loopback-only when every
+        // mapping for it is loopback.
+        let mut bindings: std::collections::HashMap<u16, bool> = std::collections::HashMap::new();
         for p in c["Ports"].as_array().cloned().unwrap_or_default() {
-            if p["Type"].as_str() == Some("tcp") {
-                if let Some(public) = p["PublicPort"].as_u64() {
-                    tcp_ports.push(public as u16);
-                }
+            if p["Type"].as_str() != Some("tcp") {
+                continue;
             }
+            let Some(public) = p["PublicPort"].as_u64() else {
+                continue;
+            };
+            let host_ip = p["IP"].as_str().unwrap_or_default();
+            let loopback = matches!(host_ip, "::1") || host_ip.starts_with("127.");
+            bindings
+                .entry(public as u16)
+                .and_modify(|only| *only &= loopback)
+                .or_insert(loopback);
         }
+        let tcp_ports = bindings.into_iter().collect();
         out.push(ContainerInfo { names, tcp_ports });
     }
     Ok(out)
