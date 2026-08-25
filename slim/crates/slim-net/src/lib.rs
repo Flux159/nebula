@@ -549,8 +549,8 @@ impl NetManager {
         if ports.is_empty() {
             return Ok(());
         }
-        let mut recorded = Vec::new();
-        let mut handles = Vec::new();
+        let mut recorded: Vec<PublishedRule> = Vec::new();
+        let mut handles: Vec<ProxyHandle> = Vec::new();
         for p in ports {
             let dest = format!("{dest_ip}:{}", p.container_port);
             // A loopback publish must not become a wildcard DNAT rule.
@@ -563,7 +563,16 @@ impl NetManager {
                 }
                 let hp = p.host_port.to_string();
                 args.extend(["--dport", &hp, "-j", "DNAT", "--to-destination", &dest]);
-                run("iptables", &args)?;
+                if let Err(e) = run("iptables", &args) {
+                    // Don't leave half a publish behind: the listeners opened
+                    // for earlier ports would keep the addresses busy with
+                    // nothing recorded to tear them down.
+                    for h in handles {
+                        h.stop();
+                    }
+                    self.remove_rules(&recorded);
+                    return Err(e);
+                }
             } else if !self.firewall && !p.loopback() {
                 eprintln!("slim-net: iptables unavailable; -p DNAT skipped (userland proxy only)");
             }
@@ -608,6 +617,10 @@ impl NetManager {
             r
         };
         let Some(rules) = rules else { return };
+        self.remove_rules(&rules);
+    }
+
+    fn remove_rules(&self, rules: &[PublishedRule]) {
         for r in rules {
             if !r.dnat {
                 continue;
