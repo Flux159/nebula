@@ -24,8 +24,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Brew deps (libkrun fork toolchain + GPU userspace)
+        env:
+          # Homebrew 6.0 refuses formulae from untrusted taps in CI; trust
+          # the tap explicitly (env var covers runners on older brew where
+          # `brew trust` doesn't exist yet). Same as release.yml — without it
+          # this step fails in ~30s and nothing else runs.
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
         run: |
           brew tap slp/krunkit
+          brew trust slp/krunkit || true
           brew install zig llvm virglrenderer molten-vk
 
       - name: Tauri CLI
