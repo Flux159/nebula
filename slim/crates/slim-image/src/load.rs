@@ -20,6 +20,17 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+/// Unique-per-call temp suffix: two clients can load at once.
+fn tmp_tag() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 /// One image registered by a load, in the order the archive listed them.
 #[derive(Debug, Clone)]
 pub struct LoadedImage {
@@ -147,9 +158,7 @@ impl Store {
         tar_path: &Path,
         emit: &mut dyn FnMut(String),
     ) -> io::Result<Vec<LoadedImage>> {
-        let gunzipped = self
-            .root
-            .join(format!("blobs/.load-{}.tar", std::process::id()));
+        let gunzipped = self.root.join(format!("blobs/.load-{}.tar", tmp_tag()));
         let path = maybe_gunzip(tar_path, &gunzipped)?;
         let result = self.load_plain_tar(&path, emit);
         let _ = std::fs::remove_file(&gunzipped);
@@ -252,9 +261,7 @@ impl Store {
                 continue;
             }
             emit(format!("Loading layer: {}", short(&want)));
-            let tmp = self
-                .root
-                .join(format!("layers/.tmp-load-{}", std::process::id()));
+            let tmp = self.root.join(format!("layers/.tmp-load-{}", tmp_tag()));
             let _ = std::fs::remove_dir_all(&tmp);
             let mut head = [0u8; 2];
             let peek = idx.open(path, member)?.0.read(&mut head).unwrap_or(0);
