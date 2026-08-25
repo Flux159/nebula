@@ -31,3 +31,9 @@ assert_ok "--mount type=bind with a spaced source" \
     dk run --rm --mount "type=bind,source=$STATE/conf,target=/conf,readonly" \
     alpine:3.19 cat /conf/inter_conf.txt
 assert_out_eq "--mount delivered the same file" "motd: hello"
+
+# Containers write as root, so the runner (unprivileged) can't rm -rf the
+# scratch dir afterwards. Hand that back to a container. Inline rather than
+# cleanup_add: registered cleanups are re-split on whitespace, and this path
+# has spaces in it — which is the whole point of the case.
+dk run --rm -v "$STATE:/state" alpine:3.19 rm -rf /state/conf /state/sql /state/npc >/dev/null 2>&1
