@@ -26,3 +26,6 @@ vessel/rootfs/bin/
 dist/
 ui/src-tauri/frameworks/
 dist-debug/
+# Assembled embed kits (scripts/embed-kit.sh --out); they carry the guest
+# images, so they are far past GitHub's file size limit.
+dist-embed*/
