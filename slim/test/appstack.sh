@@ -22,6 +22,27 @@ bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 DS=/slim/docker-slim
 IMG=${APPSTACK_IMAGE:-alpine:3.19}
 
+# Poll instead of sleeping: on a loaded CI runner a fixed sleep is either
+# flaky or slow, and every server below needs a moment to bind its socket.
+wait_running() {
+    for _ in $(seq 1 60); do
+        [ "$($DS inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = "true" ] && return 0
+        sleep 0.25
+    done
+    return 1
+}
+# retry_out <tries> <pattern> <cmd...> — run cmd until its output matches.
+retry_out() {
+    _n=$1; _pat=$2; shift 2
+    while [ "$_n" -gt 0 ]; do
+        "$@" >/tmp/o 2>&1
+        grep -q "$_pat" /tmp/o && return 0
+        _n=$((_n - 1))
+        sleep 0.5
+    done
+    return 1
+}
+
 echo "== booting slimd =="
 /slim/slimd > /tmp/slimd.log 2>&1 &
 SLIMD_PID=$!
@@ -67,6 +88,7 @@ $DS run --rm --mount "type=bind,source=$STATE/does-not-exist,target=/x" "$IMG" t
 
 echo "== inspect reports mounts =="
 $DS run -d --name as-mounts -v "$STATE/conf:/conf:ro" "$IMG" sleep 30 >/tmp/o 2>&1
+wait_running as-mounts || true
 $DS inspect -f '{{range .Mounts}}{{.Type}} {{.Destination}} {{.RW}}{{end}}' as-mounts >/tmp/o 2>&1
 grep -q "bind /conf false" /tmp/o && ok "inspect .Mounts shows the ro bind" || { bad "inspect .Mounts"; cat /tmp/o; }
 $DS rm -f as-mounts >/dev/null 2>&1
@@ -75,6 +97,7 @@ $DS rm -f as-mounts >/dev/null 2>&1
 echo "== named volume outlives its container =="
 $DS volume create appstack-db >/tmp/o 2>&1 && ok "volume create" || { bad "volume create"; cat /tmp/o; }
 $DS run -d --name as-db -v appstack-db:/var/lib/mysql "$IMG" sleep 30 >/tmp/o 2>&1
+wait_running as-db || { bad "as-db never reached running"; tail -5 /tmp/slimd.log; }
 $DS exec as-db sh -c 'echo player-row > /var/lib/mysql/data' >/tmp/o 2>&1 && ok "write into named volume" || { bad "write into named volume"; cat /tmp/o; }
 $DS rm -f as-db >/dev/null 2>&1
 $DS run --rm -v appstack-db:/var/lib/mysql "$IMG" cat /var/lib/mysql/data >/tmp/o 2>&1
@@ -96,28 +119,33 @@ echo "== container-to-container DNS on a user network =="
 $DS network create appstack-net >/tmp/o 2>&1 && ok "network create" || { bad "network create"; cat /tmp/o; }
 $DS run -d --name as-login --network appstack-net "$IMG" \
     sh -c 'while true; do echo login-ok | nc -l -p 6900; done' >/tmp/o 2>&1
-sleep 1
-$DS run --rm --network appstack-net "$IMG" ping -c1 -W2 as-login >/tmp/o 2>&1
-grep -q "1 packets received" /tmp/o && ok "resolve peer by container name" || { bad "resolve peer by name"; cat /tmp/o; }
-$DS run --rm --network appstack-net "$IMG" sh -c 'nc -w2 as-login 6900' >/tmp/o 2>&1
-grep -q "login-ok" /tmp/o && ok "connect to peer by name (the config-file case)" || { bad "connect to peer by name"; cat /tmp/o; }
+wait_running as-login || { bad "as-login never reached running"; tail -5 /tmp/slimd.log; }
+retry_out 10 "1 packets received" \
+    $DS run --rm --network appstack-net "$IMG" ping -c1 -W2 as-login \
+    && ok "resolve peer by container name" || { bad "resolve peer by name"; cat /tmp/o; }
+retry_out 10 "login-ok" \
+    $DS run --rm --network appstack-net "$IMG" nc -w2 as-login 6900 \
+    && ok "connect to peer by name (the config-file case)" || { bad "connect to peer by name"; cat /tmp/o; }
 $DS run -d --name as-char --network appstack-net --network-alias ragnarok-char "$IMG" sleep 30 >/tmp/o 2>&1
-$DS run --rm --network appstack-net "$IMG" ping -c1 -W2 ragnarok-char >/tmp/o 2>&1
-grep -q "1 packets received" /tmp/o && ok "resolve peer by --network-alias" || { bad "resolve by alias"; cat /tmp/o; }
+wait_running as-char || true
+retry_out 10 "1 packets received" \
+    $DS run --rm --network appstack-net "$IMG" ping -c1 -W2 ragnarok-char \
+    && ok "resolve peer by --network-alias" || { bad "resolve by alias"; cat /tmp/o; }
 
 # ------------------------------------------------------------------- ports
 echo "== published port bound to a host address =="
 $DS run -d --name as-web -p 127.0.0.1:18081:80 "$IMG" \
     sh -c 'while true; do echo hi-loopback | nc -l -p 80; done' >/tmp/o 2>&1
-sleep 1
+wait_running as-web || { bad "as-web never reached running"; tail -5 /tmp/slimd.log; }
 $DS ps >/tmp/o 2>&1
 grep -q "127.0.0.1:18081" /tmp/o && ok "ps reports the host address, not 0.0.0.0" || { bad "ps host address"; cat /tmp/o; }
 $DS port as-web >/tmp/o 2>&1
 grep -q "127.0.0.1:18081" /tmp/o && ok "docker port reports the host address" || { bad "docker port"; cat /tmp/o; }
 $DS inspect -f '{{(index .NetworkSettings.Ports "80/tcp" 0).HostIp}}' as-web >/tmp/o 2>&1
 grep -qx "127.0.0.1" /tmp/o && ok "inspect reports the host address" || { bad "inspect host address"; cat /tmp/o; }
-nc -w5 127.0.0.1 18081 >/tmp/o 2>&1
-grep -q "hi-loopback" /tmp/o && ok "loopback publish is reachable on 127.0.0.1" || { bad "loopback publish reachable"; cat /tmp/o; tail -5 /tmp/slimd.log; }
+retry_out 10 "hi-loopback" nc -w5 127.0.0.1 18081 \
+    && ok "loopback publish is reachable on 127.0.0.1" \
+    || { bad "loopback publish reachable"; cat /tmp/o; tail -5 /tmp/slimd.log; }
 # Scoped to loopback means NOT DNAT'd onto every address.
 iptables -t nat -S SLIM >/tmp/o 2>&1
 grep -q "dport 18081" /tmp/o && bad "loopback publish leaked a wildcard DNAT rule" || ok "no wildcard DNAT for a loopback publish"
@@ -125,9 +153,9 @@ grep -q "dport 18081" /tmp/o && bad "loopback publish leaked a wildcard DNAT rul
 echo "== wildcard publish still reaches every address =="
 $DS run -d --name as-web2 -p 18082:80 "$IMG" \
     sh -c 'while true; do echo hi-any | nc -l -p 80; done' >/tmp/o 2>&1
-sleep 1
-nc -w5 127.0.0.1 18082 >/tmp/o 2>&1
-grep -q "hi-any" /tmp/o && ok "wildcard publish reachable on loopback" || { bad "wildcard publish loopback"; cat /tmp/o; }
+wait_running as-web2 || { bad "as-web2 never reached running"; tail -5 /tmp/slimd.log; }
+retry_out 10 "hi-any" nc -w5 127.0.0.1 18082 \
+    && ok "wildcard publish reachable on loopback" || { bad "wildcard publish loopback"; cat /tmp/o; }
 iptables -t nat -S SLIM >/tmp/o 2>&1
 grep -q "dport 18082" /tmp/o && ok "wildcard publish installs a DNAT rule" || { bad "wildcard DNAT rule"; cat /tmp/o; }
 
@@ -140,11 +168,11 @@ grep -q "hi-any" /tmp/longconn && ok "connection held open for 6s still served" 
 # ------------------------------------------------------------ tty + lifecycle
 echo "== run -d -t allocates a tty =="
 $DS run -d -t --name as-tty "$IMG" sh -c 'printf "unflushed-no-newline"; sleep 30' >/tmp/o 2>&1
-sleep 1
+wait_running as-tty || { bad "as-tty never reached running"; tail -5 /tmp/slimd.log; }
 $DS inspect -f '{{.Config.Tty}}' as-tty >/tmp/o 2>&1
 grep -q "true" /tmp/o && ok "inspect .Config.Tty" || { bad "inspect Tty"; cat /tmp/o; }
-$DS logs as-tty >/tmp/o 2>&1
-grep -q "unflushed-no-newline" /tmp/o && ok "tty makes unflushed output visible in logs" || { bad "tty logs"; cat /tmp/o; }
+retry_out 10 "unflushed-no-newline" $DS logs as-tty \
+    && ok "tty makes unflushed output visible in logs" || { bad "tty logs"; cat /tmp/o; }
 $DS inspect -f '{{.State.Status}}' as-tty >/tmp/o 2>&1
 grep -q "running" /tmp/o && ok "inspect .State.Status" || { bad "inspect Status"; cat /tmp/o; }
 $DS inspect -f '{{.Id}}' as-tty >/tmp/o 2>&1
