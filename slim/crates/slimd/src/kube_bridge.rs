@@ -1713,14 +1713,13 @@ fn parse_probe(v: &Value) -> Option<Probe> {
         ProbeKind::Tcp {
             port: probe_port(t.get("port"))?,
         }
-    } else if let Some(e) = v.get("exec") {
+    } else {
+        let e = v.get("exec")?;
         let cmd = strs(e.get("command"));
         if cmd.is_empty() {
             return None;
         }
         ProbeKind::Exec { cmd }
-    } else {
-        return None;
     };
     Some(Probe {
         kind,
