@@ -614,3 +614,23 @@ limitations; routine TODOs live in code.)
   Also fixed: `scripts/test-slim.sh` still pointed at a `~/Projects/nebula-slim`
   checkout that no longer exists — it now builds the in-repo `slim/` workspace
   and runs all three suites.
+
+- 2026-08-25 — dev-build.yml (manual DMG + embed kits) was broken in three
+  places; two are fixed, one is open. Fixed: it fetched an artifact named
+  `guest-images` and gunzipped `kernel-Image.gz`/`rootfs.img.gz`, all stale
+  since guest-images.yml went multi-arch (release.yml had already been
+  updated; #18), and its brew step failed in ~30s because Homebrew 6.0
+  refuses formulae from untrusted taps in CI (#20 copies release.yml's
+  HOMEBREW_NO_REQUIRE_TAP_TRUST + `brew trust`). **Open:** with those fixed,
+  run 32889027554 gets all the way through `cargo tauri build` — "Bundling
+  Nebula.app" succeeds — and then dies in tauri's own DMG script:
+  `failed to bundle project: error running bundle_dmg.sh`. tauri swallows the
+  script's stderr, so the cause isn't in the log; the usual suspects on a
+  headless runner are the Finder/AppleScript window styling and a stale
+  `/Volumes` attach. The app bundle itself is fine, and `scripts/bundle-app.sh`
+  produces both the .app and the DMG on a real Mac (verified 2026-08-25,
+  316 MB app / 192 MB dmg), so this is packaging-on-CI only. Next step when
+  someone picks it up: re-dispatch with `cargo tauri build --verbose` (or run
+  `bundle_dmg.sh` directly in the job) to get the script's own error, and
+  consider splitting .app and .dmg into separate steps so a dev build still
+  uploads an installable app when only the DMG fails.
