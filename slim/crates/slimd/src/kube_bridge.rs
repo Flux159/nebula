@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 const OWNER: &str = "io.nebula.kube.owner"; // "<kind>/<ns>/<name>"
 const POD_OF: &str = "io.nebula.kube.pod"; // "<ns>/<podname>"
-const MANAGED: &str = "io.nebula.kube.bridge"; // "true"
+const MANAGED: &str = "io.nebula.kube.bridge"; // "true" (see mounts::KUBE_MANAGED_LABEL)
 const POD_HOLDER: &str = "io.nebula.kube.holder"; // holder cname (pod netns owner)
 const CNAME: &str = "io.nebula.kube.container"; // k8s container name
 

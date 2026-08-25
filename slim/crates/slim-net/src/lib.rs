@@ -48,13 +48,47 @@ pub struct Endpoint {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct State {
     networks: BTreeMap<String, NetworkRecord>,
-    /// container id → published ports (for teardown): (proto, host_port, dest ip:port)
-    published: BTreeMap<String, Vec<(String, u16, String)>>,
+    /// container id → published ports (for teardown).
+    published: BTreeMap<String, Vec<PublishedRule>>,
+}
+
+/// One published port, as asked for and as realized.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct PortPublish {
+    pub proto: String,
+    /// `HostIp` from the port binding: "" / "0.0.0.0" / "::" mean every
+    /// address, anything else scopes the publish to that address.
+    pub host_ip: String,
+    pub host_port: u16,
+    pub container_port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PublishedRule {
+    proto: String,
+    host_ip: String,
+    host_port: u16,
+    /// "ip:port" inside the container.
+    dest: String,
+    /// A DNAT rule was installed (loopback-scoped publishes have none).
+    dnat: bool,
+}
+
+impl PortPublish {
+    /// Wildcard = every address on the box, docker's default.
+    pub fn wildcard(&self) -> bool {
+        matches!(self.host_ip.as_str(), "" | "0.0.0.0" | "::" | "[::]")
+    }
+    fn loopback(&self) -> bool {
+        self.host_ip == "::1" || self.host_ip.starts_with("127.")
+    }
 }
 
 pub struct NetManager {
     state_path: PathBuf,
     state: Mutex<State>,
+    /// container id → live userland proxies (see `publish`).
+    proxies: Mutex<BTreeMap<String, Vec<ProxyHandle>>>,
     /// false on tier-2 setups without iptables; publishing becomes a no-op
     /// with a warning instead of an error.
     pub firewall: bool,
@@ -141,6 +175,7 @@ impl NetManager {
         Ok(NetManager {
             state_path,
             state: Mutex::new(state),
+            proxies: Mutex::new(BTreeMap::new()),
             firewall,
         })
     }
@@ -489,41 +524,71 @@ impl NetManager {
 
     // ---------- port publishing ----------
 
+    /// Publish a container's ports on the host side of the vessel.
+    ///
+    /// Two mechanisms, because one is not enough:
+    ///
+    /// * **DNAT** (nat/SLIM, hooked into PREROUTING+OUTPUT) rewrites traffic
+    ///   arriving on a real address — this is what the host's forwarder hits
+    ///   when it dials the guest's NAT address, and what containers use to
+    ///   reach each other's published ports.
+    /// * a **userland proxy** bound to the requested host address, which is
+    ///   how a loopback-scoped publish can work at all: locally generated
+    ///   traffic to 127.0.0.1 never traverses a DNAT-able hook, so nothing
+    ///   would be listening. dockerd solves this the same way (docker-proxy).
+    ///
+    /// `-p 127.0.0.1:6900:6900` therefore gets NO DNAT rule — binding it on
+    /// every interface is exactly the thing the caller asked us not to do —
+    /// and is reachable only via the proxy on 127.0.0.1.
     pub fn publish(
         &self,
         container_id: &str,
         dest_ip: &str,
-        ports: &[(String, u16, u16)], // (proto, host_port, container_port)
+        ports: &[PortPublish],
     ) -> io::Result<()> {
         if ports.is_empty() {
             return Ok(());
         }
-        if !self.firewall {
-            eprintln!("slim-net: iptables unavailable; -p publishing skipped");
-            return Ok(());
-        }
         let mut recorded = Vec::new();
-        for (proto, host, ctr) in ports {
-            let dest = format!("{dest_ip}:{ctr}");
-            run(
-                "iptables",
-                &[
-                    "-t",
-                    "nat",
-                    "-A",
-                    "SLIM",
-                    "-p",
-                    proto,
-                    "--dport",
-                    &host.to_string(),
-                    "-j",
-                    "DNAT",
-                    "--to-destination",
-                    &dest,
-                ],
-            )?;
-            recorded.push((proto.clone(), *host, dest));
+        let mut handles = Vec::new();
+        for p in ports {
+            let dest = format!("{dest_ip}:{}", p.container_port);
+            // A loopback publish must not become a wildcard DNAT rule.
+            let dnat = self.firewall && !p.loopback();
+            if dnat {
+                let mut args = vec!["-t", "nat", "-A", "SLIM", "-p", &p.proto];
+                if !p.wildcard() {
+                    args.push("-d");
+                    args.push(&p.host_ip);
+                }
+                let hp = p.host_port.to_string();
+                args.extend(["--dport", &hp, "-j", "DNAT", "--to-destination", &dest]);
+                run("iptables", &args)?;
+            } else if !self.firewall && !p.loopback() {
+                eprintln!("slim-net: iptables unavailable; -p DNAT skipped (userland proxy only)");
+            }
+            if p.proto == "tcp" {
+                match spawn_proxy(p, &dest) {
+                    Ok(h) => handles.push(h),
+                    Err(e) => eprintln!(
+                        "slim-net: cannot listen on {}:{} ({e}) — published port may be unreachable from the vessel itself",
+                        if p.wildcard() { "0.0.0.0" } else { &p.host_ip },
+                        p.host_port
+                    ),
+                }
+            }
+            recorded.push(PublishedRule {
+                proto: p.proto.clone(),
+                host_ip: p.host_ip.clone(),
+                host_port: p.host_port,
+                dest,
+                dnat,
+            });
         }
+        self.proxies
+            .lock()
+            .unwrap()
+            .insert(container_id.to_string(), handles);
         let mut st = self.state.lock().unwrap();
         st.published.insert(container_id.to_string(), recorded);
         self.save(&st);
@@ -531,6 +596,11 @@ impl NetManager {
     }
 
     pub fn unpublish(&self, container_id: &str) {
+        if let Some(handles) = self.proxies.lock().unwrap().remove(container_id) {
+            for h in handles {
+                h.stop();
+            }
+        }
         let rules = {
             let mut st = self.state.lock().unwrap();
             let r = st.published.remove(container_id);
@@ -538,24 +608,18 @@ impl NetManager {
             r
         };
         let Some(rules) = rules else { return };
-        for (proto, host, dest) in rules {
-            let _ = run(
-                "iptables",
-                &[
-                    "-t",
-                    "nat",
-                    "-D",
-                    "SLIM",
-                    "-p",
-                    &proto,
-                    "--dport",
-                    &host.to_string(),
-                    "-j",
-                    "DNAT",
-                    "--to-destination",
-                    &dest,
-                ],
-            );
+        for r in rules {
+            if !r.dnat {
+                continue;
+            }
+            let hp = r.host_port.to_string();
+            let mut args = vec!["-t", "nat", "-D", "SLIM", "-p", &r.proto];
+            if !r.host_ip.is_empty() && r.host_ip != "0.0.0.0" && r.host_ip != "::" {
+                args.push("-d");
+                args.push(&r.host_ip);
+            }
+            args.extend(["--dport", &hp, "-j", "DNAT", "--to-destination", &r.dest]);
+            let _ = run("iptables", &args);
         }
     }
 
@@ -565,8 +629,96 @@ impl NetManager {
             .unwrap()
             .published
             .get(container_id)
-            .cloned()
+            .map(|v| {
+                v.iter()
+                    .map(|r| (r.proto.clone(), r.host_port, r.dest.clone()))
+                    .collect()
+            })
             .unwrap_or_default()
+    }
+}
+
+/// A live userland port proxy (one listening socket + its connection threads).
+pub struct ProxyHandle {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    addr: std::net::SocketAddr,
+}
+
+impl ProxyHandle {
+    fn stop(self) {
+        use std::sync::atomic::Ordering;
+        self.stop.store(true, Ordering::SeqCst);
+        // Unblock the accept() so the listener thread notices and exits.
+        let _ = std::net::TcpStream::connect(self.addr);
+    }
+}
+
+/// Bind `host_ip:host_port` (wildcard → 0.0.0.0) and forward every accepted
+/// connection to `dest`. Long-lived connections are the point — a game or DB
+/// socket stays open for the whole session — so the pump only ends when one
+/// side closes, never on a timer.
+fn spawn_proxy(p: &PortPublish, dest: &str) -> io::Result<ProxyHandle> {
+    use std::sync::atomic::Ordering;
+    let bind_ip = if p.wildcard() {
+        "0.0.0.0".to_string()
+    } else {
+        p.host_ip.clone()
+    };
+    let listener = std::net::TcpListener::bind((bind_ip.as_str(), p.host_port))?;
+    let addr = listener.local_addr()?;
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dest = dest.to_string();
+    let flag = stop.clone();
+    std::thread::Builder::new()
+        .name("slim-portproxy".into())
+        .spawn(move || {
+            for conn in listener.incoming() {
+                if flag.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Ok(client) = conn else { continue };
+                let dest = dest.clone();
+                let _ = std::thread::Builder::new()
+                    .name("slim-portproxy-conn".into())
+                    .spawn(move || proxy_conn(client, &dest));
+            }
+        })?;
+    Ok(ProxyHandle { stop, addr })
+}
+
+fn proxy_conn(client: std::net::TcpStream, dest: &str) {
+    use std::io::{Read, Write};
+    let Ok(upstream) = std::net::TcpStream::connect(dest) else {
+        return;
+    };
+    let pairs = [
+        (client.try_clone(), upstream.try_clone()),
+        (upstream.try_clone(), client.try_clone()),
+    ];
+    let mut threads = Vec::new();
+    for (from, to) in pairs {
+        let (Ok(mut from), Ok(mut to)) = (from, to) else {
+            continue;
+        };
+        threads.push(std::thread::spawn(move || {
+            let mut buf = [0u8; 32 * 1024];
+            loop {
+                match from.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if to.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            // Half-close so the peer sees EOF instead of hanging.
+            let _ = to.shutdown(std::net::Shutdown::Write);
+            let _ = from.shutdown(std::net::Shutdown::Read);
+        }));
+    }
+    for t in threads {
+        let _ = t.join();
     }
 }
 

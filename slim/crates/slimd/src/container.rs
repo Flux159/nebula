@@ -33,6 +33,10 @@ pub struct Container {
     /// NetworkingConfig endpoint aliases / --network-alias / the kube facade).
     #[serde(default)]
     pub aliases: Vec<String>,
+    /// Mounts resolved at create time (binds, named/anonymous volumes,
+    /// tmpfs). Replayed verbatim on every start.
+    #[serde(default)]
+    pub mounts: Vec<crate::mounts::ResolvedMount>,
     pub state: State,
     pub log_path: String,
     /// overlay base dir (state/<id>/rootfs).
@@ -287,8 +291,9 @@ pub fn resolv_conf(nameserver: &str, dns_override: &[String]) -> String {
 }
 
 /// Parse a port spec map from HostConfig.PortBindings + image ExposedPorts.
-pub fn collect_ports(bindings: &BTreeMap<String, Vec<PortBinding>>) -> Vec<(String, u16, u16)> {
-    // returns (proto, host_port, container_port)
+/// The `HostIp` half of each binding is carried through: `-p 127.0.0.1:6900:6900`
+/// must stay on loopback, not quietly become `0.0.0.0`.
+pub fn collect_ports(bindings: &BTreeMap<String, Vec<PortBinding>>) -> Vec<slim_net::PortPublish> {
     let mut out = Vec::new();
     for (key, binds) in bindings {
         let (port, proto) = match key.split_once('/') {
@@ -299,11 +304,20 @@ pub fn collect_ports(bindings: &BTreeMap<String, Vec<PortBinding>>) -> Vec<(Stri
             continue;
         };
         for b in binds {
-            let hport = b.host_port.parse::<u16>().unwrap_or(cport);
-            out.push((proto.to_string(), hport, cport));
+            out.push(slim_net::PortPublish {
+                proto: proto.to_string(),
+                host_ip: b.host_ip.clone(),
+                host_port: b.host_port.parse().unwrap_or(cport),
+                container_port: cport,
+            });
         }
         if binds.is_empty() {
-            out.push((proto.to_string(), cport, cport));
+            out.push(slim_net::PortPublish {
+                proto: proto.to_string(),
+                host_ip: String::new(),
+                host_port: cport,
+                container_port: cport,
+            });
         }
     }
     out

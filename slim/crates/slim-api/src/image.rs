@@ -135,6 +135,14 @@ pub struct Descriptor {
     pub size: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<Platform>,
+    /// OCI layout carries the image's name here (`docker load` of an
+    /// OCI-layout archive needs it to restore the repo:tag).
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "crate::container::null_to_default"
+    )]
+    pub annotations: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

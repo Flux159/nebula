@@ -570,3 +570,47 @@ limitations; routine TODOs live in code.)
   it, bad entrypoint returns a clean 500 with no client hang, published
   ports + restart policy unaffected. Test-batch gotcha: `pkill -f "docker
   run"` matches the ssh batch's own bash -c cmdline — anchor it.
+
+- 2026-08-25 — slim: what an embedded app stack needs (tasks/hostbindmounts.md).
+  Implemented in the slim workspace and verified with a new suite
+  (`slim/test/appstack.sh`, 40 assertions, run by `scripts/test-slim.sh`) plus
+  corpus cases 105/115/155.
+  (1) **Mounts moved out of the engine into `slimd/src/mounts.rs`** and are now
+  resolved at CREATE time (docker parity: `inspect .Mounts` is honest on a
+  created container) and replayed at every start. `-v` parsing is a real
+  parser with unit tests (options split on `,`, `ro`/`rw`/`z`/`Z`/propagation
+  accepted, junk rejected, targets must be absolute); host paths WITH SPACES
+  work because nothing shell-splits them — they ride JSON to the guest and
+  virtiofs maps `$HOME` at the identical path. A missing `-v` source is
+  created like docker does, except that where docker always makes a
+  *directory* (which then shadows the file the app writes there — the bug the
+  report hit on full nebula), slim looks at what the image has at the target
+  and makes a file if the target is a file. `--mount type=bind` refuses a
+  missing source, as docker does.
+  (2) **Volumes**: image `VOLUME`s now get anonymous volumes, and a fresh
+  volume (named or anonymous) is seeded from the image content at that path.
+  `rm -v` drops the anonymous ones; named volumes always survive.
+  (3) **Published ports honour `HostIp`**. `collect_ports` carries it,
+  `-p 127.0.0.1:6900:6900` gets NO wildcard DNAT rule, and ps/port/inspect all
+  report the real address. Since locally generated traffic to 127.0.0.1 never
+  traverses a DNAT-able hook (the nat OUTPUT hook is `! -d 127.0.0.0/8` —
+  same reason as the 2026-07-02 entry above), slim-net now also runs a
+  **userland TCP proxy** per published port bound to the requested address —
+  which is exactly how dockerd makes loopback publishes work (docker-proxy).
+  DNAT stays for everything else (container↔container, the NAT address the
+  host forwarder dials).
+  (4) **`docker load`** (`slim-image/src/load.rs` + `POST /images/load` +
+  `docker-slim load`): docker-save and OCI-layout archives, plain or gzipped,
+  from a file or stdin. The archive is indexed once for entry offsets (the
+  manifest is written LAST, so a single streaming pass cannot work) and each
+  layer is then read by seek — peak memory is flat regardless of archive size.
+  `save` is deliberately NOT implemented and says so: layers are stored
+  unpacked, so the original layer tars and their digests no longer exist.
+  (5) CLI gaps filled: `--mount`, `--network-alias`, `--dns`, `--tmpfs`,
+  repeated/IPv6 `-p` forms, and `ps` printing the real host address. slim-tmpl
+  learned Go's field-selector-on-a-parenthesized-expression
+  (`{{(index .NetworkSettings.Ports "80/tcp" 0).HostIp}}`), which docker's own
+  documented templates use.
+  Also fixed: `scripts/test-slim.sh` still pointed at a `~/Projects/nebula-slim`
+  checkout that no longer exists — it now builds the in-repo `slim/` workspace
+  and runs all three suites.

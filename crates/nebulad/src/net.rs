@@ -88,7 +88,9 @@ fn spawn_docker_watcher(
                 Err(e) => {
                     list_failures += 1;
                     if list_failures == 1 {
-                        tracing::warn!("container list failed ({e}); keeping existing port forwards");
+                        tracing::warn!(
+                            "container list failed ({e}); keeping existing port forwards"
+                        );
                     }
                     continue;
                 }

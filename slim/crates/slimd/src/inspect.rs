@@ -209,32 +209,25 @@ fn port_map(_engine: &Engine, c: &Container) -> BTreeMap<String, Option<Vec<Port
 }
 
 fn mount_points(c: &Container) -> Vec<MountPoint> {
-    let mut out = Vec::new();
-    for b in &c.host_config.binds {
-        let parts: Vec<&str> = b.splitn(3, ':').collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        let src = parts[0];
-        let is_volume = !src.starts_with('/');
-        out.push(MountPoint {
-            typ: if is_volume {
-                "volume".into()
+    // Mounts are resolved at create time; report exactly what the container
+    // will get (docker's `.Mounts`), including image VOLUMEs and the volume
+    // names behind them.
+    c.mounts
+        .iter()
+        .filter(|m| m.typ != "tmpfs")
+        .map(|m| MountPoint {
+            typ: m.typ.clone(),
+            name: m.name.clone(),
+            source: m.source.clone(),
+            destination: m.target.clone(),
+            mode: if m.read_only {
+                "ro".into()
             } else {
-                "bind".into()
+                "rw".into()
             },
-            name: if is_volume {
-                src.to_string()
-            } else {
-                String::new()
-            },
-            source: src.to_string(),
-            destination: parts[1].to_string(),
-            mode: parts.get(2).map(|s| s.to_string()).unwrap_or_default(),
-            rw: !parts.get(2).map(|o| o.contains("ro")).unwrap_or(false),
-        });
-    }
-    out
+            rw: !m.read_only,
+        })
+        .collect()
 }
 
 pub fn image_summary(engine: &Engine, i: &StoreImage) -> slim_api::image::ImageSummary {

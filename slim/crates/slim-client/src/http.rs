@@ -196,7 +196,10 @@ impl Client {
             stream.write_all(b)?;
         }
         stream.flush()?;
+        Self::read_response(stream)
+    }
 
+    fn read_response(stream: Stream) -> io::Result<Response> {
         let mut reader = BufReader::new(stream);
         let mut status_line = String::new();
         reader.read_line(&mut status_line)?;
@@ -236,6 +239,30 @@ impl Client {
             stream: reader,
             body_len,
         })
+    }
+
+    /// Like `request`, but streams `len` bytes from `body` instead of holding
+    /// the whole payload in memory — `docker load` of a multi-hundred-MB
+    /// archive must not be an allocation.
+    pub fn request_reader(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        len: u64,
+        body: &mut dyn Read,
+    ) -> io::Result<Response> {
+        let mut stream = self.connect_stream()?;
+        let mut req = format!("{method} {path} HTTP/1.1\r\nHost: slim\r\n");
+        for (k, v) in headers {
+            req.push_str(&format!("{k}: {v}\r\n"));
+        }
+        req.push_str(&format!("Content-Length: {len}\r\n"));
+        req.push_str("Connection: close\r\n\r\n");
+        stream.write_all(req.as_bytes())?;
+        io::copy(body, &mut stream)?;
+        stream.flush()?;
+        Self::read_response(stream)
     }
 
     /// Convenience: request and return the full decoded body bytes.

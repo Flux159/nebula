@@ -298,7 +298,7 @@ impl Engine {
 
         let dir = self.container_dir(&id);
         std::fs::create_dir_all(&dir)?;
-        let c = Container {
+        let mut c = Container {
             id: id.clone(),
             name,
             image_ref: req.config.image.clone(),
@@ -320,6 +320,7 @@ impl Engine {
                 .values()
                 .flat_map(|e| e.aliases.iter().cloned())
                 .collect(),
+            mounts: Vec::new(),
             state: State {
                 status: "created".into(),
                 ..Default::default()
@@ -329,6 +330,17 @@ impl Engine {
                 .to_string_lossy()
                 .into_owned(),
             rootfs_base: dir.join("rootfs").to_string_lossy().into_owned(),
+        };
+        // Mounts are resolved (and any named/anonymous volume created) at
+        // create time, so `inspect` on a created container is already honest
+        // and every start replays the same set. A bad mount spec fails the
+        // create, like docker — don't leave the state dir behind.
+        c.mounts = match crate::mounts::resolve(&self.volumes, &c, &image) {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(e);
+            }
         };
         self.persist(&c);
         let entry = Arc::new(Entry {
@@ -387,8 +399,14 @@ impl Engine {
         std::fs::create_dir_all(&base)?;
         let merged = self.store.prepare_rootfs(&image, &base)?;
 
-        // Resolve binds + mounts + volumes into runtime BindMounts.
-        let binds = self.resolve_mounts(&c, &merged)?;
+        // Replay the resolved mounts (create missing bind sources, seed fresh
+        // volumes from the image) into runtime binds + tmpfs.
+        if c.mounts.is_empty() {
+            // Container created before mounts were recorded, or by a client
+            // that only set Binds/Mounts: resolve now.
+            c.mounts = crate::mounts::resolve(&self.volumes, &c, &image)?;
+        }
+        let (binds, mut tmpfs) = crate::mounts::prepare(&c.mounts, &merged)?;
 
         // hosts + resolv: write into the merged rootfs so they survive as
         // bind targets (we bind our generated files over the image's).
@@ -424,12 +442,15 @@ impl Engine {
             tty: c.config.tty,
             open_stdin: c.config.open_stdin,
             binds,
-            tmpfs: c
-                .host_config
-                .tmpfs
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
+            tmpfs: {
+                tmpfs.extend(
+                    c.host_config
+                        .tmpfs
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone())),
+                );
+                tmpfs
+            },
             netns: shared_netns.as_ref().map(|(p, _)| p.clone()),
             readonly_rootfs: c.host_config.readonly_rootfs,
             shm_size: c.host_config.shm_size,
@@ -578,53 +599,6 @@ impl Engine {
         aliases.retain(|a| !a.is_empty() && *a != c.name);
         aliases.dedup();
         aliases
-    }
-
-    fn resolve_mounts(
-        &self,
-        c: &Container,
-        merged: &Path,
-    ) -> io::Result<Vec<slim_runtime::BindMount>> {
-        let mut out = Vec::new();
-        // /etc/hosts and /etc/resolv.conf are written into the overlay upper
-        // directly (above), so no bind needed.
-
-        // -v / --volume binds: "src:dst[:ro]" or "name:dst[:ro]".
-        for b in &c.host_config.binds {
-            let parts: Vec<&str> = b.splitn(3, ':').collect();
-            let (src, dst, ro) = match parts.as_slice() {
-                [src, dst] => (src.to_string(), dst.to_string(), false),
-                [src, dst, opts] => (src.to_string(), dst.to_string(), opts.contains("ro")),
-                _ => continue,
-            };
-            let source = if src.starts_with('/') {
-                PathBuf::from(&src)
-            } else {
-                // named volume
-                self.volumes.ensure(&src)?
-            };
-            out.push(slim_runtime::BindMount {
-                source,
-                target: dst,
-                read_only: ro,
-            });
-        }
-        // --mount specs.
-        for m in &c.host_config.mounts {
-            let source = match m.typ.as_str() {
-                "bind" => PathBuf::from(&m.source),
-                "volume" => self.volumes.ensure(&m.source)?,
-                _ => continue,
-            };
-            out.push(slim_runtime::BindMount {
-                source,
-                target: m.target.clone(),
-                read_only: m.read_only,
-            });
-        }
-        // Anonymous volumes from image config (VOLUME) + request volumes.
-        let _ = merged;
-        Ok(out)
     }
 
     fn refresh_network_hosts(&self, network: &str) {
@@ -959,7 +933,23 @@ impl Engine {
         }
         self.net.disconnect_all(&id);
         self.net.unpublish(&id);
-        let _ = remove_volumes; // anonymous-volume tracking: TODO (S4 follow-up)
+        // `docker rm -v` drops the anonymous volumes this container owns.
+        // Named volumes are the user's and always survive — that is the whole
+        // contract a database mount depends on.
+        if remove_volumes {
+            let anon: Vec<String> = entry
+                .c
+                .lock()
+                .unwrap()
+                .mounts
+                .iter()
+                .filter(|m| m.anonymous && !m.name.is_empty())
+                .map(|m| m.name.clone())
+                .collect();
+            for name in anon {
+                let _ = self.volumes.remove(&name, true);
+            }
+        }
         self.containers.lock().unwrap().remove(&id);
         let _ = std::fs::remove_dir_all(self.container_dir(&id));
         self.emit_event("container", "destroy", &id, BTreeMap::new());
