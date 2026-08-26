@@ -7,7 +7,7 @@
 //! is used by build/commit.
 
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 pub struct HashingReader<R> {
     inner: R,
@@ -49,12 +49,11 @@ pub fn apply_layer(reader: impl Read, dest: &Path) -> io::Result<u64> {
     ar.set_preserve_permissions(true);
     ar.set_preserve_mtime(true);
     ar.set_unpack_xattrs(cfg!(target_os = "linux"));
-    // Layer tars carry the image's uid/gid and the tar crate applies the
-    // NUMERIC ids (uname/gname are ignored), which is what we want. Guarded
-    // like xattrs: slimd runs as root in the guest so chown succeeds, while a
-    // host-side unpack by an unprivileged user would fail on every entry.
-    ar.set_preserve_ownerships(cfg!(target_os = "linux"));
     ar.set_overwrite(true);
+    // NB: ownership is applied by hand below rather than via the tar crate's
+    // set_preserve_ownerships, which fails the ENTIRE layer when one header's
+    // numeric field is blank — an image that used to import (wrongly owned)
+    // would stop importing at all. Blank means "unspecified", i.e. root.
     let mut size = 0u64;
     for entry in ar.entries()? {
         let mut entry = entry?;
@@ -83,13 +82,72 @@ pub fn apply_layer(reader: impl Read, dest: &Path) -> io::Result<u64> {
             continue;
         }
         size += entry.size();
+        // Read the header before unpack_in consumes the entry. Layer tars
+        // carry both numeric ids and uname/gname; only the numeric ids are
+        // meaningful, so the names are ignored (resolving them against the
+        // HOST's passwd would be wrong).
+        let (uid, gid) = (
+            entry.header().uid().unwrap_or(0),
+            entry.header().gid().unwrap_or(0),
+        );
+        let mode = entry.header().mode().ok();
+        let etype = entry.header().entry_type();
+        let unpacked_to = unpack_dest(dest, &path);
         // unpack_in refuses path traversal; hardlinks/symlinks land as-is.
         if !entry.unpack_in(dest)? {
             continue;
         }
+        // A hard link shares the target's inode, which this layer already
+        // owns correctly — chowning through it would be redundant at best.
+        if let Some(t) = unpacked_to.filter(|_| !etype.is_hard_link()) {
+            set_ownership(&t, uid, gid, mode, etype.is_symlink());
+        }
     }
     Ok(size)
 }
+
+/// The path `unpack_in` writes an entry to, mirroring its rules: leading '/',
+/// root and '.' components are dropped, and a '..' anywhere means the entry is
+/// skipped. `None` when nothing under `dest` is written.
+fn unpack_dest(dest: &Path, path: &Path) -> Option<PathBuf> {
+    let mut out = dest.to_path_buf();
+    for part in path.components() {
+        match part {
+            Component::Prefix(..) | Component::RootDir | Component::CurDir => continue,
+            Component::ParentDir => return None,
+            Component::Normal(p) => out.push(p),
+        }
+    }
+    (out != dest).then_some(out)
+}
+
+/// Apply a tar entry's uid/gid on disk. slimd unpacks as root in the guest, so
+/// the chown lands; on a host-side unpack there is nothing to do (and an
+/// unprivileged chown would only fail).
+#[cfg(target_os = "linux")]
+fn set_ownership(path: &Path, uid: u64, gid: u64, mode: Option<u32>, symlink: bool) {
+    use std::os::unix::ffi::OsStrExt;
+    // Already correct: we unpacked as root, and most image files are root's.
+    if uid == 0 && gid == 0 {
+        return;
+    }
+    let (Ok(uid), Ok(gid)) = (u32::try_from(uid), u32::try_from(gid)) else {
+        return;
+    };
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return;
+    };
+    // lchown: a symlink's own ownership is what matters, not its target's.
+    unsafe { libc::lchown(c.as_ptr(), uid, gid) };
+    // chown clears setuid/setgid, so restore the mode afterwards (a symlink's
+    // mode is meaningless, and chmod would follow the link).
+    if let Some(m) = mode.filter(|_| !symlink) {
+        unsafe { libc::chmod(c.as_ptr(), (m & 0o7777) as libc::mode_t) };
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_ownership(_path: &Path, _uid: u64, _gid: u64, _mode: Option<u32>, _symlink: bool) {}
 
 #[cfg(target_os = "linux")]
 fn set_opaque(dir: &Path) {
@@ -247,6 +305,9 @@ mod tests {
         }
         let hashing = HashingReader::new(&tarbuf[..]);
         let mut hashing = hashing;
+        // Every header above leaves uid/gid blank, which is what a hand-rolled
+        // or older tar writes. That must still apply cleanly: "unspecified"
+        // means root, not a failed layer.
         apply_layer(&mut hashing, &dir).unwrap();
         let diff = hashing.finish().unwrap();
         assert!(diff.starts_with("sha256:"));
@@ -255,5 +316,52 @@ mod tests {
             "hello\n"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn owned_entries_apply() {
+        let dir = std::env::temp_dir().join(format!("slimg-own-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let mut tarbuf = Vec::new();
+        {
+            let mut b = tar::Builder::new(&mut tarbuf);
+            let data = b"x\n";
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            h.set_uid(4242);
+            h.set_gid(4243);
+            h.set_cksum();
+            b.append_data(&mut h, "owned", &data[..]).unwrap();
+            b.finish().unwrap();
+        }
+        // The chown itself needs root (appstack.sh covers that in the guest);
+        // what is asserted here is that a header carrying ids still unpacks.
+        apply_layer(&tarbuf[..], &dir).unwrap();
+        assert!(dir.join("owned").is_file());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unpack_dest_mirrors_tar_rules() {
+        let d = Path::new("/layer");
+        assert_eq!(
+            unpack_dest(d, Path::new("etc/motd")),
+            Some(d.join("etc/motd"))
+        );
+        // leading '/' and '.' are dropped, exactly as unpack_in drops them
+        assert_eq!(
+            unpack_dest(d, Path::new("/etc/motd")),
+            Some(d.join("etc/motd"))
+        );
+        assert_eq!(
+            unpack_dest(d, Path::new("./etc/motd")),
+            Some(d.join("etc/motd"))
+        );
+        // traversal and empty names write nothing, so there is nothing to chown
+        assert_eq!(unpack_dest(d, Path::new("../escape")), None);
+        assert_eq!(unpack_dest(d, Path::new("etc/../../escape")), None);
+        assert_eq!(unpack_dest(d, Path::new("./")), None);
+        assert_eq!(unpack_dest(d, Path::new("/")), None);
     }
 }
