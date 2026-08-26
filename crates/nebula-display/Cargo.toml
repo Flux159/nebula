@@ -1,0 +1,13 @@
+[package]
+name = "nebula-display"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nebula-core = { path = "../nebula-core" }
+anyhow.workspace = true
+serde_json.workspace = true
+winit = "0.30"
+softbuffer = "0.4"

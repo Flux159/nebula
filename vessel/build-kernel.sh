@@ -38,9 +38,15 @@ docker build \
 # Canonical artifact name is out/Image on both arches (x86_64 emits an
 # ELF vmlinux; everything downstream — install-image, packaging — keys
 # off the single name).
-if [ -f out/vmlinux ]; then
+if [ "$ARCH" = "x86_64" ] && [ -f out/vmlinux ]; then
     # Overwrite: a stale Image from a previous build must not shadow the
     # fresh vmlinux (the docker export only refreshes the arch's own file).
+    #
+    # Gate on ARCH, or this runs the other way round: an arm64 build emits
+    # out/Image and then a stale x86_64 out/vmlinux from an earlier
+    # cross-build clobbers it, silently yielding an x86_64 kernel that VZ
+    # cannot boot. BuildKit's local output only refreshes the files the
+    # target actually produced, so the other arch's leftovers always survive.
     cp -f out/vmlinux out/Image
 fi
 ls -la out/Image out/vmlinux 2>/dev/null || true

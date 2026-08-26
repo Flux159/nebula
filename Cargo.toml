@@ -4,10 +4,12 @@ exclude = ["third_party", "ui"]
 members = [
     "crates/nebula-core",
     "crates/nebula-cli",
+    "crates/nebula-display",
     "crates/nebulad",
     "crates/nebula-balloon",
     "crates/nebula-battletest",
     "crates/vessel-agent",
+    "crates/vessel-display",
     "crates/vessel-init",
 ]
 

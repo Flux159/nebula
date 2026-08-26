@@ -6,6 +6,38 @@ limitations; routine TODOs live in code.)
 
 ## Open (being worked / next phase)
 
+- **(2026-08-25, display bridge) `vessel-init` starts vessel-agent twice.**
+  Pre-existing, found while adding the display service. `agent_svc` is spawned
+  early (so the host sees "healthy" in ~1s), pushed into `services` carrying
+  its live pid, and then the startup loop `for svc in services.iter_mut() {
+  svc.pid = spawn_service(svc) }` spawns it a *second* time. Confirmed in a
+  live vessel: pids 66 and 94 both running `/usr/bin/vessel-agent`. The first
+  is orphaned — `waitpid` matches only the recorded (second) pid, so if the
+  original dies nothing restarts it — and the loser of the vsock:1024 bind
+  race retries forever. Harmless in practice today, which is why it went
+  unnoticed. Fix is a one-liner (skip services whose pid is already > 0 in
+  that loop), deliberately not bundled into the display change.
+
+- **(2026-08-25, display bridge) Input needs a kernel rebuild.**
+  `nebula-display` replays host input through `/dev/uinput`, which needs
+  `CONFIG_INPUT_UINPUT=y` — added to `vessel/kernel/nebula.fragment` along
+  with `INPUT_EVDEV`/`INPUT_MISC`. The installed `~/.nebula/kernel/Image` is
+  still 6.12.58 and lacks it: vessels on that kernel stream frames fine and
+  log `/dev/uinput unavailable … input is dropped`. Run `nebula install-image`
+  with the freshly built `vessel/out/Image` (engine must be down) to enable
+  input. Frames are unaffected either way.
+
+- **(2026-08-25, build) `build-kernel.sh` clobbered arm64 Image with a stale
+  x86_64 vmlinux.** RESOLVED in this change. 083ec40f made the
+  `cp -f out/vmlinux out/Image` unconditional to stop a stale `Image` shadowing
+  a fresh `vmlinux` on x86_64 — but on arm64 it runs the other way: the build
+  emits a correct `out/Image`, then a leftover `out/vmlinux` from an earlier
+  cross-build overwrites it, silently producing an x86_64 kernel VZ cannot
+  boot. BuildKit's `--output type=local` only refreshes files the selected
+  target produced, so the other arch's artifact always survives to do this.
+  Now gated on `[ "$ARCH" = "x86_64" ]`. Anyone who cross-built x86_64 and then
+  rebuilt arm64 has a bad `vessel/out/Image`; rebuild to fix.
+
 - **(2026-06-12, slim) slimd never mounts /dev/shm in containers.** It
   parses/records HostConfig.ShmSize faithfully but the container mount set
   lacks the tmpfs — `dd of=/dev/shm/h` fails ENOENT. Real dockerd mounts

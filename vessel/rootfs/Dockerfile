@@ -56,7 +56,10 @@ RUN sh /nebula-setup.sh && rm -f /nebula-setup.sh
 # Nebula guest binaries last — always authoritative.
 COPY bin/vessel-init /sbin/nebula-init
 COPY bin/vessel-agent /usr/bin/vessel-agent
-RUN chmod 755 /sbin/nebula-init /usr/bin/vessel-agent
+# Display bridge: serves the guest framebuffer on vsock:1027 and replays host
+# input through /dev/uinput. nebula-init starts it when this file is present.
+COPY bin/vessel-display /usr/bin/vessel-display
+RUN chmod 755 /sbin/nebula-init /usr/bin/vessel-agent /usr/bin/vessel-display
 
 # containerd: persistent state on the data disk, shared by dockerd (and k3s later).
 RUN printf 'version = 2\nroot = "/var/lib/nebula/containerd"\nstate = "/run/containerd"\ndisabled_plugins = ["io.containerd.grpc.v1.cri"]\n' \

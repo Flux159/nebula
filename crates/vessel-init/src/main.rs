@@ -20,6 +20,7 @@ mod init {
     use std::time::Duration;
 
     const AGENT_PATH: &str = "/usr/bin/vessel-agent";
+    const DISPLAY_PATH: &str = "/usr/bin/vessel-display";
     const DATA_DEV: &str = "/dev/vdb";
     const DATA_MNT: &str = "/var/lib/nebula";
 
@@ -545,6 +546,20 @@ mod init {
             // Named vessels: a clean Linux VM with just the agent (the user
             // installs what they want; docker/k8s live in the engine vessel).
             services.truncate(1);
+        }
+        // The display agent, when the rootfs carries it. Added AFTER the
+        // truncate above on purpose: named vessels are exactly where a
+        // graphical session runs, so agent_only must not drop it. Absent from
+        // a flavor that did not build it, in which case vsock:1027 simply
+        // refuses connections and `nebula vessels display` says so.
+        if std::path::Path::new(DISPLAY_PATH).exists() {
+            services.push(Service {
+                name: "vessel-display",
+                cmd: DISPLAY_PATH,
+                args: &[],
+                wait_for: None,
+                pid: -1,
+            });
         }
         // Stagger startup so wait_for dependencies resolve in order.
         for svc in services.iter_mut() {

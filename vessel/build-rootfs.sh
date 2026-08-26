@@ -32,16 +32,17 @@ if [ "${NEBULA_STRIP:-0}" = 1 ]; then
     # Opt-in (see scripts/strip-debug.sh): keep line tables at link, then
     # objcopy-split them so guest panics stay symbolicatable.
     CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=1 \
-        cargo build -p vessel-init -p vessel-agent --release --target "$MUSL_TARGET"
+        cargo build -p vessel-init -p vessel-agent -p vessel-display --release --target "$MUSL_TARGET"
 else
-    cargo build -p vessel-init -p vessel-agent --release --target "$MUSL_TARGET"
+    cargo build -p vessel-init -p vessel-agent -p vessel-display --release --target "$MUSL_TARGET"
 fi
 
 mkdir -p vessel/rootfs/bin
 cp "target/$MUSL_TARGET/release/vessel-init" vessel/rootfs/bin/
 cp "target/$MUSL_TARGET/release/vessel-agent" vessel/rootfs/bin/
+cp "target/$MUSL_TARGET/release/vessel-display" vessel/rootfs/bin/
 if [ "${NEBULA_STRIP:-0}" = 1 ]; then
-    scripts/strip-debug.sh vessel/rootfs/bin/vessel-init vessel/rootfs/bin/vessel-agent
+    scripts/strip-debug.sh vessel/rootfs/bin/vessel-init vessel/rootfs/bin/vessel-agent vessel/rootfs/bin/vessel-display
 fi
 
 # slim flavor: stage slimd from the canonical in-repo slim workspace (slim/,

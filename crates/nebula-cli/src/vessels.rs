@@ -655,3 +655,69 @@ pub fn shell(name: &str) -> anyhow::Result<()> {
     writer.write_all(line.as_bytes())?;
     crate::commands::interactive_pump(BufReader::new(stream), writer)
 }
+
+/// `nebula vessels display <name>` — open the vessel's framebuffer in a
+/// window on this host.
+///
+/// The viewer is a separate binary (`nebula-display`) rather than code in this
+/// process for a blunt platform reason: a native window's event loop must own
+/// the main thread — on macOS AppKit requires it outright — and the CLI's main
+/// thread belongs to the CLI. Spawning also means a crashed viewer cannot take
+/// the CLI down with it.
+pub fn display(name: &str) -> anyhow::Result<()> {
+    let dir = dir_of(name)?;
+    anyhow::ensure!(
+        live_pid(&dir).is_some(),
+        "vessel `{name}` is not running (start it with `nebula vessels start {name}`)"
+    );
+    let sock = dir.join("display.sock");
+    anyhow::ensure!(
+        sock.exists(),
+        "vessel `{name}` has no display socket at {}\n\
+         It was created before the display bridge existed — recreate it, or \
+         start it again to remap its vsock ports.",
+        sock.display()
+    );
+
+    let viewer = viewer_path()?;
+    let status = std::process::Command::new(&viewer)
+        .arg("--socket")
+        .arg(&sock)
+        .arg("--title")
+        .arg(format!("{name} — Nebula"))
+        .status()
+        .with_context(|| format!("failed to run {}", viewer.display()))?;
+    anyhow::ensure!(status.success(), "nebula-display exited with {status}");
+    Ok(())
+}
+
+/// Find `nebula-display`: next to this binary first (the installed and
+/// dev-tree layouts both put them side by side), then $PATH.
+fn viewer_path() -> anyhow::Result<PathBuf> {
+    let exe_name = if cfg!(windows) {
+        "nebula-display.exe"
+    } else {
+        "nebula-display"
+    };
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let cand = dir.join(exe_name);
+            if cand.exists() {
+                return Ok(cand);
+            }
+        }
+    }
+    which(exe_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot find `{exe_name}` next to `nebula` or on PATH \
+             (build it with `cargo build -p nebula-display`)"
+        )
+    })
+}
+
+fn which(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(name))
+        .find(|p| p.exists())
+}

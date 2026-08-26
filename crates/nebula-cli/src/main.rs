@@ -272,6 +272,8 @@ enum VesselsAction {
     },
     /// Open an interactive shell inside a vessel.
     Shell { name: String },
+    /// Open the vessel's graphical framebuffer in a window on this host.
+    Display { name: String },
 }
 
 #[derive(Subcommand)]
@@ -425,6 +427,7 @@ fn main() -> anyhow::Result<()> {
             VesselsAction::Info { name } => vessels::info(&name),
             VesselsAction::Exec { name, cmd } => vessels::exec(&name, cmd),
             VesselsAction::Shell { name } => vessels::shell(&name),
+            VesselsAction::Display { name } => vessels::display(&name),
         },
         Commands::Sandbox { action } => match action {
             SandboxAction::Run {

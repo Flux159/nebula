@@ -521,6 +521,13 @@ pub fn create(opts: &CreateOpts, rootfs: Rootfs) -> anyhow::Result<PathBuf> {
                 port: VSOCK_PORT_SHELL,
                 host_path: dir.join("shell.sock"),
             },
+            // Framebuffer + input for `nebula vessels display`. Mapped
+            // unconditionally: the guest side only binds it when the rootfs
+            // ships vessel-display, and an unbound port costs nothing.
+            VsockPortMap {
+                port: crate::display::VSOCK_PORT_DISPLAY,
+                host_path: dir.join("display.sock"),
+            },
         ],
         backend: Some(opts.backend.clone()),
         // Stable MAC + machine id: keep the DHCP lease across restarts and

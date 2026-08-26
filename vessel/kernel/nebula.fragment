@@ -32,6 +32,15 @@ CONFIG_VIRTIO_VSOCKETS=y
 CONFIG_DRM=y
 CONFIG_DRM_VIRTIO_GPU=y
 
+# --- input injection for the display bridge (host window -> guest) ---
+# The host maps its native events to Linux evdev codes and the guest display
+# agent replays them through /dev/uinput, so a guest compositor sees a real
+# libinput device rather than a bespoke channel. INPUT_UINPUT lives under
+# INPUT_MISC, hence both.
+CONFIG_INPUT_EVDEV=y
+CONFIG_INPUT_MISC=y
+CONFIG_INPUT_UINPUT=y
+
 # --- filesystems for containers ---
 CONFIG_EXT4_FS=y
 CONFIG_EXT4_FS_POSIX_ACL=y
