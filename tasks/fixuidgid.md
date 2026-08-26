@@ -1,5 +1,13 @@
 # nebula-slim loses file ownership
 
+> **Status: fixed.** All three defects are addressed and covered by
+> `slim/test/appstack.sh` (11 new checks, from the probe Dockerfile below).
+> `docker load`/`pull` now ask the tar crate for ownership; `COPY --chown`
+> resolves names against the stage's own `/etc/passwd` + `/etc/group` and
+> fails the build when it cannot, and applies recursively. `--chown` is also
+> now part of the layer cache key, which it was not — two COPYs differing only
+> in ownership used to share a cached layer.
+
 Found while moving **RagnarokMac** onto nebula-slim (the app whose requirements
 are in [hostbindmounts.md](hostbindmounts.md)). Everything that document asked
 for works; this is the one thing that stopped the stack from booting.
@@ -97,6 +105,11 @@ ar.set_preserve_ownerships(cfg!(target_os = "linux"));
 Worth confirming the tar crate applies numeric uid/gid rather than resolving
 the names in the tar's `uname`/`gname` fields against the *host's* passwd
 database — layer tars carry both, and only the numeric ids are meaningful.
+
+*Confirmed:* tar 0.4.46 `_set_ownerships` calls `fchown`/`lchown` with
+`header.uid()`/`header.gid()` and never reads `uname`/`gname`. It also sets
+ownership *before* permissions, so the setuid bit is not stripped — the probe's
+`/setuid/bb` still comes out `4755`.
 
 ---
 

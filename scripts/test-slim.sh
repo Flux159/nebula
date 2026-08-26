@@ -37,6 +37,28 @@ done
 if docker image inspect alpine:3.19 >/dev/null 2>&1 || docker pull alpine:3.19 >/dev/null 2>&1; then
     docker save alpine:3.19 -o "$STAGE/load-image.tar" 2>/dev/null || true
     [ -f "$STAGE/load-image.tar" ] && gzip -9 -c "$STAGE/load-image.tar" > "$STAGE/load-image.tar.gz"
+
+    # A probe image whose files are owned by a non-root user, baked by REAL
+    # docker. This is the RagnarokMac shape: images built on a developer
+    # machine, shipped in the .app, `docker load`ed on first launch — the flow
+    # that hid tasks/fixuidgid.md's ownership bug from build-only tests.
+    PROBE="$STAGE/uidgid-ctx"
+    rm -rf "$PROBE"; mkdir -p "$PROBE"
+    printf 'payload\n' > "$PROBE/payload.txt"
+    cat > "$PROBE/Dockerfile" <<'EOF'
+FROM alpine:3.19
+RUN adduser -D -u 4242 appuser \
+    && mkdir -p /chowned-dir && chown appuser:appuser /chowned-dir \
+    && touch /chowned-file && chown 4242:4242 /chowned-file \
+    && mkdir -p /setuid && cp /bin/busybox /setuid/bb && chmod 4755 /setuid/bb
+COPY --chown=appuser:appuser payload.txt /copied-file
+EOF
+    if docker build -q -t nebula-uidgid-probe:1 "$PROBE" >/dev/null 2>&1; then
+        docker save nebula-uidgid-probe:1 -o "$STAGE/uidgid-image.tar" 2>/dev/null || true
+    else
+        echo "WARN: could not build the uid/gid probe image — that check will skip" >&2
+    fi
+    rm -rf "$PROBE"
 fi
 
 echo "== size ledger =="

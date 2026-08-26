@@ -49,6 +49,11 @@ pub fn apply_layer(reader: impl Read, dest: &Path) -> io::Result<u64> {
     ar.set_preserve_permissions(true);
     ar.set_preserve_mtime(true);
     ar.set_unpack_xattrs(cfg!(target_os = "linux"));
+    // Layer tars carry the image's uid/gid and the tar crate applies the
+    // NUMERIC ids (uname/gname are ignored), which is what we want. Guarded
+    // like xattrs: slimd runs as root in the guest so chown succeeds, while a
+    // host-side unpack by an unprivileged user would fail on every entry.
+    ar.set_preserve_ownerships(cfg!(target_os = "linux"));
     ar.set_overwrite(true);
     let mut size = 0u64;
     for entry in ar.entries()? {

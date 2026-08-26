@@ -390,6 +390,21 @@ impl Builder<'_> {
         sources: &[String],
         dest: &str,
     ) -> Result<(), BuildError> {
+        // Resolve --chown against the stage's own passwd/group before doing any
+        // work: an unresolvable name is a build failure, not a silent root.
+        let owner = match chown {
+            Some(c) => Some(
+                resolve_chown(
+                    c,
+                    self.stage_file(stage, "etc/passwd")
+                        .as_deref()
+                        .unwrap_or(""),
+                    self.stage_file(stage, "etc/group").as_deref().unwrap_or(""),
+                )
+                .map_err(be)?,
+            ),
+            None => None,
+        };
         let work = self
             .store
             .root
@@ -438,8 +453,11 @@ impl Builder<'_> {
                 copy_tree(&m, &target)?;
             }
         }
-        if let Some(c) = chown {
-            apply_chown(&dest_base, c);
+        if let Some((uid, gid)) = owner {
+            // Docker applies the ownership to every copied entry, not just the
+            // destination's root. `upper` is a fresh overlay dir, so everything
+            // under dest_base is what this COPY just wrote.
+            chown_tree(&dest_base, uid, gid);
         }
         cleanup_dir(&src_mounted_dir, self.store);
         self.commit_layer(stage, &upper)?;
@@ -516,6 +534,24 @@ impl Builder<'_> {
     }
 
     // ---------- helpers ----------
+
+    /// Read a file out of the stage's layers without mounting an overlay:
+    /// walk the diff_ids top-down and take the first hit. A whiteout (or any
+    /// non-regular entry) shadowing the path stops the search.
+    fn stage_file(&self, stage: &Stage, rel: &str) -> Option<String> {
+        for diff_id in stage.layers.iter().rev() {
+            let p = self.store.layer_dir(diff_id).join(rel);
+            let Ok(md) = std::fs::symlink_metadata(&p) else {
+                continue;
+            };
+            return if md.is_file() {
+                std::fs::read_to_string(&p).ok()
+            } else {
+                None
+            };
+        }
+        None
+    }
 
     fn stage_record(&self, stage: &Stage) -> ImageRecord {
         ImageRecord {
@@ -702,15 +738,32 @@ fn describe(inst: &Instruction) -> String {
             sources,
             dest,
             from,
-            ..
+            chown,
         } => {
             let f = from
                 .as_ref()
                 .map(|f| format!("--from={f} "))
                 .unwrap_or_default();
-            format!("COPY {f}{} {dest}", sources.join(" "))
+            // --chown is part of the description because the description is
+            // part of the layer cache key: two COPYs that differ only in
+            // ownership must not share a layer.
+            let c = chown
+                .as_ref()
+                .map(|c| format!("--chown={c} "))
+                .unwrap_or_default();
+            format!("COPY {c}{f}{} {dest}", sources.join(" "))
         }
-        Instruction::Add { sources, dest, .. } => format!("ADD {} {dest}", sources.join(" ")),
+        Instruction::Add {
+            sources,
+            dest,
+            chown,
+        } => {
+            let c = chown
+                .as_ref()
+                .map(|c| format!("--chown={c} "))
+                .unwrap_or_default();
+            format!("ADD {c}{} {dest}", sources.join(" "))
+        }
         Instruction::Env(kv) => format!(
             "ENV {}",
             kv.iter()
@@ -973,23 +1026,70 @@ fn cleanup_dir(dir: &Option<PathBuf>, store: &Store) {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn apply_chown(path: &Path, spec: &str) {
-    use std::os::unix::ffi::OsStrExt;
-    let (uid, gid) = match spec.split_once(':') {
-        Some((u, g)) => (u.parse().unwrap_or(0), g.parse().unwrap_or(0)),
-        None => {
-            let u = spec.parse().unwrap_or(0);
-            (u, u)
+/// Look up `name` in a colon-separated passwd/group database. Both formats put
+/// the numeric id in field 2 (`name:x:uid:gid:…` / `name:x:gid:…`); the fourth
+/// field, meaningful only for passwd, is the user's primary gid.
+fn db_lookup(db: &str, name: &str) -> Option<(u32, Option<u32>)> {
+    for line in db.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.first() != Some(&name) {
+            continue;
         }
+        let id = fields.get(2)?.parse().ok()?;
+        return Some((id, fields.get(3).and_then(|g| g.parse().ok())));
+    }
+    None
+}
+
+/// Resolve a `COPY --chown=` spec to numeric ids. Names resolve against the
+/// image's own databases, like docker; anything unresolvable is an error
+/// rather than a silent fall back to root.
+fn resolve_chown(spec: &str, passwd: &str, group: &str) -> Result<(u32, u32), String> {
+    let bad = |what: &str, who: &str| format!("COPY --chown={spec}: no such {what}: {who}");
+    let (user, grp) = match spec.split_once(':') {
+        Some((u, g)) => (u, Some(g)),
+        None => (spec, None),
     };
+    if user.is_empty() {
+        return Err(format!("COPY --chown={spec}: empty user"));
+    }
+    // uid, plus the user's primary gid when we resolved a name.
+    let (uid, primary) = match user.parse::<u32>() {
+        Ok(n) => (n, None),
+        Err(_) => db_lookup(passwd, user).ok_or_else(|| bad("user", user))?,
+    };
+    let gid = match grp {
+        Some("") => return Err(format!("COPY --chown={spec}: empty group")),
+        Some(g) => match g.parse::<u32>() {
+            Ok(n) => n,
+            Err(_) => db_lookup(group, g).ok_or_else(|| bad("group", g))?.0,
+        },
+        // No group given: the user's primary group, or the uid for a numeric user.
+        None => primary.unwrap_or(uid),
+    };
+    Ok((uid, gid))
+}
+
+/// chown every entry under `path`, following docker's recursive `--chown`.
+/// Symlinks are chowned themselves (lchown), never their targets.
+#[cfg(target_os = "linux")]
+fn chown_tree(path: &Path, uid: u32, gid: u32) {
+    use std::os::unix::ffi::OsStrExt;
     if let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) {
-        unsafe { libc::chown(c.as_ptr(), uid, gid) };
+        unsafe { libc::lchown(c.as_ptr(), uid, gid) };
+    }
+    let Ok(md) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if md.is_dir() {
+        for e in std::fs::read_dir(path).into_iter().flatten().flatten() {
+            chown_tree(&e.path(), uid, gid);
+        }
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn apply_chown(_path: &Path, _spec: &str) {}
+fn chown_tree(_path: &Path, _uid: u32, _gid: u32) {}
 
 #[cfg(test)]
 mod tests {
@@ -1009,6 +1109,47 @@ mod tests {
         );
         assert_eq!(expand_vars("${VER:+yes}", &args, &BTreeMap::new()), "yes");
         assert_eq!(expand_vars("\\$VER", &args, &BTreeMap::new()), "$VER");
+    }
+
+    const PASSWD: &str =
+        "root:x:0:0:root:/root:/bin/sh\nappuser:x:4242:4243:,,,:/home/appuser:/bin/sh\n";
+    const GROUP: &str = "root:x:0:root\nstaff:x:50:\nappuser:x:4243:\n";
+
+    #[test]
+    fn chown_specs_resolve() {
+        let r = |s: &str| resolve_chown(s, PASSWD, GROUP);
+        // numeric forms
+        assert_eq!(r("4242:4242").unwrap(), (4242, 4242));
+        assert_eq!(r("4242").unwrap(), (4242, 4242));
+        // names resolve against the image's own databases
+        assert_eq!(r("appuser:appuser").unwrap(), (4242, 4243));
+        assert_eq!(r("appuser:staff").unwrap(), (4242, 50));
+        assert_eq!(r("appuser:99").unwrap(), (4242, 99));
+        assert_eq!(r("99:staff").unwrap(), (99, 50));
+        // a bare name takes the user's PRIMARY gid, not its uid
+        assert_eq!(r("appuser").unwrap(), (4242, 4243));
+        assert_eq!(r("root").unwrap(), (0, 0));
+        // unresolvable names fail the build instead of silently meaning root
+        assert!(r("nobodyhere").is_err());
+        assert!(r("appuser:nogroup").is_err());
+        // ...including when the stage simply has no passwd/group at all
+        assert!(resolve_chown("appuser", "", "").is_err());
+        assert!(r("").is_err());
+        assert!(r("appuser:").is_err());
+    }
+
+    #[test]
+    fn copy_desc_keys_on_chown() {
+        let mk = |chown: Option<&str>| {
+            describe(&Instruction::Copy {
+                sources: vec!["a".into()],
+                dest: "/b".into(),
+                from: None,
+                chown: chown.map(String::from),
+            })
+        };
+        assert_ne!(mk(None), mk(Some("appuser:appuser")));
+        assert_ne!(mk(Some("0:0")), mk(Some("4242:4242")));
     }
 
     #[test]

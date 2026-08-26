@@ -6,7 +6,8 @@
 # tasks/hostbindmounts.md: host directory bind mounts (read-only, read-write,
 # paths WITH SPACES), named volumes that outlive their container, image
 # VOLUMEs, container-to-container DNS, host-IP-scoped port publishing, tty
-# containers, and `docker load` of a saved image archive.
+# containers, `docker load` of a saved image archive, and the uid/gid an
+# imported or built image carries (tasks/fixuidgid.md).
 #
 # House style: capture-then-grep, never `cmd | grep -q`.
 set -u
@@ -208,6 +209,72 @@ if [ -f /slim/load-image.tar ]; then
 else
     echo "SKIP: no /slim/load-image.tar staged — docker load not exercised"
 fi
+
+# ----------------------------------------------------------------- uid/gid
+# An imported image must keep the ownership it was built with. Getting this
+# wrong is silent: modes survive, only the owner column is rewritten to root,
+# and the failure surfaces much later as a daemon that cannot write its own
+# runtime dir (tasks/fixuidgid.md).
+if [ -f /slim/uidgid-image.tar ]; then
+    echo "== docker load preserves uid/gid =="
+    $DS load -i /slim/uidgid-image.tar >/tmp/o 2>&1
+    PROBE=$(sed -n 's/^Loaded image: //p' /tmp/o | head -1)
+    if [ -z "$PROBE" ]; then
+        bad "load uid/gid probe"; cat /tmp/o
+    else
+        $DS run --rm "$PROBE" stat -c "%U:%G %a %n" \
+            /chowned-dir /chowned-file /copied-file /setuid/bb >/tmp/o 2>&1
+        grep -q "appuser:appuser 755 /chowned-dir"  /tmp/o && ok "RUN chown survives load"        || { bad "RUN chown survives load"; cat /tmp/o; }
+        grep -q "appuser:appuser 644 /chowned-file" /tmp/o && ok "numeric chown survives load"    || { bad "numeric chown survives load"; cat /tmp/o; }
+        grep -q "appuser:appuser 644 /copied-file"  /tmp/o && ok "COPY --chown survives load"     || { bad "COPY --chown survives load"; cat /tmp/o; }
+        grep -q "root:root 4755 /setuid/bb"         /tmp/o && ok "setuid bit survives load"       || { bad "setuid bit survives load"; cat /tmp/o; }
+        # The check that fails the way a user experiences it.
+        $DS run --rm -u 4242 "$PROBE" sh -c 'touch /chowned-dir/x' >/tmp/o 2>&1
+        [ $? -eq 0 ] && ok "non-root user can write its own dir" || { bad "non-root user can write its own dir"; cat /tmp/o; }
+    fi
+else
+    echo "SKIP: no /slim/uidgid-image.tar staged — load ownership not exercised"
+fi
+
+echo "== COPY --chown in the engine's own builder =="
+CTX=/tmp/chown-ctx
+mkdir -p "$CTX/tree/sub"
+printf 'payload\n' > "$CTX/payload.txt"
+printf 'top\n' > "$CTX/tree/top.txt"
+printf 'deep\n' > "$CTX/tree/sub/deep.txt"
+cat > "$CTX/Dockerfile" <<EOF
+FROM $IMG
+RUN adduser -D -u 4242 appuser
+COPY --chown=4242:4242 payload.txt /numeric-file
+COPY --chown=appuser:appuser payload.txt /named-file
+COPY --chown=appuser:appuser tree /named-tree
+EOF
+$DS build -t chown-probe:1 "$CTX" >/tmp/o 2>&1
+if grep -q "Successfully tagged" /tmp/o; then
+    ok "build with --chown"
+    $DS run --rm chown-probe:1 stat -c "%U:%G %n" \
+        /numeric-file /named-file /named-tree /named-tree/top.txt /named-tree/sub/deep.txt >/tmp/o 2>&1
+    grep -q "appuser:appuser /numeric-file"            /tmp/o && ok "--chown numeric"          || { bad "--chown numeric"; cat /tmp/o; }
+    grep -q "appuser:appuser /named-file"              /tmp/o && ok "--chown by name"          || { bad "--chown by name"; cat /tmp/o; }
+    grep -q "appuser:appuser /named-tree"              /tmp/o && ok "--chown dir root"         || { bad "--chown dir root"; cat /tmp/o; }
+    grep -q "appuser:appuser /named-tree/top.txt"      /tmp/o && ok "--chown is recursive"     || { bad "--chown is recursive"; cat /tmp/o; }
+    grep -q "appuser:appuser /named-tree/sub/deep.txt" /tmp/o && ok "--chown recurses deeply"  || { bad "--chown recurses deeply"; cat /tmp/o; }
+else
+    bad "build with --chown"; cat /tmp/o
+fi
+# An unresolvable name must fail the build, not quietly mean root.
+cat > "$CTX/Dockerfile" <<EOF
+FROM $IMG
+COPY --chown=nosuchuser:nosuchgroup payload.txt /f
+EOF
+$DS build -t chown-bad:1 "$CTX" >/tmp/o 2>&1
+if [ $? -ne 0 ]; then
+    grep -q "no such user" /tmp/o && ok "unknown --chown name fails the build" || { bad "unknown --chown name: wrong error"; cat /tmp/o; }
+else
+    bad "unknown --chown name silently succeeded"; cat /tmp/o
+fi
+$DS rmi chown-probe:1 >/dev/null 2>&1
+rm -rf "$CTX"
 
 $DS rm -f as-login as-char as-web as-web2 >/dev/null 2>&1
 $DS network rm appstack-net >/dev/null 2>&1
