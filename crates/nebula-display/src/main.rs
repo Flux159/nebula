@@ -153,7 +153,7 @@ impl App {
             self.placement = (0, 0, 0, 0);
             drop(fb);
             let _ = buffer.present();
-            return;
+            return; // nothing received yet, so there is no seq to ack
         }
 
         // Letterbox: preserve the guest's aspect ratio inside whatever the
@@ -185,8 +185,16 @@ impl App {
                 buffer[dst_row + (ox as u32 + col) as usize] = src[sx];
             }
         }
+        let presented = fb.seq;
         drop(fb);
         let _ = buffer.present();
+        // Return credit only now: the guest's next frame is paced by what we
+        // actually put on screen, so an occluded or slow window throttles the
+        // producer instead of letting frames pile up in the vsock proxy.
+        self.send(DisplayMsg::FrameAck {
+            surface: 0,
+            seq: presented,
+        });
     }
 }
 

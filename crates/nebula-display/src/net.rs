@@ -23,6 +23,9 @@ pub struct FrameBuf {
     pub pixels: Vec<u32>,
     /// Bumped on every new frame; the UI redraws only when it changes.
     pub generation: u64,
+    /// Wire seq of the frame currently in `pixels`, acked back to the guest
+    /// once presented so it may produce the next one.
+    pub seq: u32,
 }
 
 pub struct Shared {
@@ -140,6 +143,7 @@ fn read_loop(
                     fb.pixels = vec![0u32; (hdr.w as usize) * (hdr.h as usize)];
                 }
                 blit(&mut fb, &hdr, pixels);
+                fb.seq = hdr.seq;
                 fb.generation = fb.generation.wrapping_add(1);
                 drop(fb);
                 on_frame();

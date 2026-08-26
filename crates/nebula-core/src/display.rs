@@ -102,7 +102,22 @@ pub enum DisplayMsg {
     },
     /// The host window was closed by the user.
     Close { surface: u32 },
+    /// The host has presented frame `seq` and is ready for more.
+    ///
+    /// This is the flow-control signal, and it is not optional: without it a
+    /// producer runs ahead of whatever is consuming it, frames queue in the
+    /// VMM's vsock proxy, and that buffer grows without bound until the VMM
+    /// process dies. (Observed: a vessel dying reliably under sustained 1080p,
+    /// sooner at 4K.) Same contract as a Wayland frame callback — render when
+    /// told, not when able — which also means an occluded or minimised window
+    /// stalls the guest instead of burning CPU on frames nobody sees.
+    FrameAck { surface: u32, seq: u32 },
 }
+
+/// Frames a producer may have in flight before it must wait for a
+/// [`DisplayMsg::FrameAck`]. One would serialise render against present; two
+/// keeps both ends busy without letting a queue accumulate.
+pub const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 
 /// Fixed 32-byte binary header preceding the pixels of a `KIND_FRAME` message.
 ///

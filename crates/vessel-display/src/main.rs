@@ -19,7 +19,7 @@ mod agent {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use nebula_core::display::*;
 
@@ -104,6 +104,9 @@ mod agent {
         want_h: AtomicU32,
         resized: AtomicBool,
         closed: AtomicBool,
+        /// Last frame seq the host reported presenting. The frame loop will
+        /// not run more than MAX_FRAMES_IN_FLIGHT ahead of this.
+        acked: AtomicU32,
     }
 
     /// Serve one host connection until it goes away.
@@ -146,6 +149,7 @@ mod agent {
             want_h: AtomicU32::new(0),
             resized: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            acked: AtomicU32::new(0),
         });
 
         // Input pump. Runs on its own thread so a slow uinput write can never
@@ -185,6 +189,11 @@ mod agent {
                                     input_shared.closed.store(true, Ordering::Release);
                                     return;
                                 }
+                                DisplayMsg::FrameAck { seq, .. } => {
+                                    // Monotonic: a late ack must not walk the
+                                    // credit backwards and stall the loop.
+                                    input_shared.acked.fetch_max(seq, Ordering::AcqRel);
+                                }
                                 _ => {
                                     let Some(ui) = &ui else { continue };
                                     let _ = dispatch(ui, msg, sw, sh);
@@ -203,9 +212,8 @@ mod agent {
 
         // Frame loop.
         let mut buf: Vec<u8> = Vec::new();
-        let mut seq: u32 = 0;
+        let mut seq: u32 = 1;
         let mut last_cfg: Option<(u32, u32)> = None;
-        let mut last_send = Instant::now();
 
         while !shared.closed.load(Ordering::Acquire) {
             if shared.resized.swap(false, Ordering::AcqRel) {
@@ -214,6 +222,15 @@ mod agent {
                     shared.want_h.load(Ordering::Relaxed),
                 );
                 source.lock().unwrap().resize(w, h);
+            }
+
+            // Flow control: never run more than MAX_FRAMES_IN_FLIGHT ahead of
+            // what the host has presented. Producing regardless is what killed
+            // the VMM under load — the queue is in the vsock proxy, where we
+            // cannot see it grow.
+            if seq.wrapping_sub(shared.acked.load(Ordering::Acquire)) >= MAX_FRAMES_IN_FLIGHT {
+                std::thread::sleep(IDLE_POLL);
+                continue;
             }
 
             let frame = source.lock().unwrap().next_frame(&mut buf)?;
@@ -258,15 +275,9 @@ mod agent {
             }
             write_frame(&mut writer, &hdr, &buf)?;
             writer.flush()?;
+            // seq starts at 1 so the initial credit (acked = 0) allows exactly
+            // MAX_FRAMES_IN_FLIGHT frames before the first ack.
             seq = seq.wrapping_add(1);
-
-            // The test pattern is always "ready", so without this it would
-            // spin a core producing frames faster than anyone can show them.
-            let elapsed = last_send.elapsed();
-            if elapsed < IDLE_POLL {
-                std::thread::sleep(IDLE_POLL - elapsed);
-            }
-            last_send = Instant::now();
         }
 
         let _ = input.join();
