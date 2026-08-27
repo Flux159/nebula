@@ -7,6 +7,7 @@ name: Embed kit (linux)
 # bits: lib/libkrun.so.1 instead of dylibs, no codesigning/entitlements.
 # Kit layout (what Galaxy's fetch-nebula.mjs expects at the tarball root):
 #   bin/nebula bin/nebulad
+#   bin/docker-slim bin/kubectl-slim bin/helm-slim   (clients for the engine)
 #   lib/libkrun.so.1
 #   images/kernel-Image.gz  images/rootfs.img.gz   (slim flavor)
 #   config.toml.example  EMBED.md
@@ -67,6 +68,9 @@ jobs:
           OUT=dist-embed-slim-linux
           mkdir -p "$OUT/bin" "$OUT/lib" "$OUT/images"
           cp target/release/nebula target/release/nebulad "$OUT/bin/"
+          # The slim engine has no docker/kubectl/helm to talk to it with;
+          # ship the pure-Rust clients, same as the macOS kit does.
+          scripts/stage-slim-clis.sh "$OUT/bin"
           # the krun backend looks for lib/libkrun.so.1 next to the binaries
           # (or NEBULA_LIBKRUN_PATH); plain cargo emits libkrun.so — accept either
           src=$(ls third_party/libkrun/target/release/libkrun.so.*.* 2>/dev/null \
@@ -100,6 +104,10 @@ jobs:
             bin/nebula install-image --kernel images/kernel-Image.gz --rootfs images/rootfs.img.gz
             bin/nebula up
           Docker socket: $NEBULA_HOME/run/docker.sock (slimd, Docker API v1.43).
+
+          Clients are in bin/ — no separate download:
+            export DOCKER_HOST=unix://$NEBULA_HOME/run/docker.sock
+            bin/docker-slim ps          # also: bin/kubectl-slim, bin/helm-slim
           EOF
           tar -C "$OUT" -czf "nebula-slim-embed-${{ matrix.galaxy_arch }}-unknown-linux.tar.gz" .
           ls -lh nebula-slim-embed-*.tar.gz
@@ -124,9 +132,21 @@ jobs:
             v=$(curl -sf --max-time 2 --unix-socket "$NEBULA_HOME/run/docker.sock" http://localhost/version 2>/dev/null) && { ok="$v"; break; }
             sleep 1
           done
+          # The shipped client must drive the shipped engine — that is what
+          # "no second download" means, and it is the thing that silently was
+          # not true until this kit started carrying the slim CLIs.
+          cli_ok=""
+          if [ -n "$ok" ]; then
+            DOCKER_HOST="unix://$NEBULA_HOME/run/docker.sock" \
+              "$KIT/bin/docker-slim" version && cli_ok=1
+          fi
           "$KIT/bin/nebula" down || true
           if [ -z "$ok" ]; then
             echo "::error::engine did not come up from the assembled kit"
+            exit 1
+          fi
+          if [ -z "$cli_ok" ]; then
+            echo "::error::bin/docker-slim could not talk to the kit's engine"
             exit 1
           fi
           echo "engine version: $ok"

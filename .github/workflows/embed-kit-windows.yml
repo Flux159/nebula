@@ -7,6 +7,7 @@ name: Embed kit (windows)
 # packaged here and boot-verified on real hardware (Suyog's Windows box).
 # Kit layout (what Galaxy's fetch-nebula.mjs expects at the tarball root):
 #   bin/nebula.exe bin/nebulad.exe
+#   bin/docker-slim.exe bin/kubectl-slim.exe bin/helm-slim.exe
 #   lib/krun.dll                       (WHP backend, blk+net/usernet)
 #   images/kernel-Image.gz             x86_64 ELF vmlinux
 #   images/rootfs.img.gz               slim guest rootfs (slimd)
@@ -65,6 +66,9 @@ jobs:
           OUT=dist-embed-slim-windows
           mkdir -p "$OUT/bin" "$OUT/lib" "$OUT/images"
           cp target/release/nebula.exe target/release/nebulad.exe "$OUT/bin/"
+          # The slim engine has no docker/kubectl/helm to talk to it with;
+          # ship the pure-Rust clients, same as the macOS and Linux kits do.
+          scripts/stage-slim-clis.sh "$OUT/bin"
           # the krun backend probes lib/krun.dll next to the binaries
           # (or NEBULA_LIBKRUN_PATH)
           cp third_party/libkrun/target/release/krun.dll "$OUT/lib/"
@@ -100,6 +104,10 @@ jobs:
           loopback TCP port — connect to http://127.0.0.1:<port>/ (slimd,
           Docker API v1.43). No virtiofs on Windows yet: host bind mounts are
           unavailable; use volumes + the archive API to move files in and out.
+
+          Clients are in bin\ — no separate download:
+            set DOCKER_HOST=tcp://127.0.0.1:<port>
+            bin\docker-slim.exe ps   (also kubectl-slim.exe, helm-slim.exe)
           EOF
           tar -czf "nebula-slim-embed-x64-pc-windows.tar.gz" -C "$OUT" .
           ls -lh nebula-slim-embed-*.tar.gz

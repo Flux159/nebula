@@ -64,21 +64,16 @@ test -f vessel/out/Image || vessel/build-kernel.sh
 echo "==> relocatable libkrun"
 scripts/package-libkrun.sh dist/libkrun
 
-# The slim flavor's engine speaks the same APIs, but an embedder has no
-# docker/kubectl/helm binaries to talk to it with — ship the slim clients
-# (pure Rust, ~2.5 MB for all three) in the same bin/.
-if [ "$FLAVOR" = "slim" ]; then
-    echo "==> slim host CLIs"
-    ( cd slim && cargo build --release -p docker-slim -p kubectl-slim -p helm-slim )
-fi
-
 echo "==> assembling $OUT/"
 rm -rf "$OUT"
 mkdir -p "$OUT/bin" "$OUT/images" "$OUT/lib"
 cp target/release/nebula target/release/nebulad "$OUT/bin/"
+# The slim engine speaks the same APIs, but an embedder has no
+# docker/kubectl/helm to talk to it with — every slim kit ships the clients.
+# Shared with embed-kit-linux.yml / embed-kit-windows.yml so the three kits
+# cannot disagree about what bin/ contains.
 if [ "$FLAVOR" = "slim" ]; then
-    cp slim/target/release/docker-slim slim/target/release/kubectl-slim \
-       slim/target/release/helm-slim "$OUT/bin/"
+    scripts/stage-slim-clis.sh "$OUT/bin"
 fi
 cp dist/libkrun/*.dylib "$OUT/lib/"
 gzip -9 -c vessel/out/Image > "$OUT/images/kernel-Image.gz"
