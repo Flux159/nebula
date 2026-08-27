@@ -99,6 +99,59 @@ but it is an app-architecture constraint rather than a footnote: any design
 that passes a host directory into a container needs a second path built on
 volumes plus the archive API before it can claim to be cross-platform.
 
+## Ship a compiled binary, not shell scripts
+
+The single largest piece of rework in this project. Ragnarok Offline drove the
+engine from 507 lines of `stack.sh` plus 84 of `link-assets.sh`, called by the
+app through `/bin/bash`. That worked on macOS and Linux and could not run on
+Windows at all — and the Windows installer built cleanly the whole time, which
+made the app look far further along than it was. Building is not running.
+
+What actually broke, none of it obvious from a Mac:
+
+- **No `/bin/bash`.** The supervisor could not be invoked at all; the app died
+  before any of its logic ran.
+- **Host bind mounts are unavailable** (no virtiofs on Windows), so the
+  container came up with no config, no schema and no NPC scripts. The
+  replacement — `create`, `docker cp`, `start` — is a branch that has to live
+  *somewhere*.
+- **Symlinks need Developer Mode or elevation.** Linking a user's 3.5 GB
+  client into the asset root became directory junctions and hard links.
+- **`shasum` does not exist there**, only `sha256sum`; on macOS it is the
+  reverse. Picking one broke a third of the build matrix.
+- **`.exe` suffixes**, `pkill` vs `taskkill`, and a data directory that has a
+  different conventional location on all three platforms.
+
+The tempting fix is a second implementation — a PowerShell copy of the shell
+script. Resist it. That is two things that must agree forever and eventually
+will not, which is exactly the failure this repo spent a release fixing across
+`embed-kit.sh`, `embed-kit-linux.yml` and `embed-kit-windows.yml`: three
+assemblers of the same kit that quietly disagreed about its contents for
+months.
+
+One compiled binary instead. The port came to a small dependency-free Rust
+crate — 379 KB, no runtime to ship, under a minute to build on every runner —
+and every platform difference became a branch inside one codebase that is read
+and changed as a unit. An embedder is already shipping `nebula`, `nebulad` and
+`docker-slim`, so this adds no new toolchain and no new class of artifact.
+
+Two things worth doing while porting:
+
+- **Keep the same command surface.** The app invoked `up`/`down`/`status`/
+  `logs`/`backup`/`restore`, wrote a phase file the UI polled, and printed a
+  couple of lines the UI parsed. Holding all of that byte-identical meant the
+  port could be verified against the shell version's behaviour rather than
+  against a reading of what it was supposed to do.
+- **Verify on the platform that already worked, first.** The real risk in this
+  kind of port is not the new platform, it is regressing the proven one. Run
+  the whole sequence — engine install, image load, database, servers, backup,
+  teardown — and diff the generated config against what the shell produced.
+
+The general rule: anything an embedder's app runs on a user's machine should
+be a binary it ships. A shell script is a dependency on an interpreter, a
+coreutils flavour and a filesystem semantics that one of your three platforms
+does not have.
+
 ## Things that were our bugs, but every embedder will hit them
 
 These are all "the Docker API behaves as specified, and the specification is
@@ -146,11 +199,46 @@ so the app has to be re-sealed after that. The app does this in an `afterSign`
 hook that then asserts `nebulad` still carries the entitlement, because the
 failure mode without the assertion is a bundle that ships and cannot boot a VM.
 
+**A non-ASCII filename in a signed bundle can break it on copy.** The English
+translation shipped 21 files whose names are CP949 bytes read as Latin-1. A
+`.dmg` is HFS+ and `/Applications` is APFS, and the two normalise such names
+differently -- precomposed in the image, decomposed once copied out. A code
+signature records exact names, so 20 sealed resources stopped resolving and
+macOS refused the app as "damaged".
+
+The trap is where it hides: the bundle verifies perfectly *inside* the image,
+so a check that mounts the .dmg and runs `codesign --verify` passes on a build
+nobody can open. The symptom also points at the wrong thing -- "damaged" reads
+as a notarisation problem, and the notarisation was fine. Any embedder shipping
+game assets, translations or fonts on macOS is a candidate.
+
+Two things follow. Ship such a tree as an archive with a plain ASCII name and
+unpack it at first run, so what is signed cannot move and what moves is not
+signed. And verify the app *after copying it out* of the image, not only
+inside: that is the step that fails, and it is the step a user performs.
+
+**Notarisation is not the last thing a build does unless you make it so.**
+electron-builder signs, notarises, and *then* calls the `afterSign` hook. A
+hook that re-signs a sidecar -- which an embedder needs, because nebula's
+binaries want their own entitlements -- invalidates the ticket that was just
+issued. The build log says notarisation succeeded and the shipped app reports
+`Unnotarized Developer ID`. Sign nested binaries in `afterPack`, before the
+app's own signature seals them, and tell the packager to leave them alone
+(`mac.signIgnore`) so it cannot overwrite their entitlements.
+
 **TCC prompts must be raised by the app process.** File-access permission
 prompts are keyed to the bundle id and only appear for the process the user
 launched. Anything the app shells out to inherits the denial without ever
 producing a prompt, so paths that need user-granted access have to be read in
 the app before a helper is spawned.
+
+**Local-network access is a permission, and it is asked for at the worst
+moment.** The first connection to a LAN address raises the macOS prompt -- and
+that same connection is the one it blocks. For an app whose LAN feature is the
+point, that means the first attempt fails, the second races the dialog being
+answered, and the third works. Provoke it deliberately when the user enables
+networking, next to the switch that needs it, rather than letting the game's
+own first packet do it.
 
 ## What would have saved the most time
 
