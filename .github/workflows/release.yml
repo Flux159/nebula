@@ -54,6 +54,10 @@ jobs:
           gh run download "$run_id" --name guest-images-arm64 --dir dist
           gzip -dc dist/kernel-Image-arm64.gz > vessel/out/Image
           gzip -dc dist/rootfs-arm64.img.gz > vessel/out/rootfs.img
+          # The slim rootfs too, or "Build the slim embed kit" below finds no
+          # vessel/out/rootfs-slim.img and falls back to building it from
+          # source — which needs Docker, and macOS runners have none.
+          gzip -dc dist/rootfs-slim-arm64.img.gz > vessel/out/rootfs-slim.img
 
       - name: Build Nebula.app
         run: scripts/bundle-app.sh

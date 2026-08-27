@@ -40,6 +40,23 @@ echo "==> guest images (flavor: $FLAVOR)"
 if [ "$FLAVOR" = "full" ]; then IMG=vessel/out/rootfs.img; else IMG="vessel/out/rootfs-$FLAVOR.img"; fi
 if [ -n "$OVERLAY$SETUP" ] || [ ! -f "$IMG" ]; then
     # Custom content always forces a fresh build.
+    #
+    # Building needs Docker. That is fine locally and never true on a macOS CI
+    # runner, where the images are meant to arrive as guest-images.yml
+    # artifacts instead — so say that here rather than letting build-rootfs.sh
+    # report a bare "docker: command not found" three levels down.
+    if [ -z "$OVERLAY$SETUP" ] && ! command -v docker >/dev/null 2>&1; then
+        cat >&2 <<EOF
+ERROR: $IMG is missing and there is no docker to build it.
+
+  In CI: fetch it from the guest-images.yml artifact, which carries every
+  flavor — extract the one matching --flavor $FLAVOR. See the "Fetch latest
+  guest images" step in .github/workflows/release.yml.
+
+  Locally: FLAVOR=$FLAVOR vessel/build-rootfs.sh
+EOF
+        exit 1
+    fi
     FLAVOR="$FLAVOR" OVERLAY="$OVERLAY" SETUP="$SETUP" vessel/build-rootfs.sh
 fi
 test -f vessel/out/Image || vessel/build-kernel.sh
