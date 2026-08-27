@@ -371,6 +371,24 @@ impl Client {
 
 /// Discover an endpoint: first env var that parses wins; else (unix) the first
 /// existing socket among nebula locations, else (windows) loopback TCP.
+/// The loopback port recorded in an instance's `run/<leaf>` file.
+///
+/// On Windows that path holds a port rather than being a socket. Kept out of
+/// the `cfg` blocks deliberately: the parsing is what regresses, and a
+/// Windows-only function is one no test on Linux or macOS can reach.
+fn port_from_port_file(text: &str) -> Option<&str> {
+    let port = text.trim();
+    if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    // A port file holding something absurd is worse than none: it produces a
+    // connection error naming an endpoint nobody configured.
+    match port.parse::<u32>() {
+        Ok(n) if n > 0 && n < 65536 => Some(port),
+        _ => None,
+    }
+}
+
 fn discover_endpoint(envs: &[&str], leaf: &str, default_unix: &str) -> Endpoint {
     for var in envs {
         if let Ok(v) = std::env::var(var) {
@@ -400,9 +418,33 @@ fn discover_endpoint(envs: &[&str], leaf: &str, default_unix: &str) -> Endpoint 
     }
     #[cfg(not(unix))]
     {
-        let _ = (leaf, default_unix);
-        // Windows: nebula publishes the engine on a loopback TCP port (set via
-        // DOCKER_HOST / SLIM_KUBE_HOST). Fall back to the conventional ports.
+        let _ = default_unix;
+        // Windows: nebula publishes the engine on a loopback TCP port and
+        // records it in the instance directory, at the same path the unix
+        // socket would occupy -- run/docker.sock is a text file holding the
+        // port rather than a socket. Read it, mirroring the unix branch above.
+        //
+        // Without this the only way to reach an engine was to set DOCKER_HOST
+        // by hand, and the port changes on every boot, so an embedder had to
+        // read this file themselves -- which is exactly what the client is
+        // supposed to do for them. The failure was also misleading: falling
+        // through to 2375 reports "cannot connect to the engine" while the
+        // engine is running.
+        let candidates = [
+            std::env::var("NEBULA_HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join("run").join(leaf)),
+            std::env::var("USERPROFILE")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join(".nebula").join("run").join(leaf)),
+        ];
+        for c in candidates.into_iter().flatten() {
+            if let Ok(text) = std::fs::read_to_string(&c) {
+                if let Some(port) = port_from_port_file(&text) {
+                    return Endpoint::Tcp(format!("127.0.0.1:{port}"));
+                }
+            }
+        }
         let port = if envs.iter().any(|v| v.contains("KUBE")) {
             "6443"
         } else {
@@ -518,5 +560,24 @@ pub fn demux_stdcopy(
             _ => on_stdout(payload),
         }
         i += len;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Runs on every platform on purpose: this is the parsing behind Windows
+    // endpoint discovery, and nothing in CI runs Windows tests.
+    #[test]
+    fn port_files_are_read_and_junk_is_rejected() {
+        assert_eq!(port_from_port_file("63692"), Some("63692"));
+        assert_eq!(port_from_port_file("  63692\n"), Some("63692"));
+        assert_eq!(port_from_port_file("1"), Some("1"));
+        assert_eq!(port_from_port_file("65535"), Some("65535"));
+
+        for junk in ["", "   ", "0", "65536", "99999999", "abc", "tcp://127.0.0.1:1", "12a4", "-5"] {
+            assert_eq!(port_from_port_file(junk), None, "{junk:?} should be rejected");
+        }
     }
 }

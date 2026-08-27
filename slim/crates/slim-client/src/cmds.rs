@@ -849,14 +849,49 @@ fn inspect_one(client: &Client, name: &str) -> Option<Value> {
 
 // ---------- cp ----------
 
+/// Is this argument a `container:path` rather than a local path?
+///
+/// The colon is the only marker, which makes every absolute Windows path
+/// ambiguous: `C:\\Users\\me` would otherwise parse as container `C`, so a
+/// perfectly ordinary `cp C:\\dir container:/dest` was rejected with "one of
+/// the paths must be a container path" while looking straight at one. Docker
+/// resolves this the same way -- a single letter followed by a colon is a
+/// drive, not a container.
+///
+/// It matters more on Windows than it looks: there is no virtiofs there, so
+/// `cp` is the only way to get files into a container, and it did not accept
+/// the only kind of absolute path the platform produces.
+fn is_remote_path(s: &str) -> bool {
+    if !s.contains(':') || s.starts_with('.') || s.starts_with('/') {
+        return false;
+    }
+    // Only on Windows. `c:/etc` is a genuine single-letter container name on
+    // Linux and macOS, and docker treats it as one there; the drive-letter
+    // reading is correct only where drive letters exist. Applying it
+    // everywhere would fix Windows by breaking the other two.
+    !(cfg!(windows) && looks_like_drive(s))
+}
+
+/// `C:`, `C:\` or `C:/` -- a drive, not a container.
+///
+/// Deliberately not behind a `cfg`, so it can be tested on any platform; the
+/// decision about whether to *apply* it lives in `is_remote_path`.
+fn looks_like_drive(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b.len() == 2 || b[2] == b'\\' || b[2] == b'/')
+}
+
 pub fn cp(client: &Client, cargs: &[String]) -> CmdResult {
     let p = parse(cargs, &["-a", "-L"], &[], &[], false)?;
     if p.positional.len() != 2 {
         return Err(msg("\"cp\" requires exactly 2 arguments"));
     }
     let (src, dst) = (&p.positional[0], &p.positional[1]);
-    let src_remote = src.contains(':') && !src.starts_with('.') && !src.starts_with('/');
-    let dst_remote = dst.contains(':') && !dst.starts_with('.') && !dst.starts_with('/');
+    let src_remote = is_remote_path(src);
+    let dst_remote = is_remote_path(dst);
 
     if src_remote && !dst_remote {
         // container:path -> host path
@@ -1843,6 +1878,47 @@ mod tests {
     fn ports(specs: &[&str]) -> Value {
         let owned: Vec<String> = specs.iter().map(|s| s.to_string()).collect();
         parse_ports(&owned).0
+    }
+
+    // A colon is the only marker separating a container path from a local
+    // one, which makes every absolute Windows path ambiguous. These pin the
+    // distinction on all three platforms: the parsing is the same everywhere,
+    // so a regression on Windows is caught by a test run on Linux or macOS.
+    #[test]
+    fn drive_letters_are_recognised_as_drives() {
+        for drive in ["C:\\Users\\me\\state\\sql", "c:/Users/me", "D:\\", "Z:"] {
+            assert!(looks_like_drive(drive), "{drive} should read as a drive");
+        }
+        // A container name is not a drive unless it is exactly one letter.
+        for not_drive in ["ragnarok-db:/x", "ab:/x", "C", "", ":", "CC:/x"] {
+            assert!(!looks_like_drive(not_drive), "{not_drive} should not read as a drive");
+        }
+    }
+
+    #[test]
+    fn local_paths_are_not_container_paths() {
+        for local in ["./relative", "/absolute/unix/path", "relative/no/colon"] {
+            assert!(!is_remote_path(local), "{local} should be a local path");
+        }
+    }
+
+    // The drive rule must not cost Linux and macOS a legal container name.
+    #[cfg(not(windows))]
+    #[test]
+    fn single_letter_container_still_works_off_windows() {
+        assert!(is_remote_path("c:/etc"), "single-letter containers are valid off Windows");
+    }
+
+    #[test]
+    fn container_paths_are_still_recognised() {
+        for remote in [
+            "ragnarok-db:/docker-entrypoint-initdb.d",
+            "mycontainer:/var/lib",
+            "ab:/x",
+            "0123456789abcdef:/etc",
+        ] {
+            assert!(is_remote_path(remote), "{remote} should be a container path");
+        }
     }
 
     #[test]
