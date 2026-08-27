@@ -188,6 +188,44 @@ $DS cp as-src:/etc/alpine-release /tmp/from-container >/tmp/o 2>&1
 [ -s /tmp/from-container ] && ok "cp container -> host" || { bad "cp container->host"; cat /tmp/o; }
 $DS rm -f as-src >/dev/null 2>&1
 
+# create -> cp -> start, the sequence an embedder must use on a host with no
+# bind mounts. It was silently broken in both halves for three releases: cp
+# wrote into a throwaway overlay built from the image and then deleted it, and
+# start wiped the container's layer anyway. Both returned success. Only the
+# other direction was covered here, which is how it went unnoticed.
+echo "== cp (host -> container) survives start =="
+rm -rf /tmp/seed && mkdir -p /tmp/seed/conf
+echo "seeded-by-cp" > /tmp/seed/conf/marker.txt
+$DS create --name as-seed "$IMG" sh -c 'cat /seeded/conf/marker.txt; sleep 5' >/tmp/o 2>&1 \
+    && ok "create for seeding" || { bad "create for seeding"; cat /tmp/o; }
+$DS exec as-seed mkdir -p /seeded >/dev/null 2>&1 || true
+(cd /tmp/seed && $DS cp conf as-seed:/seeded/conf) >/tmp/o 2>&1
+# The copy must be visible to the container that starts afterwards -- writing
+# somewhere that is then discarded is exactly the bug, and it reports success.
+$DS start as-seed >/tmp/o 2>&1 && ok "start after cp" || { bad "start after cp"; cat /tmp/o; }
+sleep 2
+$DS logs as-seed >/tmp/o 2>&1
+grep -q "seeded-by-cp" /tmp/o \
+    && ok "cp host -> container survived start" \
+    || { bad "cp host->container did not reach the container"; cat /tmp/o; }
+$DS rm -f as-seed >/dev/null 2>&1
+
+# A container's filesystem is its own: changes survive stop/start, and are
+# discarded by rm rather than by restart. start used to delete the whole
+# overlay, so every restart began from the image again.
+echo "== a container's writes survive a restart =="
+$DS run -d --name as-persist "$IMG" sh -c 'sleep 30' >/tmp/o 2>&1 \
+    && ok "run for persistence" || { bad "run for persistence"; cat /tmp/o; }
+$DS exec as-persist sh -c 'echo written-before-restart > /tmp/persist.txt' >/tmp/o 2>&1
+$DS stop -t 2 as-persist >/dev/null 2>&1
+$DS start as-persist >/tmp/o 2>&1 && ok "restart" || { bad "restart"; cat /tmp/o; }
+sleep 1
+$DS exec as-persist cat /tmp/persist.txt >/tmp/o 2>&1
+grep -q "written-before-restart" /tmp/o \
+    && ok "writes survived the restart" \
+    || { bad "writes lost on restart"; cat /tmp/o; }
+$DS rm -f as-persist >/dev/null 2>&1
+
 # --------------------------------------------------------------------- load
 if [ -f /slim/load-image.tar ]; then
     echo "== docker load =="
