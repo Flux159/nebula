@@ -12,27 +12,53 @@ type R = io::Result<()>;
 
 /// Resolve a filesystem root for the container, returning the root plus an
 /// optional temp-mount dir to unmount when done.
-fn container_fs(engine: &Engine, id: &str) -> io::Result<(PathBuf, Option<PathBuf>)> {
+/// What to do with a temporary mount once the request is finished.
+pub(crate) struct FsGuard {
+    dir: PathBuf,
+    /// Delete the directory as well as unmounting it. False for a container's
+    /// own layer, which has to survive.
+    remove: bool,
+}
+
+fn container_fs(engine: &Engine, id: &str) -> io::Result<(PathBuf, Option<FsGuard>)> {
     let entry = engine.get_entry(id)?;
     let c = entry.snapshot();
     if c.running() && c.state.pid > 0 {
         return Ok((PathBuf::from(format!("/proc/{}/root", c.state.pid)), None));
     }
-    // Stopped: mount the overlay read/write at a temp dir.
+    // Stopped: mount the container's *own* overlay, not a fresh one from the
+    // image.
+    //
+    // This used to build a throwaway overlay from the image, write into it and
+    // then delete it -- so `docker cp` into a stopped container wrote to a
+    // temporary directory that was removed moments later, and answered 200.
+    // Nothing failed and nothing arrived, which is the worst way for it to be
+    // wrong: `create` -> `cp` -> `start` is the only way to seed a container on
+    // a host with no bind mounts, and it silently did nothing.
+    let base = PathBuf::from(&c.rootfs_base);
     let image = engine
         .store
         .resolve(&c.image_id)
         .ok_or_else(|| io::Error::other("image missing"))?;
-    let dir = engine.paths.run.join(format!("cp-{}", slim_net::rand_id()));
-    std::fs::create_dir_all(&dir)?;
-    let merged = engine.store.prepare_rootfs(&image, &dir)?;
-    Ok((merged, Some(dir)))
+    std::fs::create_dir_all(&base)?;
+    let merged = engine.store.prepare_rootfs(&image, &base)?;
+    // Unmounted when we are done, never deleted: `upper` is the container's
+    // filesystem and belongs to it until it is removed.
+    Ok((
+        merged,
+        Some(FsGuard {
+            dir: base,
+            remove: false,
+        }),
+    ))
 }
 
-fn cleanup(engine: &Engine, mount: Option<PathBuf>) {
-    if let Some(d) = mount {
-        engine.store.unmount_rootfs(&d);
-        let _ = std::fs::remove_dir_all(d);
+fn cleanup(engine: &Engine, guard: Option<FsGuard>) {
+    if let Some(g) = guard {
+        engine.store.unmount_rootfs(&g.dir);
+        if g.remove {
+            let _ = std::fs::remove_dir_all(&g.dir);
+        }
     }
 }
 

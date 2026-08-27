@@ -393,9 +393,21 @@ impl Engine {
             .resolve(&c.image_id)
             .ok_or_else(|| nf(format!("image {} missing", c.image_id)))?;
 
-        // Prepare overlay rootfs.
+        // Prepare overlay rootfs, keeping whatever the container already has.
+        //
+        // `upper` is the container's filesystem. Wiping it here meant every
+        // start began from the image again, which is not how a container
+        // behaves -- docker discards those changes on `rm`, not on restart --
+        // and it made `create` -> `cp` -> `start` impossible: anything copied
+        // in before the first start was deleted by the start that was supposed
+        // to use it. That is the only way to seed a container on a host with
+        // no bind mounts, so on Windows there was no way at all.
+        //
+        // `work` is overlayfs scratch and must not be reused across mounts;
+        // `merged` is only a mountpoint. Both are safe to clear.
         let base = PathBuf::from(&c.rootfs_base);
-        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(base.join("work"));
+        let _ = std::fs::remove_dir_all(base.join("merged"));
         std::fs::create_dir_all(&base)?;
         let merged = self.store.prepare_rootfs(&image, &base)?;
 
