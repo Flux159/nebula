@@ -1004,7 +1004,8 @@ fn make_cp_tar(src: &str) -> Result<Vec<u8>, CmdError> {
                         .map_err(|e| msg(e.to_string()))?;
                 } else {
                     let mut f = std::fs::File::open(entry.path())?;
-                    b.append_file(&name, &mut f).map_err(|e| msg(e.to_string()))?;
+                    b.append_file(&name, &mut f)
+                        .map_err(|e| msg(e.to_string()))?;
                 }
             }
         } else {
@@ -1986,7 +1987,10 @@ mod tests {
         }
         // A container name is not a drive unless it is exactly one letter.
         for not_drive in ["ragnarok-db:/x", "ab:/x", "C", "", ":", "CC:/x"] {
-            assert!(!looks_like_drive(not_drive), "{not_drive} should not read as a drive");
+            assert!(
+                !looks_like_drive(not_drive),
+                "{not_drive} should not read as a drive"
+            );
         }
     }
 
@@ -2001,7 +2005,10 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn single_letter_container_still_works_off_windows() {
-        assert!(is_remote_path("c:/etc"), "single-letter containers are valid off Windows");
+        assert!(
+            is_remote_path("c:/etc"),
+            "single-letter containers are valid off Windows"
+        );
     }
 
     #[test]
@@ -2012,7 +2019,10 @@ mod tests {
             "ab:/x",
             "0123456789abcdef:/etc",
         ] {
-            assert!(is_remote_path(remote), "{remote} should be a container path");
+            assert!(
+                is_remote_path(remote),
+                "{remote} should be a container path"
+            );
         }
     }
 

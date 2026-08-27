@@ -438,9 +438,12 @@ fn discover_endpoint(envs: &[&str], leaf: &str, default_unix: &str) -> Endpoint 
             std::env::var("NEBULA_HOME")
                 .ok()
                 .map(|h| std::path::PathBuf::from(h).join("run").join(leaf)),
-            std::env::var("USERPROFILE")
-                .ok()
-                .map(|h| std::path::PathBuf::from(h).join(".nebula").join("run").join(leaf)),
+            std::env::var("USERPROFILE").ok().map(|h| {
+                std::path::PathBuf::from(h)
+                    .join(".nebula")
+                    .join("run")
+                    .join(leaf)
+            }),
         ];
         for c in candidates.into_iter().flatten() {
             if let Ok(text) = std::fs::read_to_string(&c) {
@@ -580,8 +583,22 @@ mod tests {
         assert_eq!(port_from_port_file("1"), Some("1"));
         assert_eq!(port_from_port_file("65535"), Some("65535"));
 
-        for junk in ["", "   ", "0", "65536", "99999999", "abc", "tcp://127.0.0.1:1", "12a4", "-5"] {
-            assert_eq!(port_from_port_file(junk), None, "{junk:?} should be rejected");
+        for junk in [
+            "",
+            "   ",
+            "0",
+            "65536",
+            "99999999",
+            "abc",
+            "tcp://127.0.0.1:1",
+            "12a4",
+            "-5",
+        ] {
+            assert_eq!(
+                port_from_port_file(junk),
+                None,
+                "{junk:?} should be rejected"
+            );
         }
     }
 }
