@@ -53,10 +53,10 @@ jobs:
           # filenames inside. This runner is arm64.
           gh run download "$run_id" --name guest-images-arm64 --dir dist
           ls -la dist
-          # bundle-app + embed-kit consume the raw images from vessel/out
-          gzip -dc dist/kernel-Image-arm64.gz > vessel/out/Image
-          gzip -dc dist/rootfs-arm64.img.gz > vessel/out/rootfs.img
-          gzip -dc dist/rootfs-slim-arm64.img.gz > vessel/out/rootfs-slim.img
+          # bundle-app + embed-kit consume the raw images from vessel/out.
+          # Unpacks every flavor present, so adding one to guest-images.yml
+          # needs no edit here.
+          scripts/unpack-guest-images.sh dist arm64
 
       - name: Build Nebula.app + DMG (ad-hoc signed)
         run: scripts/bundle-app.sh
