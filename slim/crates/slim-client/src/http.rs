@@ -376,6 +376,10 @@ impl Client {
 /// On Windows that path holds a port rather than being a socket. Kept out of
 /// the `cfg` blocks deliberately: the parsing is what regresses, and a
 /// Windows-only function is one no test on Linux or macOS can reach.
+// Called only from the Windows branch below, but deliberately compiled and
+// tested everywhere: a `#[cfg(windows)]` helper is one no CI run on Linux can
+// reach, and this parsing is the part that regresses.
+#[allow(dead_code)]
 fn port_from_port_file(text: &str) -> Option<&str> {
     let port = text.trim();
     if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {

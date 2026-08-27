@@ -909,7 +909,13 @@ pub fn cp(client: &Client, cargs: &[String]) -> CmdResult {
         // host path -> container:path
         let (id, cpath) = dst.split_once(':').unwrap();
         let tar = make_cp_tar(src)?;
-        let parent = parent_dir(cpath);
+        // Contents go *into* the destination; a named directory is unpacked
+        // beside it, in the parent, as docker does.
+        let parent = if is_contents_of(src) {
+            cpath.to_string()
+        } else {
+            parent_dir(cpath)
+        };
         let path = format!("{V}/containers/{id}/archive?path={}", url_encode(&parent));
         let (status, body) = client.call(
             "PUT",
@@ -958,21 +964,61 @@ fn extract_cp_tar(tar: &[u8], dst: &str, src_path: &str) -> CmdResult {
     Ok(())
 }
 
+/// Does this source mean "the contents of the directory" rather than the
+/// directory itself?
+///
+/// docker's convention is a trailing `/.`, and it is the only unambiguous way
+/// to say it. The backslash form is accepted too, because a Windows caller
+/// building the path with its own separator produces `dir\.` and means the
+/// same thing.
+pub(crate) fn is_contents_of(src: &str) -> bool {
+    src.ends_with("/.") || src.ends_with("\\.")
+}
+
 fn make_cp_tar(src: &str) -> Result<Vec<u8>, CmdError> {
+    let contents_only = is_contents_of(src);
     let src_p = std::path::Path::new(src);
     let mut buf = Vec::new();
     {
         let mut b = tar::Builder::new(&mut buf);
-        let name = src_p
-            .file_name()
-            .ok_or_else(|| msg("invalid source path"))?;
-        if src_p.is_dir() {
-            b.append_dir_all(name, src_p)
-                .map_err(|e| msg(e.to_string()))?;
+        if contents_only {
+            // Each child at the top level, so unpacking at the destination
+            // fills it rather than nesting a copy of the source inside it.
+            //
+            // Without this a trailing `/.` was simply part of the path: the
+            // archive was named after the source directory and unpacked into
+            // the destination's parent, so `cp conf container:/etc/import`
+            // wrote /etc/conf and left /etc/import alone. Nothing failed --
+            // the caller got a success and a container that had never seen
+            // the files.
+            // Strip the two-character suffix rather than calling parent():
+            // Path normalises a trailing `.` component away, so parent()
+            // climbs a level too far and reads the wrong directory.
+            let base = &src[..src.len() - 2];
+            let dir = std::path::Path::new(if base.is_empty() { "/" } else { base });
+            for entry in std::fs::read_dir(dir)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                if entry.file_type()?.is_dir() {
+                    b.append_dir_all(&name, entry.path())
+                        .map_err(|e| msg(e.to_string()))?;
+                } else {
+                    let mut f = std::fs::File::open(entry.path())?;
+                    b.append_file(&name, &mut f).map_err(|e| msg(e.to_string()))?;
+                }
+            }
         } else {
-            let mut f = std::fs::File::open(src_p)?;
-            b.append_file(name, &mut f)
-                .map_err(|e| msg(e.to_string()))?;
+            let name = src_p
+                .file_name()
+                .ok_or_else(|| msg("invalid source path"))?;
+            if src_p.is_dir() {
+                b.append_dir_all(name, src_p)
+                    .map_err(|e| msg(e.to_string()))?;
+            } else {
+                let mut f = std::fs::File::open(src_p)?;
+                b.append_file(name, &mut f)
+                    .map_err(|e| msg(e.to_string()))?;
+            }
         }
         b.finish().map_err(|e| msg(e.to_string()))?;
     }
@@ -1884,6 +1930,55 @@ mod tests {
     // one, which makes every absolute Windows path ambiguous. These pin the
     // distinction on all three platforms: the parsing is the same everywhere,
     // so a regression on Windows is caught by a test run on Linux or macOS.
+    #[test]
+    fn contents_of_is_recognised_in_both_separator_styles() {
+        for yes in ["conf/.", "/a/b/.", "conf\\.", "C:\\x\\."] {
+            assert!(is_contents_of(yes), "{yes} means contents-of");
+        }
+        for no in ["conf", "/a/b", "conf/..", "conf/.hidden", "."] {
+            assert!(!is_contents_of(no), "{no} does not mean contents-of");
+        }
+    }
+
+    // The bug this guards: a trailing `/.` was treated as an ordinary path
+    // component, so the archive nested a copy of the source inside the
+    // destination instead of filling it -- and reported success either way.
+    #[test]
+    fn contents_of_tars_children_at_the_top_level() {
+        let dir = std::env::temp_dir().join(format!("slim-cp-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.join("sub").join("b.txt"), b"b").unwrap();
+
+        let names = |src: String| -> Vec<String> {
+            let tar = make_cp_tar(&src).unwrap();
+            let mut ar = tar::Archive::new(std::io::Cursor::new(tar));
+            ar.entries()
+                .unwrap()
+                .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+
+        let contents = names(format!("{}/.", dir.display()));
+        assert!(
+            contents.iter().any(|n| n == "a.txt"),
+            "children should be at the top level, got {contents:?}"
+        );
+        assert!(
+            !contents.iter().any(|n| n.starts_with("slim-cp-test")),
+            "the source directory must not appear as a prefix, got {contents:?}"
+        );
+
+        let named = names(dir.display().to_string());
+        assert!(
+            named.iter().all(|n| n.starts_with("slim-cp-test")),
+            "without the suffix the directory itself is archived, got {named:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn drive_letters_are_recognised_as_drives() {
         for drive in ["C:\\Users\\me\\state\\sql", "c:/Users/me", "D:\\", "Z:"] {
