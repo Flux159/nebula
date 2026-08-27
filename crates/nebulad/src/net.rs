@@ -30,6 +30,9 @@ pub struct NetConfig {
     pub dns_zone: String,
     pub dns_port: u16,
     pub k8s_port: u16,
+    /// Bind published ports to the address the container asked for, rather
+    /// than forcing 127.0.0.1. See [`crate::config::Config::allow_public_publish`].
+    pub allow_public_publish: bool,
 }
 
 pub fn start(
@@ -38,7 +41,13 @@ pub fn start(
     cfg: NetConfig,
 ) -> Arc<Mutex<NetState>> {
     let state = Arc::new(Mutex::new(NetState::default()));
-    spawn_docker_watcher(vessel.clone(), docker_sock, state.clone(), cfg.k8s_port);
+    spawn_docker_watcher(
+        vessel.clone(),
+        docker_sock,
+        state.clone(),
+        cfg.k8s_port,
+        cfg.allow_public_publish,
+    );
     spawn_dns_server(state.clone(), cfg.dns_zone, cfg.dns_port);
     state
 }
@@ -50,12 +59,15 @@ fn spawn_docker_watcher(
     docker_sock: std::path::PathBuf,
     state: Arc<Mutex<NetState>>,
     k8s_port: u16,
+    allow_public_publish: bool,
 ) {
     std::thread::spawn(move || {
-        // port -> (stop flag, target ip). Recreated when the guest IP moves
-        // (DHCP hands out a fresh address on every boot).
-        // port -> (stop flag, target ip, was the publish loopback-scoped)
-        let mut forwarders: HashMap<u16, (Arc<AtomicBool>, Ipv4Addr, bool)> = HashMap::new();
+        // port -> (stop flag, guest target ip, guest-loopback publish, host
+        // bind address). Recreated when any of them changes: the guest IP
+        // moves on every boot (fresh DHCP lease), and a container republished
+        // from 127.0.0.1 to 0.0.0.0 must not keep its old loopback listener.
+        let mut forwarders: HashMap<u16, (Arc<AtomicBool>, Ipv4Addr, bool, IpAddr)> =
+            HashMap::new();
         // Consecutive failed container listings; only used to keep the log quiet
         // while the engine is down.
         let mut list_failures: u32 = 0;
@@ -98,18 +110,33 @@ fn spawn_docker_watcher(
             let mut names = HashSet::new();
             let mut ports = HashSet::new();
             let mut loopback_only = HashSet::new();
+            // Where each port should be listened for on the HOST. Distinct
+            // from `loopback_only`, which is about where dockerd bound it
+            // inside the GUEST; the two coincide today only because the same
+            // publish spec produces both.
+            let mut host_binds: HashMap<u16, IpAddr> = HashMap::new();
             for c in &containers {
                 for n in &c.names {
                     names.insert(n.clone());
                 }
-                for &(port, loopback) in &c.tcp_ports {
-                    ports.insert(port);
-                    if loopback {
-                        loopback_only.insert(port);
+                for pp in &c.tcp_ports {
+                    ports.insert(pp.port);
+                    if pp.guest_loopback {
+                        loopback_only.insert(pp.port);
                     }
+                    let want = effective_bind(pp.host_ip, allow_public_publish);
+                    host_binds
+                        .entry(pp.port)
+                        .and_modify(|cur| {
+                            if wider(&want, cur) {
+                                *cur = want;
+                            }
+                        })
+                        .or_insert(want);
                 }
             }
-            // Static service forwards (k3s API; certs cover 127.0.0.1).
+            // Static service forwards (k3s API; certs cover 127.0.0.1, so this
+            // one stays on loopback regardless of the publish policy).
             ports.insert(k8s_port);
 
             {
@@ -141,34 +168,85 @@ fn spawn_docker_watcher(
                 }
             };
             let ip = guest_ip.unwrap_or(Ipv4Addr::UNSPECIFIED);
-            forwarders.retain(|port, (stop, fwd_ip, was_loopback)| {
+            let bind_for = |port: u16| -> IpAddr { *host_binds.get(&port).unwrap_or(&LOOPBACK) };
+            forwarders.retain(|port, (stop, fwd_ip, was_loopback, bind)| {
                 if ports.contains(port)
                     && *fwd_ip == ip
                     && *was_loopback == loopback_only.contains(port)
+                    && *bind == bind_for(*port)
                 {
                     true
                 } else {
                     stop.store(true, Ordering::SeqCst);
                     // Nudge the blocking accept() so the listener thread exits.
-                    let _ = TcpStream::connect(("127.0.0.1", *port));
-                    tracing::info!(port, "port forward removed (gone or IP moved)");
+                    // Dial the address it is actually bound to — a listener on
+                    // 192.168.1.5 never sees a connection to 127.0.0.1 and
+                    // would leak the thread and hold the port.
+                    let nudge = if bind.is_unspecified() {
+                        LOOPBACK
+                    } else {
+                        *bind
+                    };
+                    let _ = TcpStream::connect((nudge, *port));
+                    tracing::info!(port, "port forward removed (gone, IP moved, or rebound)");
                     false
                 }
             });
             for port in ports {
+                let bind = bind_for(port);
                 if let std::collections::hash_map::Entry::Vacant(e) = forwarders.entry(port) {
                     let stop = Arc::new(AtomicBool::new(false));
-                    if spawn_port_forward(port, target_for(port), stop.clone()) {
-                        tracing::info!(
-                            port,
-                            "port forward added (127.0.0.1:{port} -> {ip}:{port})"
-                        );
-                        e.insert((stop, ip, loopback_only.contains(&port)));
+                    if spawn_port_forward(bind, port, target_for(port), stop.clone()) {
+                        tracing::info!(port, "port forward added ({bind}:{port} -> {ip}:{port})");
+                        e.insert((stop, ip, loopback_only.contains(&port), bind));
                     }
                 }
             }
         }
     });
+}
+
+/// Every published port used to land here, whatever the container asked for.
+const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+/// The host address a published port should be listened on.
+///
+/// `host_ip` is the `HostIp` docker reported for the mapping. Loopback stays
+/// loopback; anything wider is honoured only when the instance has opted in,
+/// and is otherwise clamped back to 127.0.0.1 — the historical behaviour, and
+/// the safe end of the trade.
+fn effective_bind(host_ip: IpAddr, allow_public_publish: bool) -> IpAddr {
+    if host_ip.is_loopback() {
+        // Normalise ::1 to 127.0.0.1: the forward dials IPv4 upstream anyway,
+        // and this keeps a v6-loopback publish behaving as it always has.
+        LOOPBACK
+    } else if allow_public_publish {
+        host_ip
+    } else {
+        LOOPBACK
+    }
+}
+
+/// Is `a` a broader binding than `b`? A port published twice (the v4 and v6
+/// mappings of one `-p`, or by two containers) gets the widest of them, which
+/// mirrors how `loopback_only` is the AND of every mapping.
+fn wider(a: &IpAddr, b: &IpAddr) -> bool {
+    let rank = |ip: &IpAddr| -> u8 {
+        if ip.is_unspecified() {
+            2
+        } else if ip.is_loopback() {
+            0
+        } else {
+            1
+        }
+    };
+    match rank(a).cmp(&rank(b)) {
+        std::cmp::Ordering::Greater => true,
+        // Same breadth: prefer IPv4. Binding 0.0.0.0 is the predictable choice
+        // on hosts where a v6 wildcard may or may not be dual-stack.
+        std::cmp::Ordering::Equal => a.is_ipv4() && b.is_ipv6(),
+        std::cmp::Ordering::Less => false,
+    }
 }
 
 /// Where a host-port forwarder sends bytes.
@@ -180,11 +258,16 @@ enum ForwardTarget {
     Vsock(Arc<Vessel>),
 }
 
-fn spawn_port_forward(port: u16, target: ForwardTarget, stop: Arc<AtomicBool>) -> bool {
-    let listener = match TcpListener::bind(("127.0.0.1", port)) {
+fn spawn_port_forward(
+    bind: IpAddr,
+    port: u16,
+    target: ForwardTarget,
+    stop: Arc<AtomicBool>,
+) -> bool {
+    let listener = match TcpListener::bind((bind, port)) {
         Ok(l) => l,
         Err(e) => {
-            tracing::warn!(port, "cannot forward (bind failed: {e})");
+            tracing::warn!(port, "cannot forward (bind {bind}:{port} failed: {e})");
             return false;
         }
     };
@@ -348,11 +431,22 @@ use std::net::ToSocketAddrs;
 
 pub struct ContainerInfo {
     pub names: Vec<String>,
-    /// (published port, bound only to the guest's loopback). Docker reports a
-    /// `HostIp` per mapping: `-p 8080:80` binds the wildcard, while
-    /// `-p 127.0.0.1:8080:80` binds the *guest's* 127.0.0.1 and is therefore
-    /// invisible on the guest's NAT address.
-    pub tcp_ports: Vec<(u16, bool)>,
+    pub tcp_ports: Vec<PublishedPort>,
+}
+
+/// One published TCP port, and the two independent things docker's `HostIp`
+/// tells us about it.
+pub struct PublishedPort {
+    pub port: u16,
+    /// dockerd bound it to the *guest's* own 127.0.0.1, so it is invisible on
+    /// the guest's NAT address and must be reached through the vsock proxy.
+    /// A statement about the guest side.
+    pub guest_loopback: bool,
+    /// The address the publish asked us to listen on, on the *host* side.
+    /// These coincide today only because one publish spec produces both;
+    /// collapsing them into a single bool is what made `-p 0.0.0.0:...`
+    /// unreachable from the LAN.
+    pub host_ip: IpAddr,
 }
 
 fn list_containers(docker_sock: &std::path::Path) -> anyhow::Result<Vec<ContainerInfo>> {
@@ -369,9 +463,10 @@ fn list_containers(docker_sock: &std::path::Path) -> anyhow::Result<Vec<Containe
                     .collect()
             })
             .unwrap_or_default();
-        // A port can appear twice (v4 and v6); it is loopback-only when every
-        // mapping for it is loopback.
-        let mut bindings: std::collections::HashMap<u16, bool> = std::collections::HashMap::new();
+        // A port can appear twice (v4 and v6): it is loopback-only when every
+        // mapping is loopback, and takes the widest host address of them.
+        let mut bindings: std::collections::HashMap<u16, (bool, IpAddr)> =
+            std::collections::HashMap::new();
         for p in c["Ports"].as_array().cloned().unwrap_or_default() {
             if p["Type"].as_str() != Some("tcp") {
                 continue;
@@ -379,14 +474,29 @@ fn list_containers(docker_sock: &std::path::Path) -> anyhow::Result<Vec<Containe
             let Some(public) = p["PublicPort"].as_u64() else {
                 continue;
             };
-            let host_ip = p["IP"].as_str().unwrap_or_default();
-            let loopback = matches!(host_ip, "::1") || host_ip.starts_with("127.");
+            let raw = p["IP"].as_str().unwrap_or_default();
+            // An absent or unparseable IP means the wildcard, which is what
+            // docker reports for a bare `-p 8080:80`.
+            let host_ip: IpAddr = raw.parse().unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+            let loopback = host_ip.is_loopback();
             bindings
                 .entry(public as u16)
-                .and_modify(|only| *only &= loopback)
-                .or_insert(loopback);
+                .and_modify(|(only, ip)| {
+                    *only &= loopback;
+                    if wider(&host_ip, ip) {
+                        *ip = host_ip;
+                    }
+                })
+                .or_insert((loopback, host_ip));
         }
-        let tcp_ports = bindings.into_iter().collect();
+        let tcp_ports = bindings
+            .into_iter()
+            .map(|(port, (guest_loopback, host_ip))| PublishedPort {
+                port,
+                guest_loopback,
+                host_ip,
+            })
+            .collect();
         out.push(ContainerInfo { names, tcp_ports });
     }
     Ok(out)
@@ -443,6 +553,52 @@ fn http_get_unix(sock: &std::path::Path, path: &str) -> anyhow::Result<Vec<u8>> 
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn loopback_publishes_stay_loopback_either_way() {
+        for allow in [false, true] {
+            assert_eq!(effective_bind(ip("127.0.0.1"), allow), LOOPBACK);
+            // ::1 normalises to 127.0.0.1 — the upstream dial is v4 anyway.
+            assert_eq!(effective_bind(ip("::1"), allow), LOOPBACK);
+        }
+    }
+
+    #[test]
+    fn wide_publishes_are_clamped_until_opted_in() {
+        // The bug: 0.0.0.0 was unreachable from the LAN because it landed here.
+        assert_eq!(effective_bind(ip("0.0.0.0"), false), LOOPBACK);
+        assert_eq!(effective_bind(ip("192.168.1.5"), false), LOOPBACK);
+        // ...and is honoured once the instance opts in.
+        assert_eq!(effective_bind(ip("0.0.0.0"), true), ip("0.0.0.0"));
+        assert_eq!(effective_bind(ip("192.168.1.5"), true), ip("192.168.1.5"));
+    }
+
+    #[test]
+    fn widest_binding_wins_across_mappings() {
+        assert!(wider(&ip("0.0.0.0"), &ip("127.0.0.1")));
+        assert!(wider(&ip("192.168.1.5"), &ip("127.0.0.1")));
+        assert!(wider(&ip("0.0.0.0"), &ip("192.168.1.5")));
+        assert!(!wider(&ip("127.0.0.1"), &ip("0.0.0.0")));
+        assert!(!wider(&ip("0.0.0.0"), &ip("0.0.0.0")));
+        // One `-p 8080:80` reports both wildcards; take the v4 one.
+        assert!(wider(&ip("0.0.0.0"), &ip("::")));
+        assert!(!wider(&ip("::"), &ip("0.0.0.0")));
+    }
+
+    #[test]
+    fn a_bare_publish_parses_as_the_wildcard() {
+        // Docker omits IP for `-p 8080:80` in some versions; absent must not
+        // silently become loopback, or opting in would change nothing.
+        let raw = "";
+        let host_ip: IpAddr = raw.parse().unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert!(host_ip.is_unspecified());
+        assert!(!host_ip.is_loopback());
+    }
 
     #[test]
     fn parses_container_json_shape() {

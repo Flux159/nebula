@@ -55,6 +55,7 @@ dns_zone = "galaxy.local" # brand the container DNS zone
 max_ram_mib = 8192       # ceiling only; ballooning returns idle RAM
 cpus = 4
 data_disk_gib = 32
+allow_public_publish = false  # true to honour `-p 0.0.0.0:...` (LAN-visible)
 EOF
 nebula install-image --kernel <Resources>/kernel-Image.gz --rootfs <Resources>/rootfs.img.gz
 nebula up                # ~0.5-0.6s to a healthy engine
@@ -230,6 +231,15 @@ Everything that was port- or name-shaped is per-instance config:
   merged context and `$NEBULA_HOME/kubeconfig`) are written against it
   automatically — clients read the effective value from
   `/v1alpha1/status`/`nebula status` rather than assuming 6443.
+- **Published ports:** `allow_public_publish` decides whether a container's
+  publish address is honoured. Off by default, every published port lands on
+  `127.0.0.1` whatever the container asked for — so `-p 0.0.0.0:6900:6900` is
+  reachable only from the machine running the engine. Turn it on and nebula
+  binds the address docker reports, which is what a LAN feature (game server,
+  shared dev service) needs. It is opt-in for the same reason `api_host` is:
+  putting a guest's port on the network is a security boundary, and an
+  embedder should cross it deliberately. `NEBULA_ALLOW_PUBLIC_PUBLISH=1`
+  overrides for a one-off.
 - **Autostart:** the launchd label derives from `NEBULA_HOME`
   (`dev.nebula.nebulad.<hash>`) and the agent carries `NEBULA_HOME` in its
   environment — each embedded product can independently start at login.

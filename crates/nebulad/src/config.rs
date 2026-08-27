@@ -32,6 +32,17 @@ pub struct Config {
     /// Host port forwarding to the k3s API (default 6443). Unique per
     /// k8s-enabled instance.
     pub k8s_port: Option<u16>,
+    /// Honour a container's publish address instead of forcing loopback
+    /// (default false). NEBULA_ALLOW_PUBLIC_PUBLISH overrides.
+    ///
+    /// Published ports normally appear on 127.0.0.1 whatever the container
+    /// asked for, so `-p 0.0.0.0:8080:80` is reachable only from this machine.
+    /// Turning this on makes nebula bind the `HostIp` docker reports, which is
+    /// what an embedder shipping a LAN feature (game server, shared dev
+    /// service) needs — and which exposes that port to the network. Off by
+    /// default for the same reason `api_host` defaults to loopback: crossing
+    /// that boundary should be a decision, not an accident.
+    pub allow_public_publish: Option<bool>,
     /// Extra host directories to share into the engine vessel via virtiofs, on
     /// top of `$HOME` (always shared). Each is mounted inside the guest at the
     /// SAME absolute path as on the host — exactly like `$HOME` — so a

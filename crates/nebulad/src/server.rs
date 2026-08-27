@@ -45,6 +45,11 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
             .unwrap_or_else(|| "nebula.local".into()),
         dns_port: cfg0.dns_port.unwrap_or(HOST_DNS_UDP_PORT),
         k8s_port: cfg0.k8s_port.unwrap_or(6443),
+        allow_public_publish: std::env::var("NEBULA_ALLOW_PUBLIC_PUBLISH")
+            .ok()
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+            .or(cfg0.allow_public_publish)
+            .unwrap_or(false),
     };
     let instance_net = InstanceNet {
         k8s_port: net_cfg.k8s_port,

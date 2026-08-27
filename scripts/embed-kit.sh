@@ -106,6 +106,12 @@ k8s_port = 6461          # host forward to this instance's k3s API
 
 # Brand the container DNS zone: <name>.<zone> resolves on this instance.
 dns_zone = "galaxy.local"
+
+# Published ports bind 127.0.0.1 unless this is on. Turn it on to honour the
+# container's own publish address — `-p 0.0.0.0:6900:6900` then reaches the
+# LAN, which is what a multiplayer game server or a shared dev service needs.
+# It exposes those ports to the network, so it is off by default.
+allow_public_publish = false
 EOF
 
 cat > "$OUT/EMBED.md" <<'EOF'
