@@ -35,6 +35,8 @@ budget.
   by full Nebula and Nebula-slim
 - [Embedding Nebula in your own app](embedding.html) — artifact inventory,
   embed kits, and the consuming app's responsibilities
+- [Field notes: embedding nebula-slim in a shipped app](embeddingronotes.html)
+  — what actually cost time building the first embedder that shipped
 - [slim engine configuration](slim-config.html) — every `slimd` and host CLI
   environment variable
 
