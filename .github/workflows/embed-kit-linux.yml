@@ -12,9 +12,11 @@ name: Embed kit (linux)
 #   config.toml.example  EMBED.md
 on:
   workflow_dispatch:
+  push:
+    tags: ['v*']
 
 permissions:
-  contents: read
+  contents: write
   actions: read # download guest-images artifacts
 
 jobs:
@@ -135,3 +137,13 @@ jobs:
           name: nebula-slim-embed-${{ matrix.galaxy_arch }}-unknown-linux
           path: nebula-slim-embed-*.tar.gz
           if-no-files-found: error
+
+      # Tags publish the kit as a release asset. Embedders — Galaxy, Ragnarok
+      # Offline — need to fetch a pinned kit without a token that can reach
+      # workflow artifacts, and `gh release download` is the only fetch that
+      # works the same from CI, a script and a person's shell.
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: nebula-slim-embed-*.tar.gz
