@@ -27,6 +27,34 @@ image import and COPY --chown` and `slim: apply layer ownership by hand,
 tolerating blank uid/gid`. The app still chowns at runtime in its entrypoint,
 because it has to run on kits built before the fix.
 
+**The Windows client could not find its own engine, or accept a Windows path.**
+Two separate defects, each of which made a healthy engine look broken in a
+different way. Written up in `tasks/windowsclientpaths.md`.
+
+Given only `NEBULA_HOME`, `docker-slim` on Windows falls back to Docker's
+default `tcp://127.0.0.1:2375` and reports a connection refused naming the
+engine -- while the engine is up, with `agent healthy` and a live REST API in
+its log. The port it should use sits in `run/docker.sock`, which on Windows is
+not a socket but a text file holding the loopback port. `docs/slim-config.md`
+says the CLIs resolve this themselves; they do not. An embedder must read that
+file and pass `DOCKER_HOST` explicitly -- and must read it per call, because
+the port is reassigned on every engine boot.
+
+And `docker cp` refuses every absolute Windows path: it tells a local path from
+a container path by looking for a colon, so `C:\Users\...` parses as container
+`C` and the command sees two container paths. That one compounds badly, because
+Windows has no virtiofs under nebula -- an embedder *cannot* bind mount and must
+use `create` → `cp` → `start` to get config or seed data into a container. The
+only supported route for the thing every embedder needs does not accept the only
+kind of path the platform produces. Working around it means running from the
+parent directory and passing a relative name.
+
+The pattern in both: the error names something that is fine. "Cannot connect to
+the engine" when the engine is healthy; "one of the paths must be a container
+path" when one of them is. An embedder debugging either goes to the wrong place
+first, and on a platform where nothing else has been proven yet, that is
+expensive.
+
 The general shape: **an image built against dockerd and loaded into slim is not
 guaranteed to behave the same.** Anything the image relies on the runtime
 preserving — ownership, modes, symlinks, xattrs — is worth an explicit
