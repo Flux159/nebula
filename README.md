@@ -28,7 +28,7 @@ one, so it is two things:
 | I want to… | Go to |
 |---|---|
 | Ship a container engine inside an app I distribute | [**Embed it**](#embed-it) ↓ |
-| Run containers and Kubernetes on my own machine | [**Use it**](#use-it) ↓ |
+| Run containers and Kubernetes on my own machine | [**Try it**](#try-it) ↓ |
 
 ## How it compares
 
@@ -111,9 +111,9 @@ containers, exactly as they would on a Linux server.
 
 ---
 
-# Use it
+# Try it
 
-Containers and Kubernetes on your own development machine.
+As a local VM and container orchestrator on your own machine.
 
 ## Install
 
