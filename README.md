@@ -250,4 +250,12 @@ those images rather than taking the newest run.
 Beta releases. Interfaces may still change between `0.x` releases; pin a version
 if you are embedding.
 
-License: MIT
+## License
+
+Nebula is MIT — see [LICENSE](LICENSE).
+
+`third_party/libkrun` is a modified fork of
+[containers/libkrun](https://github.com/containers/libkrun), which is Apache-2.0
+and stays Apache-2.0. What was changed is recorded in [NOTICE](NOTICE); keep
+that file and `third_party/libkrun/LICENSE` with any copy, including binaries
+that link the built library.

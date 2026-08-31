@@ -1,0 +1,46 @@
+Nebula
+Copyright (c) 2026 Suyog Sonwalkar
+
+Nebula's own source is licensed under the MIT License; see LICENSE.
+
+This repository also vendors third-party software under its own license, which
+is NOT MIT. That component and the modifications made to it are recorded below,
+as its license requires.
+
+================================================================================
+third_party/libkrun
+================================================================================
+
+  Upstream:   https://github.com/containers/libkrun
+  Copyright:  Red Hat, Inc. and the libkrun contributors
+  License:    Apache License, Version 2.0
+              full text in third_party/libkrun/LICENSE
+
+  Vendored into this repository with `git subtree`, not as a submodule:
+
+      git subtree pull --prefix third_party/libkrun \
+        https://github.com/containers/libkrun.git main --squash
+
+  THIS IS A MODIFIED FORK. Files under third_party/libkrun have been changed
+  by the Nebula authors and do not correspond to any upstream release. The
+  modifications, in the sense of Apache-2.0 section 4(b), are:
+
+    * Snapshot save and restore for krun-backed microVMs — capture of VM,
+      vCPU and guest memory state, device-state capture covering transport
+      registers and frozen queue configuration, and the matching restore
+      loaders using copy-on-write memory mappings.
+    * Sparse snapshot memory: all-zero 4 KiB pages are written as file holes.
+    * Windows support for the above via the Windows Hypervisor Platform,
+      including console re-priming, TSC deadline and IA32_XSS handling on
+      restore.
+    * linux/arm64 build and release support, with architecture gating around
+      the snapshot machinery.
+    * Correctness and build fixes: refusing SaveState while a vCPU is running
+      (callers must pause first), and a lock-free snapshot_state path after
+      save deadlocked on the inner device mutex.
+
+  Apache-2.0 permits this reuse and redistribution. It requires that the
+  license text, the copyright notices and this statement of changes travel
+  with the code — so keep third_party/libkrun/LICENSE and this file together
+  with any copy or derivative of this repository, including binary
+  distributions that link the resulting library.

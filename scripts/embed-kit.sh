@@ -114,8 +114,24 @@ dns_zone = "galaxy.local"
 allow_public_publish = false
 EOF
 
+# Licences travel with the binaries.
+#
+# The kit ships lib/libkrun.* -- a modified Apache-2.0 fork -- and an embedder
+# redistributes it inside their own app. Apache-2.0 requires the licence text,
+# the copyright notice and the statement of changes to go with it, so put them
+# in the kit rather than leaving each embedder to discover the obligation.
+mkdir -p "$OUT/licenses"
+# The script cd's to the repo root at the top, so these are root-relative.
+cp NOTICE "$OUT/licenses/NOTICE"
+cp third_party/libkrun/LICENSE "$OUT/licenses/LICENSE.libkrun"
+cp LICENSE "$OUT/licenses/LICENSE.nebula"
+
 cat > "$OUT/EMBED.md" <<'EOF'
 # Embedding Nebula — quick integration
+
+0. Ship `licenses/` with whatever you distribute. lib/ contains a modified
+   Apache-2.0 fork of libkrun; that licence and its statement of changes have
+   to travel with the binary.
 
 1. Ship `bin/`, `lib/`, `images/` inside your app (Tauri: sidecars +
    resources). Keep `lib/` next to `bin/` — nebula finds `../lib/libkrun.dylib`

@@ -127,6 +127,14 @@ jobs:
           # It exposes those ports to the network, so it is off by default.
           allow_public_publish = false
           EOF
+          # Licences travel with the binaries: the kit ships a modified
+          # Apache-2.0 fork of libkrun, and an embedder redistributes it
+          # inside their own app. Mirrors scripts/embed-kit.sh on macOS.
+          mkdir -p "$OUT/licenses"
+          cp NOTICE "$OUT/licenses/NOTICE"
+          cp third_party/libkrun/LICENSE "$OUT/licenses/LICENSE.libkrun"
+          cp LICENSE "$OUT/licenses/LICENSE.nebula"
+
           cat > "$OUT/EMBED.md" <<'EOF'
           # nebula-slim embed kit (Windows, WHP/Hyper-V)
 

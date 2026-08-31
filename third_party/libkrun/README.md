@@ -1,3 +1,16 @@
+> **This is a modified fork of libkrun, not upstream.**
+>
+> It is vendored into [Nebula](https://github.com/Flux159/nebula) and carries
+> changes by the Nebula authors: snapshot save/restore for krun microVMs
+> (including Windows/WHP and linux/arm64), sparse snapshot memory, and related
+> fixes. Upstream is https://github.com/containers/libkrun.
+>
+> libkrun is licensed under the Apache License 2.0 — see `LICENSE` in this
+> directory. The changes are described in `/NOTICE` at the root of the Nebula
+> repository. Nebula's own source is MIT; this directory is not.
+>
+> Report issues with these changes to Nebula, not to the libkrun maintainers.
+
 <picture>
    <source media="(prefers-color-scheme: dark)" srcset="docs/images/libkrun_logo_horizontal_darkmode.png">
    <source media="(prefers-color-scheme: light)" srcset="docs/images/libkrun_logo_horizontal.png">
