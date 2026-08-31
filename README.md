@@ -243,10 +243,7 @@ those images rather than taking the newest run.
 
 ## Status
 
-Early but real: the engine, networking, virtiofs, elastic memory, k3s,
-sandboxes, GPU passthrough, snapshots, the REST API and SDKs, the desktop UI and
-the apps catalog are all implemented and tested, and slim is validated on all
-three platforms. Interfaces may still change between `0.x` releases; pin a
-version if you are embedding.
+Beta releases. Interfaces may still change between `0.x` releases; pin a version
+if you are embedding.
 
 License: MIT
