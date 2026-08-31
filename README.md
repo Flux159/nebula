@@ -1,11 +1,13 @@
 # Nebula
 
-**What Electron did for web frontends, Nebula does for backends.**
+**Nebula is an embeddable microVM and container runtime that lets you ship fast
+Linux microVMs and containers with your applications.**
 
-Electron let you ship the web app you already wrote as a desktop app. Nebula
-lets you ship the *server* you already wrote — the same containers, the same
-database, the same compose file — inside an app that runs on a machine with no
-Docker installed and no terminal open.
+*What Electron did for web frontends, Nebula does for backends.* Electron let you
+ship the web app you already wrote as a desktop app. Nebula lets you ship the
+*server* you already wrote — the same containers, the same database, the same
+compose file — inside an app that runs on a machine with no Docker installed and
+no terminal open.
 
 It boots a Linux virtual machine on your platform's native hypervisor
 (Virtualization.framework, KVM, or Hyper-V — no WSL2) and makes what runs inside
