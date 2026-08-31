@@ -26,8 +26,6 @@ one, so it is two things:
 | Ship a container engine inside an app I distribute | [**Embed it**](#embed-it) ↓ |
 | Run containers and Kubernetes on my own machine | [**Use it**](#use-it) ↓ |
 
-These are genuinely different products sharing a host. Read one.
-
 ## How it compares
 
 | | Embed in your app | Platforms | `docker` + `kubectl` API |
