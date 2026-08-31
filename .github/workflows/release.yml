@@ -40,16 +40,43 @@ jobs:
       - name: Tauri CLI
         run: cargo install tauri-cli --locked
 
-      - name: Fetch latest guest images (built by guest-images.yml)
+      - name: Fetch the guest images for this ref (built by guest-images.yml)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          run_id=$(gh run list --workflow guest-images.yml --status success --limit 1 \
-                     --json databaseId -q '.[0].databaseId')
+          # The guest images built for *this* ref, waiting if they are still
+          # building -- not "the latest successful run". Same race the embed
+          # kits had: this workflow and guest-images.yml are triggered by the
+          # same tag and run concurrently, so "latest successful" is whatever
+          # happened to finish first. The macOS kit below is packaged from the
+          # rootfs unpacked here, and slimd lives inside that rootfs, so losing
+          # the race ships an engine fix that is not in the engine it ships.
+          ref="${GITHUB_REF_NAME:-}"
+          run_id=""
+          if [ -n "$ref" ]; then
+            for _ in $(seq 1 80); do
+              run_id=$(gh run list --workflow guest-images.yml --branch "$ref" \
+                         --status success --limit 1 --json databaseId -q '.[0].databaseId')
+              [ -n "$run_id" ] && break
+              pending=$(gh run list --workflow guest-images.yml --branch "$ref" \
+                          --json status -q '[.[]|select(.status!="completed")]|length')
+              if [ "${pending:-0}" = "0" ]; then break; fi
+              echo "guest images for $ref are still building; waiting..."
+              sleep 30
+            done
+          fi
+          # A manual run on a ref that never built its own images falls back to
+          # the newest available -- the old behaviour, which is fine when
+          # nothing is racing it.
+          if [ -z "$run_id" ]; then
+            run_id=$(gh run list --workflow guest-images.yml --status success --limit 1 \
+                       --json databaseId -q '.[0].databaseId')
+          fi
           if [ -z "$run_id" ]; then
             echo "::error::no successful guest-images run — dispatch that workflow first"
             exit 1
           fi
+          echo "using guest-images run $run_id"
           mkdir -p dist vessel/out
           gh run download "$run_id" --name guest-images-arm64 --dir dist
           # Unpacks every flavor the artifact carries, verifying checksums.
