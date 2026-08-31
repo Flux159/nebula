@@ -6,8 +6,8 @@
 > fixes. Upstream is https://github.com/containers/libkrun.
 >
 > libkrun is licensed under the Apache License 2.0 — see `LICENSE` in this
-> directory. The changes are described in `/NOTICE` at the root of the Nebula
-> repository. Nebula's own source is MIT; this directory is not.
+> directory. The changes are described in `/THIRD-PARTY-LICENSES.md` at the root
+> of the Nebula repository. Nebula's own source is MIT; this directory is not.
 >
 > Report issues with these changes to Nebula, not to the libkrun maintainers.
 

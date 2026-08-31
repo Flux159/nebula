@@ -122,16 +122,16 @@ EOF
 # in the kit rather than leaving each embedder to discover the obligation.
 mkdir -p "$OUT/licenses"
 # The script cd's to the repo root at the top, so these are root-relative.
-cp NOTICE "$OUT/licenses/NOTICE"
-cp third_party/libkrun/LICENSE "$OUT/licenses/LICENSE.libkrun"
+cp THIRD-PARTY-LICENSES.md "$OUT/licenses/"
 cp LICENSE "$OUT/licenses/LICENSE.nebula"
 
 cat > "$OUT/EMBED.md" <<'EOF'
 # Embedding Nebula — quick integration
 
-0. Ship `licenses/` with whatever you distribute. lib/ contains a modified
-   Apache-2.0 fork of libkrun; that licence and its statement of changes have
-   to travel with the binary.
+0. Ship `licenses/` with whatever you distribute. lib/ carries four
+   third-party libraries -- libkrun (a modified Apache-2.0 fork), MoltenVK
+   (Apache-2.0), virglrenderer and libepoxy (MIT). Their licences require the
+   notices to travel with the binaries; licenses/ is all of them in one file.
 
 1. Ship `bin/`, `lib/`, `images/` inside your app (Tauri: sidecars +
    resources). Keep `lib/` next to `bin/` — nebula finds `../lib/libkrun.dylib`

@@ -135,8 +135,7 @@ jobs:
           # Apache-2.0 fork of libkrun, and an embedder redistributes it
           # inside their own app. Mirrors scripts/embed-kit.sh on macOS.
           mkdir -p "$OUT/licenses"
-          cp NOTICE "$OUT/licenses/NOTICE"
-          cp third_party/libkrun/LICENSE "$OUT/licenses/LICENSE.libkrun"
+          cp THIRD-PARTY-LICENSES.md "$OUT/licenses/"
           cp LICENSE "$OUT/licenses/LICENSE.nebula"
 
           cat > "$OUT/EMBED.md" <<'EOF'

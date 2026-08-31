@@ -254,8 +254,8 @@ if you are embedding.
 
 Nebula is MIT — see [LICENSE](LICENSE).
 
-`third_party/libkrun` is a modified fork of
-[containers/libkrun](https://github.com/containers/libkrun), which is Apache-2.0
-and stays Apache-2.0. What was changed is recorded in [NOTICE](NOTICE); keep
-that file and `third_party/libkrun/LICENSE` with any copy, including binaries
-that link the built library.
+It vendors and redistributes four components that keep their own licences —
+libkrun (a modified Apache-2.0 fork), MoltenVK (Apache-2.0), virglrenderer and
+libepoxy (MIT). Every notice they require is collected in
+[THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md); ship that file with any copy,
+including binaries that link them.
