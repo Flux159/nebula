@@ -15,15 +15,15 @@ Facts below were checked against each project's own docs and license terms in
 July 2026 — sources are linked in the per-tool sections. If something has
 changed, [file an issue](https://github.com/Flux159/nebula/issues).
 
-| | **Nebula** | **smolvm** | **Docker Desktop** | **OrbStack** | **Rancher Desktop** | **Colima** | **Podman Desktop** |
-|---|---|---|---|---|---|---|---|
-| **Platforms** | macOS, Linux, Windows (Hyper-V/WHP, no WSL2) | macOS, Linux, Windows (WHP) | macOS, Linux, Windows | macOS only | macOS, Linux, Windows (WSL2) | macOS, Linux | macOS, Linux, Windows (WSL2) |
-| **Embeddable in your app** | Yes — redistributable engine, REST API, TS/Python SDKs | Yes — SDK, but microVMs only (no container engine) | No — license forbids redistribution | No — closed source, per-seat commercial license | No — end-user Electron app | No — CLI atop the Lima toolchain | No — end-user Electron app |
-| **Size to embed** | **~32 MB** (slim engine + 3 CLIs) | ~30 MB release artifact | n/a | n/a | n/a | n/a | n/a |
-| **Isolation model** | Shared Vessel VM for containers/k8s **+** per-workload libkrun microVMs (~250 ms) | libkrun microVM per workload (&lt;200 ms) | Containers share one Linux VM | Containers share one Linux VM | Containers share one VM (Lima / WSL2) | Containers share one VM (Lima) | Containers share podman-machine VM(s) |
-| **Docker-API engine** | Yes — unmodified `docker` CLI works | No — boots OCI images as VMs; image builds delegated to your tooling | Yes | Yes | Yes (dockerd or containerd) | Yes | Podman API (Docker-compatible socket) |
-| **Kubernetes** | k3s (full) / apiserver-lite (slim) | No | Single-node, built in | Single-node, built in | k3s, built in | Optional k3s flag | Via extensions (kind/minikube) |
-| **License / cost** | MIT, free | Apache-2.0, free | Proprietary; paid if ≥250 employees **or** ≥$10M revenue ($9–24/user/mo) | Proprietary; paid for any commercial use ($8/user/mo) | Apache-2.0, free | MIT, free | Apache-2.0, free |
+| | **Nebula** | **smolvm** | **Docker Desktop** | **OrbStack** | **Rancher Desktop** | **Colima** |
+|---|---|---|---|---|---|---|
+| **Platforms** | macOS, Linux, Windows (Hyper-V/WHP, no WSL2) | macOS, Linux, Windows (WHP) | macOS, Linux, Windows | macOS only | macOS, Linux, Windows (WSL2) | macOS, Linux |
+| **Embeddable in your app** | Yes — redistributable engine, REST API, TS/Python SDKs | Yes — SDK, but microVMs only (no container engine) | No — license forbids redistribution | No — closed source, per-seat commercial license | No — end-user Electron app | No — CLI atop the Lima toolchain |
+| **Size to embed** | **~32 MB** (slim engine + 3 CLIs) | ~30 MB release artifact | n/a | n/a | n/a | n/a |
+| **Isolation model** | Shared Vessel VM for containers/k8s **+** per-workload libkrun microVMs (~250 ms) | libkrun microVM per workload (&lt;200 ms) | Containers share one Linux VM | Containers share one Linux VM | Containers share one VM (Lima / WSL2) | Containers share one VM (Lima) |
+| **Docker-API engine** | Yes — unmodified `docker` CLI works | No — boots OCI images as VMs; image builds delegated to your tooling | Yes | Yes | Yes (dockerd or containerd) | Yes |
+| **Kubernetes** | k3s (full) / apiserver-lite (slim) | No | Single-node, built in | Single-node, built in | k3s, built in | Optional k3s flag |
+| **License / cost** | MIT, free | Apache-2.0, free | Proprietary; paid if ≥250 employees **or** ≥$10M revenue ($9–24/user/mo) | Proprietary; paid for any commercial use ($8/user/mo) | Apache-2.0, free | MIT, free |
 
 "Embeddable" here means: can another application legally redistribute it and
 drive it programmatically as a component, without asking the user to install
@@ -78,18 +78,6 @@ directly.
 
 **Pick it instead** if you want a zero-cost, open-source Docker Desktop
 replacement for interactive developer use and WSL2 is acceptable on Windows.
-
-### Podman Desktop
-
-Apache-2.0, cross-platform, and daemonless on Linux; on macOS and Windows it
-manages `podman machine` VMs (WSL2 on Windows). Kubernetes arrives via
-extensions (kind, minikube) rather than built in. Like Rancher Desktop it's an
-[Electron GUI for developers](https://github.com/podman-desktop/podman-desktop),
-not an embeddable engine — the moving parts underneath (podman, gvproxy, a VM
-provider) are a toolchain to install, not a component to bundle.
-
-**Pick it instead** if you're standardized on Podman (e.g. Red Hat shops) or
-want rootless containers on Linux with a GUI.
 
 ### Colima
 
