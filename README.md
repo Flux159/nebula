@@ -14,14 +14,15 @@ look local: `docker` and `kubectl` work unchanged, published ports appear on
 **0.6 seconds** and gives idle memory back to the host, so a 32 GiB engine sits
 at roughly 1 GiB when nothing is running.
 
-That embeddable engine is also a good everyday one, so Nebula is two things:
+Embedding is what Nebula is built for. The same engine is also a good everyday
+one, so it is two things:
 
 ## Which do you want?
 
 | I want to… | Go to |
 |---|---|
-| Run containers and Kubernetes on my own machine | [**Use it**](#use-it) ↓ |
 | Ship a container engine inside an app I distribute | [**Embed it**](#embed-it) ↓ |
+| Run containers and Kubernetes on my own machine | [**Use it**](#use-it) ↓ |
 
 These are genuinely different products sharing a host. Read one.
 
@@ -46,6 +47,63 @@ machines; Nebula gives you a docker socket and a Kubernetes apiserver, so the
 compose file, the client library and the `kubectl` invocation you already have
 keep working unchanged. That compatibility layer is most of the work, and it is
 the reason your existing server code ports without being rewritten.
+
+---
+
+# Embed it
+
+Shipping an app that needs to run containers on a machine you do not control —
+where "install Docker Desktop first" is not an acceptable first-run experience.
+
+For this, use **[Nebula-slim](slim/README.md)**: a clean-room Rust
+reimplementation of a useful container + Kubernetes subset, built to be embedded
+rather than installed.
+
+| | Nebula-slim | Nebula (full) |
+|---|---|---|
+| Engine | `slimd` — Rust | real dockerd/containerd + k3s |
+| Embed footprint | **~32 MB** | ~140 MB+ (the Go stack) |
+| Kubernetes | apiserver-lite + controller bridge | genuine k3s, whole ecosystem |
+| Best for | **embedding**, size and RAM budgets, CI | you need real k8s: operators, admission, RBAC |
+
+Slim has no Go runtime, and its host CLIs are pure Rust that cross-compile to
+Windows **without WSL2** — which is what makes one codebase cover three
+platforms.
+
+## Integrate
+
+Each release publishes a ready-made kit per host triple —
+`nebula-slim-embed-<triple>.tar.gz`, carrying the binaries and the guest
+`images/`. Contents differ by platform — macOS includes the slim CLIs, Linux and
+Windows include `lib/` with the libkrun build — so unpack the kit and take what
+is in it rather than assuming a fixed layout. Ship those inside your app, then:
+
+```bash
+export NEBULA_HOME="$HOME/Library/Application Support/YourApp/nebula"
+bin/nebula install-image --kernel images/kernel-Image.gz --rootfs images/rootfs.img.gz
+bin/nebula up
+```
+
+and talk to it however you already talk to Docker:
+
+```
+docker   unix://$NEBULA_HOME/run/docker.sock     (any docker client library)
+REST     http://127.0.0.1:<api_port>/v1alpha1/…  (SDKs in sdk/typescript, sdk/python)
+k8s      KUBECONFIG=$NEBULA_HOME/kubeconfig
+```
+
+`NEBULA_HOME` is what keeps your embedded engine separate from a developer's own
+Nebula install, so neither one's `down` stops the other.
+
+Full guide: **[docs/embedding.md](docs/embedding.md)**. What slim does and does
+not implement: **[slim/README.md](slim/README.md)**.
+
+## Who ships on it
+
+**[Ragnarok Offline](https://github.com/Flux159/ragnarokoffline.app)** — a game
+server, database and client in one double-clickable app, on all three platforms,
+with no Docker on the user's machine. rAthena and MariaDB run unmodified in
+containers, exactly as they would on a Linux server.
 
 ---
 
@@ -118,68 +176,6 @@ environment overrides and change nothing.
 - **Snapshots that include running memory.** `nebula vessels snapshot` captures
   disks *and* live machine state without stopping the VM (~360 ms), and
   `vessels branch` fans out clones that each resume mid-execution.
-
----
-
-# Embed it
-
-Shipping an app that needs to run containers on a machine you do not control —
-where "install Docker Desktop first" is not an acceptable first-run experience.
-
-For this, use **[Nebula-slim](slim/README.md)**: a clean-room Rust
-reimplementation of a useful container + Kubernetes subset, built to be embedded
-rather than installed.
-
-| | Nebula-slim | Nebula (full) |
-|---|---|---|
-| Engine | `slimd` — Rust | real dockerd/containerd + k3s |
-| Embed footprint | **~32 MB** | ~140 MB+ (the Go stack) |
-| Kubernetes | apiserver-lite + controller bridge | genuine k3s, whole ecosystem |
-| Best for | **embedding**, size and RAM budgets, CI | you need real k8s: operators, admission, RBAC |
-
-Slim has no Go runtime, and its host CLIs are pure Rust that cross-compile to
-Windows **without WSL2** — which is what makes one codebase cover three
-platforms.
-
-## Integrate
-
-Each release publishes a ready-made kit per host triple —
-`nebula-slim-embed-<triple>.tar.gz`, carrying the binaries and the guest
-`images/`. Contents differ by platform — macOS includes the slim CLIs, Linux and
-Windows include `lib/` with the libkrun build — so unpack the kit and take what
-is in it rather than assuming a fixed layout. Ship those inside your app, then:
-
-```bash
-export NEBULA_HOME="$HOME/Library/Application Support/YourApp/nebula"
-bin/nebula install-image --kernel images/kernel-Image.gz --rootfs images/rootfs.img.gz
-bin/nebula up
-```
-
-and talk to it however you already talk to Docker:
-
-```
-docker   unix://$NEBULA_HOME/run/docker.sock     (any docker client library)
-REST     http://127.0.0.1:<api_port>/v1alpha1/…  (SDKs in sdk/typescript, sdk/python)
-k8s      KUBECONFIG=$NEBULA_HOME/kubeconfig
-```
-
-`NEBULA_HOME` is what keeps your embedded engine separate from a developer's own
-Nebula install, so neither one's `down` stops the other.
-
-Full guide: **[docs/embedding.md](docs/embedding.md)**. What slim does and does
-not implement: **[slim/README.md](slim/README.md)**.
-
-## Who ships on it
-
-**[Ragnarok Offline](https://github.com/Flux159/ragnarokoffline.app)** — a game
-server, database and client in one double-clickable app, on all three platforms,
-with no Docker on the user's machine. rAthena and MariaDB run unmodified in
-containers, exactly as they would on a Linux server.
-
-It drove real fixes back into the engine. Shipping to actual hardware is how
-`docker cp` silently discarding writes, containers losing their filesystem on
-restart, Windows drive letters in bind paths, and endpoint discovery were all
-found — none of which reproduced in CI.
 
 ---
 
