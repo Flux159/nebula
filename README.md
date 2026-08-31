@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon.png" alt="Nebula" width="200">
+</p>
+
 # Nebula
 
 **Nebula is an embeddable microVM and container runtime that lets you ship fast
