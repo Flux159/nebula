@@ -55,14 +55,26 @@ Containers and Kubernetes on your own development machine.
 
 ## Install
 
-No package manager yet — grab a build from
-[Releases](https://github.com/Flux159/nebula/releases):
+**macOS / Linux**
 
-| Platform | Asset |
-|---|---|
-| macOS (Apple Silicon) | `Nebula_*_aarch64.dmg` — signed, notarized |
-| Linux (x86_64 / arm64) | `nebula-<version>-linux-<arch>.tar.gz` |
-| Windows (x86_64) | `nebula-<version>-windows-x86_64.zip` |
+```bash
+curl -fsSL https://flux159.github.io/nebula/install.sh | bash
+```
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://flux159.github.io/nebula/install.ps1 | iex
+```
+
+It detects your platform, installs the latest release — `Nebula.app` on macOS,
+the engine under `~/.nebula` on Linux and Windows — and puts `nebula` on your
+PATH. Set `NEBULA_VERSION` to pin a release rather than take the newest.
+
+Or download a build yourself from
+[Releases](https://github.com/Flux159/nebula/releases): a `.dmg` for macOS
+(Apple Silicon, signed and notarized), `nebula-<version>-linux-<arch>.tar.gz`,
+or `nebula-<version>-windows-x86_64.zip`.
 
 The first `nebula up` downloads a guest kernel and root filesystem (~16 MB and
 ~160 MB, checksum-verified) and installs them to `~/.nebula`. You do not need

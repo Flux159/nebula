@@ -132,10 +132,33 @@ fetch() {
     return 1
 }
 
+# The DMG carries the Tauri app's own version, which is not guaranteed to be
+# the release tag: ui/ sits outside the cargo workspace, so a workspace bump
+# does not reach it. That drifted for three releases and every one of them
+# published a DMG this installer then could not find -- it asked for
+# Nebula_<tag>_aarch64.dmg and the file was named after an older version.
+# Ask the release what it actually contains instead of predicting the name.
+resolve_dmg_asset() {
+    local names=""
+    if command -v curl &> /dev/null; then
+        names=$(curl -sL "https://api.github.com/repos/$REPO/releases/tags/$TAG" \
+                | sed -nE 's/.*"name": *"(Nebula_[^"]*\.dmg)".*/\1/p')
+    fi
+    if [ -z "$names" ] && command -v gh &> /dev/null; then
+        names=$(gh release view "$TAG" --repo "$REPO" --json assets \
+                  -q '.assets[].name' 2>/dev/null | grep -E '\.dmg$' || true)
+    fi
+    ASSET=$(echo "$names" | grep -E '^Nebula_.*_aarch64\.dmg$' | head -1)
+    # Nothing came back (rate limit, private repo, no network): fall back to
+    # the name the tag implies, which is right whenever the two agree.
+    [ -n "$ASSET" ] || ASSET="Nebula_${VER}_aarch64.dmg"
+}
+
 install_macos() {
     local tmpdir=$(mktemp -d)
     local dmg="$tmpdir/nebula.dmg"
-    local asset="Nebula_${VER}_aarch64.dmg"
+    resolve_dmg_asset
+    local asset="$ASSET"
 
     info "Downloading $asset..."
     fetch "$asset" "$dmg" || error "Download failed. Check that the release exists: https://github.com/$REPO/releases/tag/$TAG"
