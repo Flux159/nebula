@@ -227,6 +227,16 @@ That recipe is for macOS. The Linux and Windows toolchains, the libkrun
 [`.github/workflows/release.yml`](.github/workflows/release.yml) — treat those
 jobs as the source of truth rather than reconstructing them by hand.
 
+To cut a release, set the version everywhere it is written down and tag:
+
+```bash
+scripts/set-version.sh 0.1.7     # root Cargo.toml, ui/src-tauri, Cargo.lock
+git commit -am "release: 0.1.7" && git tag v0.1.7 && git push --follow-tags
+```
+
+The tag triggers `guest-images.yml` and the three kit builds, which wait for
+those images rather than taking the newest run.
+
 ## Documentation
 
 - [`slim/README.md`](slim/README.md) — Nebula-slim: what it supports, and why it is the path for embedding

@@ -85,6 +85,25 @@ jobs:
           # build on a runner that has no Docker.
           scripts/unpack-guest-images.sh dist arm64
 
+      # The DMG is named from ui/src-tauri/tauri.conf.json, which sits outside
+      # the cargo workspace -- so a `release: x.y.z` bump of the workspace
+      # version never reached it, and v0.1.4 through v0.1.6 each published a
+      # DMG called Nebula_0.1.3_aarch64.dmg. Every other artifact here reads
+      # the root Cargo.toml and was correct, which is why it went unnoticed:
+      # only the installer, predicting the name from the tag, ever tripped.
+      #
+      # Stamping from the tag means the artifact cannot be named anything but
+      # the release it belongs to, whatever is committed.
+      - name: Stamp the version from the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          committed=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          tagged="${GITHUB_REF_NAME#v}"
+          if [ "$committed" != "$tagged" ]; then
+            echo "::warning::Cargo.toml says $committed but the tag is $tagged; building as $tagged. Run scripts/set-version.sh before tagging."
+          fi
+          scripts/set-version.sh "$tagged" --no-lock
+
       - name: Build Nebula.app
         run: scripts/bundle-app.sh
 
