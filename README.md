@@ -1,14 +1,20 @@
 # Nebula
 
-**A container and Kubernetes engine that runs in its own Linux VM — on macOS,
-Linux and Windows.**
+**What Electron did for web frontends, Nebula does for backends.**
 
-Nebula boots a Linux virtual machine on your platform's native hypervisor
-(Virtualization.framework, KVM, or Hyper-V — no WSL2), runs containers and
-Kubernetes inside it, and makes them look local: `docker` and `kubectl` work
-unchanged, published ports appear on `localhost`, and DNS resolves through your
-own resolver. The VM is up in about **0.6 seconds** and gives idle memory back
-to the host, so a 32 GiB engine sits at roughly 1 GiB when nothing is running.
+Electron let you ship the web app you already wrote as a desktop app. Nebula
+lets you ship the *server* you already wrote — the same containers, the same
+database, the same compose file — inside an app that runs on a machine with no
+Docker installed and no terminal open.
+
+It boots a Linux virtual machine on your platform's native hypervisor
+(Virtualization.framework, KVM, or Hyper-V — no WSL2) and makes what runs inside
+look local: `docker` and `kubectl` work unchanged, published ports appear on
+`localhost`, and DNS resolves through your own resolver. The VM is up in about
+**0.6 seconds** and gives idle memory back to the host, so a 32 GiB engine sits
+at roughly 1 GiB when nothing is running.
+
+That embeddable engine is also a good everyday one, so Nebula is two things:
 
 ## Which do you want?
 
@@ -19,12 +25,33 @@ to the host, so a 32 GiB engine sits at roughly 1 GiB when nothing is running.
 
 These are genuinely different products sharing a host. Read one.
 
+## How it compares
+
+| | Embed in your app | Platforms | `docker` + `kubectl` API |
+|---|---|---|---|
+| **Nebula** | **yes** — ~32 MB kit, no Go runtime | macOS, Linux, Windows (no WSL2) | both, out of the box |
+| smolvm | yes — libkrun microVMs | macOS, Linux, Windows | no — boots OCI images, but no docker/kubectl API |
+| Docker Desktop / Rancher Desktop | no — an app your users install | macOS, Linux, Windows | both |
+| OrbStack | no — proprietary, installed | macOS only | both |
+| Colima / Lima | no — a developer's CLI | macOS, Linux | docker; k8s via extras |
+
+Docker Desktop, OrbStack and Colima are good at what they are for: being
+installed on a developer's machine. None of them is something you can put inside
+your own product and hand to someone who has never heard of a container.
+
+[smolvm](https://github.com/smol-machines/smolvm) is the closest in spirit —
+libkrun microVMs on the same three hypervisors, booting OCI images, and meant to
+be embedded. The difference is the API surface above the VM. It gives you
+machines; Nebula gives you a docker socket and a Kubernetes apiserver, so the
+compose file, the client library and the `kubectl` invocation you already have
+keep working unchanged. That compatibility layer is most of the work, and it is
+the reason your existing server code ports without being rewritten.
+
 ---
 
 # Use it
 
-Containers and Kubernetes on your development machine, in place of Docker
-Desktop, Colima or Lima.
+Containers and Kubernetes on your own development machine.
 
 ## Install
 
@@ -132,12 +159,12 @@ not implement: **[slim/README.md](slim/README.md)**.
 
 ## Who ships on it
 
-- **[Ragnarok Offline](https://github.com/Flux159/ragnarokoffline.app)** — a game
-  server, database and client in one double-clickable app, on all three
-  platforms, with no Docker on the user's machine.
-- **Galaxy** — a local-first AI agent workplace.
+**[Ragnarok Offline](https://github.com/Flux159/ragnarokoffline.app)** — a game
+server, database and client in one double-clickable app, on all three platforms,
+with no Docker on the user's machine. rAthena and MariaDB run unmodified in
+containers, exactly as they would on a Linux server.
 
-Both drove real fixes back into the engine. Shipping to actual hardware is how
+It drove real fixes back into the engine. Shipping to actual hardware is how
 `docker cp` silently discarding writes, containers losing their filesystem on
 restart, Windows drive letters in bind paths, and endpoint discovery were all
 found — none of which reproduced in CI.
