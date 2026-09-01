@@ -219,8 +219,27 @@ install_linux() {
 
     INSTALLED_CLI="$BIN_DIR/nebula"
 
+    # Two different failures with two different fixes. Checking only for the
+    # device's existence let the second one through: the install succeeded, and
+    # `nebula up` failed later with a bare permission error and no hint.
+    #
+    # Nebula itself never needs privileges -- /dev/kvm is a device node, and
+    # every KVM operation is an ioctl on that fd. What it needs is for you to be
+    # able to open it, which on most distros means the kvm group. That is a
+    # one-time admin action, after which nothing here runs privileged.
     if [ ! -e /dev/kvm ]; then
-        warn "/dev/kvm not found — Nebula on Linux needs KVM. Enable virtualization in your BIOS/hypervisor."
+        warn "/dev/kvm not found — Nebula on Linux needs KVM."
+        echo "  Enable virtualization (VT-x / AMD-V) in your BIOS, or in your"
+        echo "  hypervisor's settings if this machine is itself a VM."
+    elif [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+        warn "/dev/kvm exists but $(id -un) cannot open it — 'nebula up' will fail."
+        echo "  Nebula does not need root; it needs permission on that device."
+        echo "  Add yourself to the group that owns it, then log out and back in:"
+        echo ""
+        echo -e "    ${BLUE}sudo usermod -aG $(stat -c '%G' /dev/kvm 2>/dev/null || echo kvm) $(id -un)${NC}"
+        echo ""
+        echo "  Log out and back in for the group to take effect ('newgrp' only"
+        echo "  affects the shell you run it in)."
     fi
 }
 

@@ -155,6 +155,34 @@ function Install-Nebula {
         Write-Info "PATH already configured"
     }
 
+    # The Linux installer warns when /dev/kvm is missing or unopenable; this is
+    # the Windows equivalent. Nebula drives the Windows Hypervisor Platform, and
+    # if that feature is off the install succeeds and `nebula up` fails later
+    # with nothing pointing at the cause.
+    #
+    # Enabling it is the one genuinely privileged step on any platform -- it is a
+    # Windows feature change and a reboot. Nebula itself runs unprivileged after.
+    #
+    # Deliberately never fatal: the check is best-effort, and a false negative
+    # must not block an install that would have worked.
+    try {
+        $hv = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).HypervisorPresent
+        if (-not $hv) {
+            Write-Warn "No hypervisor is running - 'nebula up' will fail until one is."
+            Write-Host "  Nebula needs the Windows Hypervisor Platform. In an" -ForegroundColor White
+            Write-Host "  Administrator PowerShell:" -ForegroundColor White
+            Write-Host ""
+            Write-Host "    dism.exe /Online /Enable-Feature /FeatureName:HypervisorPlatform /All" -ForegroundColor Blue
+            Write-Host ""
+            Write-Host "  Then reboot. If this machine is itself a VM, nested" -ForegroundColor White
+            Write-Host "  virtualization also has to be enabled by its host." -ForegroundColor White
+            Write-Host ""
+        }
+    } catch {
+        # Older Windows, restricted WinRM, or CIM unavailable. Not worth a
+        # warning of its own -- it says nothing about whether WHP is on.
+    }
+
     # Verify
     $nebulaExe = Join-Path $InstallDir "nebula.exe"
     if (Test-Path $nebulaExe) {
