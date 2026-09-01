@@ -8,7 +8,7 @@
 # kit carries these three (pure Rust, ~2.5 MB for all of them together).
 #
 # One definition, used by all three kit assemblers: scripts/embed-kit.sh
-# (macOS), embed-kit-linux.yml and embed-kit-windows.yml. They used to
+# (macOS) and the kit-linux / kit-windows jobs. They used to
 # disagree — the macOS kit shipped the CLIs and the other two did not, so
 # embedders on Linux and Windows silently needed a second download from
 # nebula-slim-clis-*. Keep this the only place that knows the list.

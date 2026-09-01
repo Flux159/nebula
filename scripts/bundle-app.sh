@@ -25,7 +25,7 @@ fi
 scripts/sign-dev.sh target/release/nebula target/release/nebulad
 
 echo "==> guest images"
-# dist/ artifacts are arch-suffixed (package-images.sh / guest-images.yml);
+# dist/ artifacts are arch-suffixed (package-images.sh / the guest-images job);
 # the in-app resource keeps the plain name (the .app is arm64-only).
 case "$(uname -m)" in
     arm64|aarch64) IMG_ARCH=arm64 ;;

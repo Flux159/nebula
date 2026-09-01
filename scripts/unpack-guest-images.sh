@@ -1,10 +1,10 @@
 #!/bin/bash
-# Unpack a guest-images.yml artifact into vessel/out/, where bundle-app.sh and
+# Unpack a the guest-images job artifact into vessel/out/, where bundle-app.sh and
 # embed-kit.sh look for guest images.
 #
 #   scripts/unpack-guest-images.sh <artifact-dir> [arch]
 #
-# Naming contract with guest-images.yml / package-images.sh:
+# Naming contract with the guest-images job / package-images.sh:
 #   kernel-Image-<arch>.gz          -> vessel/out/Image
 #   rootfs-<arch>.img.gz            -> vessel/out/rootfs.img
 #   rootfs-<flavor>-<arch>.img.gz   -> vessel/out/rootfs-<flavor>.img
@@ -13,7 +13,7 @@
 # which is the point: release.yml used to extract the kernel and the full
 # rootfs by hand and silently omitted the slim one, so `embed-kit.sh --flavor
 # slim` fell through to a source build and died on a runner with no Docker.
-# Adding a flavor to guest-images.yml must not require editing every consumer.
+# Adding a flavor to the guest-images job must not require editing every consumer.
 set -euo pipefail
 
 DIR="${1:-}"

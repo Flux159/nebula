@@ -234,8 +234,8 @@ scripts/set-version.sh 0.1.7     # root Cargo.toml, ui/src-tauri, Cargo.lock
 git commit -am "release: 0.1.7" && git tag v0.1.7 && git push --follow-tags
 ```
 
-The tag triggers `guest-images.yml` and the three kit builds, which wait for
-those images rather than taking the newest run.
+The tag triggers `release.yml`, which builds the guest images first and then
+the app, the packages and the three embed kits from them.
 
 ## Documentation
 

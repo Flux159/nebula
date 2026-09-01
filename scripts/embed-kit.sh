@@ -42,14 +42,14 @@ if [ -n "$OVERLAY$SETUP" ] || [ ! -f "$IMG" ]; then
     # Custom content always forces a fresh build.
     #
     # Building needs Docker. That is fine locally and never true on a macOS CI
-    # runner, where the images are meant to arrive as guest-images.yml
+    # runner, where the images are meant to arrive as the release workflow's
     # artifacts instead — so say that here rather than letting build-rootfs.sh
     # report a bare "docker: command not found" three levels down.
     if [ -z "$OVERLAY$SETUP" ] && ! command -v docker >/dev/null 2>&1; then
         cat >&2 <<EOF
 ERROR: $IMG is missing and there is no docker to build it.
 
-  In CI: fetch it from the guest-images.yml artifact, which carries every
+  In CI: fetch it from the guest-images job's artifact, which carries every
   flavor — extract the one matching --flavor $FLAVOR. See the "Fetch latest
   guest images" step in .github/workflows/release.yml.
 
@@ -70,7 +70,7 @@ mkdir -p "$OUT/bin" "$OUT/images" "$OUT/lib"
 cp target/release/nebula target/release/nebulad "$OUT/bin/"
 # The slim engine speaks the same APIs, but an embedder has no
 # docker/kubectl/helm to talk to it with — every slim kit ships the clients.
-# Shared with embed-kit-linux.yml / embed-kit-windows.yml so the three kits
+# Shared with the kit-linux / kit-windows jobs so the three kits
 # cannot disagree about what bin/ contains.
 if [ "$FLAVOR" = "slim" ]; then
     scripts/stage-slim-clis.sh "$OUT/bin"

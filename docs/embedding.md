@@ -12,7 +12,7 @@ multi-instance story.
 |---|---|---|---|
 | `nebula` (CLI) | 2.5 MB | `cargo build --release -p nebula-cli` / our releases | yes |
 | `nebulad` (daemon) | 2.2 MB | `cargo build --release -p nebulad` / our releases | yes |
-| `kernel-Image.gz` | 16 MB | CI (`guest-images.yml`) / `vessel/build-kernel.sh` | yes |
+| `kernel-Image.gz` | 16 MB | CI (`release.yml`) / `vessel/build-kernel.sh` | yes |
 | `rootfs.img.gz` | 117 MB (`full`) / 57 MB (`docker`) / 6 MB (`minimal`) | CI / `vessel/build-rootfs.sh FLAVOR=…` | yes (pick a flavor) |
 | `lib/` (fork libkrun + virgl/epoxy/MoltenVK, relocatable) | 14 MB | in the embed kit / `scripts/package-libkrun.sh` | only for sandboxes/GPU/krun vessels — keep beside `bin/`, found automatically |
 | docker / kubectl / helm CLIs | 39/55/59 MB | `scripts/fetch-host-clis.sh` | only if your users need raw CLIs |
