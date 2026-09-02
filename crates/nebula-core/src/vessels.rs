@@ -195,9 +195,8 @@ pub fn live_pid(dir: &Path) -> Option<i32> {
 // --- file plumbing ------------------------------------------------------------
 
 pub fn clone_file(from: &Path, to: &Path) -> anyhow::Result<()> {
-    // APFS clonefile on macOS; reflink (btrfs/XFS) on Linux. Falls back to a
-    // plain copy when CoW isn't available — including Windows, which has no
-    // `cp` at all (NTFS has no reflink; sparse ranges still copy as data).
+    // APFS clonefile on macOS; reflink (btrfs/XFS) on Linux. Both are
+    // near-free and share the source's extents, holes included.
     let cloned = if cfg!(windows) {
         false
     } else {
@@ -215,28 +214,24 @@ pub fn clone_file(from: &Path, to: &Path) -> anyhow::Result<()> {
             .unwrap_or(false)
     };
     if !cloned {
-        std::fs::copy(from, to)
+        // No reflink here — NTFS has none, and `cp` is absent on Windows
+        // entirely. A dense copy would write every zero of a mostly-empty
+        // disk image, which is what made `install-image` and
+        // `vessels reset` slow enough to notice (issue #24).
+        crate::sparse::copy_sparse(from, to)
             .with_context(|| format!("clone/copy {} -> {} failed", from.display(), to.display()))?;
     }
     Ok(())
 }
 
-/// On-disk size of a snapshot state file in MiB (sparse-aware on unix —
-/// krun memory images are mostly holes).
+/// On-disk size of a snapshot state file in MiB (sparse-aware where the
+/// platform can say — krun memory images are mostly holes). Falls back to the
+/// logical size on Windows, which reports no allocation figure.
 fn physical_size_mb(path: &Path) -> u64 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        std::fs::metadata(path)
-            .map(|m| m.blocks() * 512 / (1024 * 1024))
-            .unwrap_or(0)
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::metadata(path)
-            .map(|m| m.len() / (1024 * 1024))
-            .unwrap_or(0)
-    }
+    crate::sparse::physical_bytes(path)
+        .or_else(|| std::fs::metadata(path).ok().map(|m| m.len()))
+        .unwrap_or(0)
+        / (1024 * 1024)
 }
 
 // --- vz identity helpers -------------------------------------------------------

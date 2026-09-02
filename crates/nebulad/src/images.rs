@@ -240,7 +240,8 @@ rm -rf "$BUILD"
         let src = stage.join(f);
         let dst = dir.join(f);
         if std::fs::rename(&src, &dst).is_err() {
-            std::fs::copy(&src, &dst)?;
+            // Cross-volume fallback: sparse, these are disk images.
+            nebula_core::sparse::copy_sparse(&src, &dst)?;
             let _ = std::fs::remove_file(&src);
         }
     }

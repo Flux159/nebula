@@ -313,12 +313,14 @@ rm -rf "$BUILD"
             r.stderr
         );
     }
-    // Move (or copy across volumes) into the vessel dir.
+    // Move (or copy across volumes) into the vessel dir. The copy is the
+    // rare path — a staging dir on another volume — but these are disk
+    // images, so it goes through the sparse writer like every other one.
     for f in ["rootfs.img", "data.img"] {
         let src = stage_host.join(f);
         let dst = dir.join(f);
         if std::fs::rename(&src, &dst).is_err() {
-            std::fs::copy(&src, &dst)?;
+            nebula_core::sparse::copy_sparse(&src, &dst)?;
             let _ = std::fs::remove_file(&src);
         }
     }
@@ -367,7 +369,7 @@ fn create_data_disk(dir: &std::path::Path, data_gib: u64) -> anyhow::Result<()> 
         if let Ok(true) = formatted {
             let dst = dir.join("data.img");
             if std::fs::rename(stage.join("data.img"), &dst).is_err() {
-                std::fs::copy(stage.join("data.img"), &dst)?;
+                nebula_core::sparse::copy_sparse(&stage.join("data.img"), &dst)?;
             }
             let _ = std::fs::remove_dir_all(&stage);
             return Ok(());
@@ -404,7 +406,7 @@ pub fn convert_image(image: &str, out: &std::path::Path, rootfs_mb: u64) -> anyh
     }
     let _ = std::fs::remove_file(out);
     if std::fs::rename(tmp.join("rootfs.img"), out).is_err() {
-        std::fs::copy(tmp.join("rootfs.img"), out)?;
+        nebula_core::sparse::copy_sparse(&tmp.join("rootfs.img"), out)?;
     }
     let _ = std::fs::remove_dir_all(&tmp);
     let mb = std::fs::metadata(out)?.len() / (1024 * 1024);

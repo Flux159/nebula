@@ -14,6 +14,7 @@ pub mod home;
 pub mod initramfs;
 pub mod ipc;
 pub mod proto;
+pub mod sparse;
 pub mod spec;
 pub mod vessels;
 
