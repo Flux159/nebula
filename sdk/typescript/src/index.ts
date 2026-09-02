@@ -31,6 +31,16 @@ export interface MemStats {
   psi_full_avg10?: number | null;
 }
 
+/** One host listener the daemon owns: a service (`api`, `dns`) or a
+ * published container port (`port 8080`). An entry with `ok: false` is why
+ * an otherwise healthy engine serves nothing on that address. */
+export interface PortBinding {
+  service: string;
+  addr: string;
+  ok: boolean;
+  error?: string | null;
+}
+
 export interface EngineStatus {
   apiVersion: string;
   vmState: string;
@@ -39,6 +49,8 @@ export interface EngineStatus {
   agent: AgentHealth | null;
   memory: MemStats | null;
   uptimeSecs: number;
+  /** Absent on daemons older than 0.1.9. */
+  ports?: PortBinding[];
 }
 
 export interface EngineStats {

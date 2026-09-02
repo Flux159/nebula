@@ -234,6 +234,37 @@ Everything that was port- or name-shaped is per-instance config:
   (`dev.nebula.nebulad.<hash>`) and the agent carries `NEBULA_HOME` in its
   environment — each embedded product can independently start at login.
 
+### When two instances want the same port
+
+Isolation is per-`NEBULA_HOME`, but the host's port space is shared: two
+instances configured with the same `api_port`/`dns_port`/`k8s_port` are
+fighting over the same three listeners. nebulad checks them **before it boots
+the VM** and, by default, refuses to start — naming the port and the
+`NEBULA_HOME` of the instance holding it:
+
+```
+$ nebula up
+Error: nebulad failed to start:
+
+tcp 7461 (api_port) is already in use by nebulad pid 41234
+  (NEBULA_HOME=/Users/x/Library/Application Support/YourApp/nebula)
+...
+```
+
+A clear failure at `up` is cheaper than the alternative it replaces: an
+instance that bound what it could, warned about the rest, reported itself
+healthy, and broke a `docker build` ten minutes later with an unrelated-looking
+gRPC error.
+
+If your embedder would rather come up than match a number, set
+`port_conflict = "auto"` (or `NEBULA_PORT_CONFLICT=auto`) and nebulad binds the
+next free port instead, logging which. Read the effective values back from
+`/v1alpha1/status` — never assume the configured ones.
+
+Sharing a `dns_zone` across instances is legal but ambiguous: container names
+resolve against whichever resolver answers first. nebulad warns when it finds
+a peer instance using the same zone.
+
 ## 5. Worked example: the agent-orchestrator shape
 
 A thin local webapp (its own UI, SQLite state) scheduling agents on the

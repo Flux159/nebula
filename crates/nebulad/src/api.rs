@@ -60,17 +60,16 @@ pub fn start(
     balloon: Arc<BalloonState>,
     docker_sock: PathBuf,
     kubeconfig: PathBuf,
-    host: Option<String>,
+    // Already resolved (config + NEBULA_API_HOST) and preflighted by
+    // `ports::PortPlan`; re-deriving it here is how the check and the bind
+    // drift apart.
+    host: String,
     port: u16,
 ) {
     if port == 0 {
         tracing::info!("REST API disabled (api_port = 0)");
         return;
     }
-    let host = std::env::var("NEBULA_API_HOST")
-        .ok()
-        .or(host)
-        .unwrap_or_else(|| "127.0.0.1".to_string());
     let token = std::env::var("NEBULA_API_TOKEN")
         .ok()
         .filter(|t| !t.is_empty());
@@ -83,6 +82,11 @@ pub fn start(
         tracing::error!(
             "REST API: refusing to bind {host} without NEBULA_API_TOKEN — \
              a non-loopback API needs bearer auth"
+        );
+        crate::ports::set_bind(
+            "api",
+            format!("{host}:{port}"),
+            Some("refused: non-loopback bind needs NEBULA_API_TOKEN".into()),
         );
         return;
     }
@@ -123,9 +127,11 @@ async fn serve(host: String, port: u16, ctx: Arc<Ctx>) {
         Ok(l) => l,
         Err(e) => {
             tracing::error!("api bind {host}:{port} failed: {e}");
+            crate::ports::set_bind("api", format!("{host}:{port}"), Some(e.to_string()));
             return;
         }
     };
+    crate::ports::set_bind("api", format!("{host}:{port}"), None);
     tracing::info!(
         "REST API on http://{host}:{port}/v1alpha1 (auth: {})",
         if ctx.token.is_some() {
@@ -263,6 +269,10 @@ async fn route(ctx: Arc<Ctx>, req: Request<Incoming>) -> Result<Resp, hyper::Err
                     "agent": agent,
                     "memory": mem,
                     "uptimeSecs": vessel.started_at.elapsed().as_secs(),
+                    // Embedders point clients at these; a listener that
+                    // failed to bind is why an otherwise healthy instance
+                    // serves nothing.
+                    "ports": crate::ports::binds(),
                 })
             })
             .await;

@@ -25,6 +25,13 @@ nebula version you embed.
 | port | `7440` | `api_port` in `~/.nebula/config.toml` (0 disables) |
 | address | `127.0.0.1` | `api_host` in config.toml, or `NEBULA_API_HOST` env |
 | auth | off (loopback) | `NEBULA_API_TOKEN` env → bearer auth |
+| port already taken | refuse to start | `port_conflict = "auto"` in config.toml, or `NEBULA_PORT_CONFLICT` env |
+
+`api_port`, `dns_port` and `k8s_port` are probed before the VM boots. By
+default a conflict is fatal and the error names the port and the other
+instance's `NEBULA_HOME`; with `port_conflict = "auto"` nebulad binds the next
+free port and logs it. Either way the **effective** ports come back from
+`GET /v1alpha1/status` — read them rather than assuming the configured values.
 
 When `NEBULA_API_TOKEN` is set, every request except `GET /healthz` must
 carry `Authorization: Bearer <token>`. **Binding a non-loopback address
@@ -40,7 +47,7 @@ curl -H "Authorization: Bearer $NEBULA_API_TOKEN" http://host:7440/v1alpha1/stat
 | method & path | does |
 |---|---|
 | `GET /healthz` | liveness — `{"ok":true}` (no auth) |
-| `GET /v1alpha1/status` | VM state, cpus/mem, agent health, guest memory |
+| `GET /v1alpha1/status` | VM state, cpus/mem, agent health, guest memory, and `ports` — every listener the daemon owns as `{service, addr, ok, error}`. An entry with `"ok": false` is why an otherwise healthy instance serves nothing on it |
 | `GET /v1alpha1/stats` | balloon target, host footprint, guest memory |
 | `POST /v1alpha1/exec` | `{"cmd":"uname","args":["-r"],"timeout_ms":30000}` → `{exit_code, stdout, stderr, timed_out}` — runs in the engine guest |
 | `POST /v1alpha1/balloon` | `{"target_mib": N}` — set the memory target |
