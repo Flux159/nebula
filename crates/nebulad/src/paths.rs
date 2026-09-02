@@ -36,6 +36,11 @@ impl Paths {
     pub fn pid_file(&self) -> PathBuf {
         self.run_dir().join("nebulad.pid")
     }
+    /// Why the last start failed, in plain text — read by `nebula up`, which
+    /// spawns the daemon detached and so cannot see its stderr.
+    pub fn startup_error(&self) -> PathBuf {
+        self.run_dir().join("startup-error.txt")
+    }
     pub fn docker_sock(&self) -> PathBuf {
         self.run_dir().join("docker.sock")
     }

@@ -134,7 +134,9 @@ pub enum DaemonRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum DaemonResponse {
-    Status(DaemonStatus),
+    /// Boxed: status is by far the largest variant, and every other response
+    /// would otherwise be padded to its size. Serialises identically.
+    Status(Box<DaemonStatus>),
     Agent {
         response: AgentResponse,
     },
@@ -162,6 +164,22 @@ pub struct DaemonStatus {
     /// this rather than assuming default ports/zone).
     #[serde(default)]
     pub net: InstanceNet,
+    /// Every host listener the daemon owns, and whether it actually bound.
+    /// A failed bind used to live only in a log line, which is how an
+    /// instance could report itself healthy while serving nothing.
+    #[serde(default)]
+    pub ports: Vec<PortBinding>,
+}
+
+/// One host listener: a fixed service (`api`, `dns`, `k8s`) or a published
+/// container port (`port 8080`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortBinding {
+    pub service: String,
+    pub addr: String,
+    pub ok: bool,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +188,14 @@ pub struct InstanceNet {
     pub k8s_port: u16,
     #[serde(default = "default_dns_zone")]
     pub dns_zone: String,
+    /// Where the REST API actually listens (0 = disabled). Reported because
+    /// `port_conflict = "auto"` can move it off the configured value.
+    #[serde(default = "default_api_host")]
+    pub api_host: String,
+    #[serde(default = "default_api_port")]
+    pub api_port: u16,
+    #[serde(default = "default_dns_port")]
+    pub dns_port: u16,
 }
 
 fn default_k8s_port() -> u16 {
@@ -178,12 +204,24 @@ fn default_k8s_port() -> u16 {
 fn default_dns_zone() -> String {
     "nebula.local".into()
 }
+fn default_api_host() -> String {
+    "127.0.0.1".into()
+}
+fn default_api_port() -> u16 {
+    7440
+}
+fn default_dns_port() -> u16 {
+    HOST_DNS_UDP_PORT
+}
 
 impl Default for InstanceNet {
     fn default() -> Self {
         Self {
             k8s_port: default_k8s_port(),
             dns_zone: default_dns_zone(),
+            api_host: default_api_host(),
+            api_port: default_api_port(),
+            dns_port: default_dns_port(),
         }
     }
 }

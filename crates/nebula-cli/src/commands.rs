@@ -27,13 +27,16 @@ pub fn up() -> anyhow::Result<()> {
         "nebulad binary not found next to nebula ({})",
         nebulad.display()
     );
-    let child = std::process::Command::new(&nebulad)
+    // The daemon leaves the reason for a failed start here; drop any stale
+    // copy so what we read back can only be this run's.
+    let startup_error = client::nebula_home()?.join("run/startup-error.txt");
+    let _ = std::fs::remove_file(&startup_error);
+
+    let mut child = std::process::Command::new(&nebulad)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
-    // Intentionally not waited on: nebulad outlives the CLI.
-    std::mem::forget(child);
 
     let t0 = Instant::now();
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -41,17 +44,43 @@ pub fn up() -> anyhow::Result<()> {
         if client::daemon_running() {
             if let Ok(DaemonResponse::Status(s)) = client::request(&DaemonRequest::Status) {
                 if s.agent.is_some() {
+                    // Intentionally not waited on: nebulad outlives the CLI.
+                    std::mem::forget(child);
                     println!(
                         "nebula up in {:?} (vm {}, agent healthy)",
                         t0.elapsed(),
                         s.vm_state
                     );
+                    for p in s.ports.iter().filter(|p| !p.ok) {
+                        println!(
+                            "  warning: {} did not bind on {}{}",
+                            p.service,
+                            p.addr,
+                            p.error
+                                .as_ref()
+                                .map(|e| format!(" ({e})"))
+                                .unwrap_or_default()
+                        );
+                    }
                     println!(
                         "next: nebula setup docker — or run `nebula quickstart` for the guide"
                     );
                     return Ok(());
                 }
             }
+        }
+        // nebulad's stderr is closed here, so a daemon that refuses to start
+        // (a port conflict, a bad config) would otherwise show up only as the
+        // 60s timeout below, pointing at a log the user then has to go read.
+        if let Ok(Some(exit)) = child.try_wait() {
+            let reason = std::fs::read_to_string(&startup_error).unwrap_or_default();
+            if !reason.trim().is_empty() {
+                bail!("nebulad failed to start:\n\n{}", reason.trim_end());
+            }
+            bail!(
+                "nebulad exited before it was ready ({exit}) — check {}",
+                client::nebula_home()?.join("logs/nebulad.log").display()
+            );
         }
         if Instant::now() > deadline {
             bail!(
@@ -102,6 +131,39 @@ pub fn status() -> anyhow::Result<()> {
                     a.agent_version, a.kernel, a.uptime_secs
                 ),
                 None => println!("  agent:    UNREACHABLE"),
+            }
+            // Which ports this instance actually owns — the question that
+            // matters when two of them are running (issue #22).
+            let api = if s.net.api_port == 0 {
+                "off".to_string()
+            } else {
+                format!("{}:{}", s.net.api_host, s.net.api_port)
+            };
+            println!(
+                "  ports:    api {} | dns udp {} | k8s {} | zone {}",
+                api, s.net.dns_port, s.net.k8s_port, s.net.dns_zone
+            );
+            let failed: Vec<_> = s.ports.iter().filter(|p| !p.ok).collect();
+            if failed.is_empty() {
+                let bound = s.ports.len();
+                if bound > 0 {
+                    println!("  listeners: {bound} bound, all healthy");
+                }
+            } else {
+                // The state that used to be invisible: healthy VM, healthy
+                // agent, and nothing listening where clients are pointed.
+                println!("  listeners: {} FAILED to bind", failed.len());
+                for p in failed {
+                    println!(
+                        "    {} on {}{}",
+                        p.service,
+                        p.addr,
+                        p.error
+                            .as_ref()
+                            .map(|e| format!(" — {e}"))
+                            .unwrap_or_default()
+                    );
+                }
             }
             let pointing = crate::contexts::pointing_at_nebula();
             if !pointing.is_empty() {
@@ -393,7 +455,7 @@ pub fn doctor() -> anyhow::Result<()> {
     if client::daemon_running() {
         let agent_ok = matches!(
             client::request(&DaemonRequest::Status),
-            Ok(DaemonResponse::Status(DaemonStatus { agent: Some(_), .. }))
+            Ok(DaemonResponse::Status(s)) if s.agent.is_some()
         );
         check(
             "guest agent healthy",

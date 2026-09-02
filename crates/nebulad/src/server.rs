@@ -11,7 +11,7 @@ use nebula_core::proto::*;
 use crate::paths::Paths;
 use crate::vessel::Vessel;
 
-pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
+pub fn serve(paths: &Paths, vessel: Vessel, plan: crate::ports::PortPlan) -> anyhow::Result<()> {
     let sock_path = paths.control_sock();
     // A live sibling answers on the socket; a stale file from a crash does
     // not. Never steal a live daemon's socket — that orphans it (and its VM)
@@ -24,8 +24,10 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
     }
     let listener = ipc::listen(&sock_path)?;
     tracing::info!(sock = %sock_path.display(), "control socket ready");
+    crate::shutdown::mark_serving();
 
     let vessel = Arc::new(vessel);
+    crate::shutdown::attach_vessel(vessel.clone());
     let shutdown = Arc::new(AtomicBool::new(false));
 
     // Engine socket proxies: host unix socket <-> guest vsock <-> guest daemon.
@@ -36,15 +38,15 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
         VSOCK_PORT_CONTAINERD,
     );
 
-    // DNS resolver + dynamic port forwarding (Phase 3).
+    // DNS resolver + dynamic port forwarding (Phase 3). Ports come from the
+    // preflighted plan rather than a fresh config read: `port_conflict =
+    // "auto"` may have moved them, and the guest was already told which DNS
+    // port to relay to.
     let cfg0 = crate::config::Config::load(&paths.config_toml()).unwrap_or_default();
     let net_cfg = crate::net::NetConfig {
-        dns_zone: cfg0
-            .dns_zone
-            .clone()
-            .unwrap_or_else(|| "nebula.local".into()),
-        dns_port: cfg0.dns_port.unwrap_or(HOST_DNS_UDP_PORT),
-        k8s_port: cfg0.k8s_port.unwrap_or(6443),
+        dns_zone: plan.dns_zone.clone(),
+        dns_port: plan.dns_port,
+        k8s_port: plan.k8s_port,
         allow_public_publish: std::env::var("NEBULA_ALLOW_PUBLIC_PUBLISH")
             .ok()
             .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
@@ -52,16 +54,19 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
             .unwrap_or(false),
     };
     let instance_net = InstanceNet {
-        k8s_port: net_cfg.k8s_port,
-        dns_zone: net_cfg.dns_zone.clone(),
+        k8s_port: plan.k8s_port,
+        dns_zone: plan.dns_zone.clone(),
+        api_host: plan.api_host.clone(),
+        api_port: plan.api_port,
+        dns_port: plan.dns_port,
     };
-    let _net = crate::net::start(vessel.clone(), paths.docker_sock(), net_cfg);
+    let net = crate::net::start(vessel.clone(), paths.docker_sock(), net_cfg);
+    crate::shutdown::attach_net(net);
 
     // Elastic memory (Phase 4).
     let balloon = crate::balloon::start(vessel.clone());
 
     // REST API for SDKs/UI/embedders (Phase 10; hyper since the HTTP-embedding work).
-    let cfg = crate::config::Config::load(&paths.config_toml()).unwrap_or_default();
     let kubeconfig = paths
         .config_toml()
         .parent()
@@ -72,8 +77,8 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
         balloon.clone(),
         paths.docker_sock(),
         kubeconfig,
-        cfg.api_host.clone(),
-        cfg.api_port.unwrap_or(crate::api::DEFAULT_API_PORT),
+        plan.api_host.clone(),
+        plan.api_port,
     );
 
     // Watchdog: if the Vessel dies unexpectedly, exit the daemon so the next
@@ -93,7 +98,7 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
                 nebula_core::backend::VmState::Failed | nebula_core::backend::VmState::Stopped
             ) {
                 tracing::error!(?st, "vessel died unexpectedly; exiting for clean restart");
-                std::process::exit(70); // EX_SOFTWARE; launchd restarts us
+                crate::shutdown::finish(crate::shutdown::Reason::VesselDied(format!("{st:?}")));
             }
         });
     }
@@ -119,8 +124,8 @@ pub fn serve(paths: &Paths, vessel: Vessel) -> anyhow::Result<()> {
         }
     }
 
-    tracing::info!("shutting down vessel");
-    vessel.stop(false)?;
+    // Reached only when the listener ends without a `down`; main turns this
+    // into a logged `listener-closed` exit.
     Ok(())
 }
 
@@ -176,8 +181,9 @@ fn handle(
                 mem,
                 uptime_secs: vessel.started_at.elapsed().as_secs(),
                 net: instance_net.clone(),
+                ports: crate::ports::binds(),
             };
-            respond(&mut writer, &DaemonResponse::Status(status))
+            respond(&mut writer, &DaemonResponse::Status(Box::new(status)))
         }
         DaemonRequest::Down { force } => {
             shutdown.store(true, Ordering::SeqCst);
@@ -188,8 +194,9 @@ fn handle(
                 },
             };
             respond(&mut writer, &resp)?;
-            // Exit the daemon once the reply is on the wire.
-            std::process::exit(0);
+            // Exit once the reply is on the wire — through the shutdown path,
+            // so the log says a `down` did this and not something else.
+            crate::shutdown::finish(crate::shutdown::Reason::Down { force });
         }
         DaemonRequest::Agent { request } => {
             let resp = match vessel.agent_request(&request) {

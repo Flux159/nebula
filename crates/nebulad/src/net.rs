@@ -188,6 +188,7 @@ fn spawn_docker_watcher(
                         *bind
                     };
                     let _ = TcpStream::connect((nudge, *port));
+                    crate::ports::clear_bind(&format!("port {port}"));
                     tracing::info!(port, "port forward removed (gone, IP moved, or rebound)");
                     false
                 }
@@ -268,9 +269,17 @@ fn spawn_port_forward(
         Ok(l) => l,
         Err(e) => {
             tracing::warn!(port, "cannot forward (bind {bind}:{port} failed: {e})");
+            // A published port nobody can reach is the other half of #22:
+            // the warning scrolls past, this shows up in `nebula status`.
+            crate::ports::set_bind(
+                format!("port {port}"),
+                format!("{bind}:{port}"),
+                Some(e.to_string()),
+            );
             return false;
         }
     };
+    crate::ports::set_bind(format!("port {port}"), format!("{bind}:{port}"), None);
     std::thread::spawn(move || {
         for conn in listener.incoming() {
             if stop.load(Ordering::SeqCst) {
@@ -378,9 +387,11 @@ fn spawn_dns_server(state: Arc<Mutex<NetState>>, zone: String, port: u16) {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!("dns bind :{port} failed: {e}");
+                crate::ports::set_bind("dns", format!("udp 0.0.0.0:{port}"), Some(e.to_string()));
                 return;
             }
         };
+        crate::ports::set_bind("dns", format!("udp 0.0.0.0:{port}"), None);
         tracing::info!("dns resolver on udp:{port} (zone {zone})");
         let mut buf = [0u8; 1500];
         loop {

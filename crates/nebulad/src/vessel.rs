@@ -18,7 +18,11 @@ pub struct Vessel {
 }
 
 impl Vessel {
-    pub fn boot(paths: &Paths, cfg: &Config) -> anyhow::Result<Self> {
+    pub fn boot(
+        paths: &Paths,
+        cfg: &Config,
+        plan: &crate::ports::PortPlan,
+    ) -> anyhow::Result<Self> {
         let eff = cfg.effective();
 
         let kernel = cfg.kernel.clone().unwrap_or_else(|| paths.kernel_image());
@@ -76,7 +80,7 @@ impl Vessel {
             boot: BootSpec::Kernel {
                 kernel,
                 initramfs: None,
-                cmdline: vessel_cmdline(cfg, &shares),
+                cmdline: vessel_cmdline(plan, &shares),
             },
             disks: vec![
                 DiskSpec {
@@ -298,7 +302,7 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-fn vessel_cmdline(cfg: &Config, shares: &[nebula_core::ShareSpec]) -> String {
+fn vessel_cmdline(plan: &crate::ports::PortPlan, shares: &[nebula_core::ShareSpec]) -> String {
     let mut cmdline = String::from(
         "console=hvc0 root=/dev/vda rw rootfstype=ext4 init=/sbin/nebula-init reboot=k panic=10",
     );
@@ -307,10 +311,11 @@ fn vessel_cmdline(cfg: &Config, shares: &[nebula_core::ShareSpec]) -> String {
         // Kernel passes unknown key=value words to init's environment.
         cmdline.push_str(&format!(" NEBULA_HOME={home}"));
     }
-    if let Some(port) = cfg.dns_port {
-        // The guest agent relays 127.0.0.1:53 to the host gateway at this port.
-        cmdline.push_str(&format!(" NEBULA_DNS_PORT={port}"));
-    }
+    // The guest agent relays 127.0.0.1:53 to the host gateway at this port.
+    // From the preflighted plan, not the raw config: with `port_conflict =
+    // "auto"` the resolver may have landed somewhere else, and a guest told
+    // the wrong port has no DNS at all.
+    cmdline.push_str(&format!(" NEBULA_DNS_PORT={}", plan.dns_port));
     // Hand the guest the tag→path map for every non-home share so vessel-init
     // can `mount -t virtiofs <tag> <path>` at the identical host path.
     let extras: Vec<String> = shares
@@ -364,7 +369,7 @@ mod tests {
                 read_only: false,
             },
         ];
-        let cl = vessel_cmdline(&Config::default(), &shares);
+        let cl = vessel_cmdline(&test_plan(), &shares);
         // home is handled via NEBULA_HOME, never re-encoded as an extra share.
         assert!(!cl.contains("home="));
         let word = cl
@@ -384,6 +389,21 @@ mod tests {
             host_path: "/Users/x".into(),
             read_only: false,
         }];
-        assert!(!vessel_cmdline(&Config::default(), &shares).contains("NEBULA_SHARES="));
+        assert!(!vessel_cmdline(&test_plan(), &shares).contains("NEBULA_SHARES="));
+    }
+
+    fn test_plan() -> crate::ports::PortPlan {
+        crate::ports::PortPlan::resolve(&Config::default())
+    }
+
+    #[test]
+    fn cmdline_carries_the_planned_dns_port() {
+        // Not cfg.dns_port: `port_conflict = "auto"` can move the resolver,
+        // and the guest must be told where it actually landed.
+        let plan = crate::ports::PortPlan {
+            dns_port: 42099,
+            ..crate::ports::PortPlan::resolve(&Config::default())
+        };
+        assert!(vessel_cmdline(&plan, &[]).contains("NEBULA_DNS_PORT=42099"));
     }
 }

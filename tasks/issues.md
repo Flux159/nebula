@@ -647,6 +647,43 @@ limitations; routine TODOs live in code.)
   checkout that no longer exists — it now builds the in-repo `slim/` workspace
   and runs all three suites.
 
+- 2026-09-01 — **Multi-instance port collisions and silent exits (#22, #23).**
+  Two instances configured with the same `api_port`/`dns_port`/`k8s_port`
+  both started; the loser bound what it could, logged `Address already in
+  use` at WARN, and served a half-working engine that `up` and `status` both
+  called healthy. The failure surfaced ten minutes later as
+  `rpc error: code = Unavailable desc = ... EOF` from a `docker build`, and
+  the daemon log — which never logged an exit for any of ~10 restarts — ruled
+  nothing out. Fixed in `nebulad`:
+  (1) **Preflight** (`ports.rs`): the three fixed ports are bind-probed before
+  the VM boots. Default is to refuse to start with the port, the holder's pid,
+  and — read off `lsof` of the holder's open `<home>/run/nebulad.sock`, since
+  a process's environment is not readable on macOS — the holder's
+  `NEBULA_HOME`, plus a copy-pasteable config block of free ports.
+  `port_conflict = "auto"` picks free ports and logs them instead.
+  (2) `nebula up` now watches the spawned child and reads
+  `run/startup-error.txt`, so a refusal is reported in ~0.5s instead of the
+  old 60s timeout pointing at a log file.
+  (3) **Bind report**: every listener (api, dns, each published port) records
+  ok/failed into `ports::binds()`, surfaced in `nebula status` and
+  `GET /v1alpha1/status`. A failed bind is no longer only a WARN nobody reads.
+  (4) **Exit reasons** (`shutdown.rs`): one `finish(Reason)` path for down,
+  signal, watchdog, fatal and listener-closed, logging reason + uptime +
+  container/vessel counts, and stamping the same into `run/instance.json`.
+  SIGTERM/SIGINT/**SIGHUP** are caught via a self-pipe (a handler cannot call
+  tracing). SIGHUP is the interesting one: `nebula up` spawns nebulad without
+  its own session, so closing the launching terminal kills it — which is a
+  plausible source of the unexplained restarts, and was previously invisible.
+  (5) A start with no exit record in `instance.json` logs
+  `previous run did not shut down cleanly` — the half that survives `kill -9`,
+  which by definition cannot log anything itself.
+  Regression coverage: `scripts/test-instances.sh` (isolated `NEBULA_HOME`s;
+  does not touch `~/.nebula`).
+  **Deliberately not done:** dynamic *published container* ports still only
+  warn on a bind failure. A user's own port 8080 being busy is not a
+  misconfiguration nebulad can refuse to start over — it is now visible in
+  `status` instead.
+
 - 2026-08-25 — dev-build.yml (manual DMG + embed kits) was broken in three
   places; two are fixed, one is open. Fixed: it fetched an artifact named
   `guest-images` and gunzipped `kernel-Image.gz`/`rootfs.img.gz`, all stale

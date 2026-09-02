@@ -1,15 +1,19 @@
 //! nebulad: owns the Vessel VM and serves the control socket.
 //!
-//! v0 lifecycle: start -> boot Vessel -> serve until `down` -> stop VM -> exit.
+//! v0 lifecycle: start -> preflight ports -> boot Vessel -> serve until `down`
+//! -> stop VM -> exit, with a logged reason on every exit path (`shutdown`).
 //! Crash recovery / auto-restart hardening lands in Phase 6.
 
 mod api;
 mod balloon;
 mod config;
 mod images;
+mod instance;
 mod net;
 mod paths;
+mod ports;
 mod server;
+mod shutdown;
 mod vessel;
 
 use clap::Parser;
@@ -125,27 +129,79 @@ fn main() -> anyhow::Result<()> {
         .with_ansi(false)
         .init();
 
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "nebulad starting");
+    // NEBULA_HOME on the starting line: with two instances on one host, the
+    // first question about any log line is which of them wrote it.
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        pid = std::process::id(),
+        home = %paths.root.display(),
+        "nebulad starting"
+    );
+
+    shutdown::init(&paths);
+    // Before this run takes the record over: how did the last one end?
+    instance::report_previous_run(&paths);
 
     // Single-instance guard.
     if let Some(pid) = read_live_pid(&paths) {
-        anyhow::bail!("nebulad already running (pid {pid})");
+        fail_startup(
+            &paths,
+            anyhow::anyhow!("nebulad already running (pid {pid})"),
+        );
     }
     std::fs::write(paths.pid_file(), std::process::id().to_string())?;
+    // Stale news from a previous failed start; `nebula up` reads this file.
+    let _ = std::fs::remove_file(paths.startup_error());
 
-    let result = run(&paths);
-    let _ = std::fs::remove_file(paths.pid_file());
-    let _ = std::fs::remove_file(paths.control_sock());
-    if let Err(e) = &result {
-        tracing::error!("nebulad exiting with error: {e:#}");
+    shutdown::install_signal_handlers();
+
+    match run(&paths) {
+        // The listener returning without a `down` is not an error, but it is
+        // not nothing either — it is one of the exits that used to be silent.
+        Ok(()) => shutdown::finish(shutdown::Reason::ListenerClosed),
+        Err(e) if shutdown::is_serving() => {
+            shutdown::finish(shutdown::Reason::Fatal(format!("{e:#}")))
+        }
+        Err(e) => fail_startup(&paths, e),
     }
-    result
+}
+
+/// A daemon that never started serving: record it, and leave the message where
+/// `nebula up` can find it. The CLI spawns nebulad detached with its stderr
+/// closed, so without this file a startup failure is a 60s timeout pointing at
+/// a log the user then has to go read.
+fn fail_startup(paths: &paths::Paths, err: anyhow::Error) -> ! {
+    let msg = format!("{err:#}");
+    tracing::error!("startup failed: {msg}");
+    let _ = std::fs::write(paths.startup_error(), format!("{msg}\n"));
+    shutdown::finish(shutdown::Reason::StartupError(msg))
 }
 
 fn run(paths: &paths::Paths) -> anyhow::Result<()> {
     let cfg = config::Config::load(&paths.config_toml())?;
-    let vessel = vessel::Vessel::boot(paths, &cfg)?;
-    server::serve(paths, vessel)
+
+    // Ports first: a conflict found here costs a clear error, and found later
+    // costs an afternoon (issue #22). Nothing has booted yet.
+    let policy = ports::ConflictPolicy::resolve(&cfg)?;
+    let plan = ports::preflight(&ports::PortPlan::resolve(&cfg), policy)?;
+    tracing::info!(
+        api = %format!("{}:{}", plan.api_host, plan.api_port),
+        dns = plan.dns_port,
+        k8s = plan.k8s_port,
+        zone = %plan.dns_zone,
+        "ports reserved"
+    );
+    instance::write_running(paths, &plan)?;
+
+    // Ports are not the only thing two instances can collide over: a shared
+    // dns_zone makes container names resolve ambiguously and nothing else
+    // complains about it (issue #22).
+    for peer in ports::peer_homes() {
+        ports::warn_shared_dns_zone(&plan, &peer);
+    }
+
+    let vessel = vessel::Vessel::boot(paths, &cfg, &plan)?;
+    server::serve(paths, vessel, plan)
 }
 
 fn read_live_pid(paths: &paths::Paths) -> Option<u32> {

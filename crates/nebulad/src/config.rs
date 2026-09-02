@@ -32,6 +32,15 @@ pub struct Config {
     /// Host port forwarding to the k3s API (default 6443). Unique per
     /// k8s-enabled instance.
     pub k8s_port: Option<u16>,
+    /// What to do when a configured port is already taken at startup:
+    /// `"fail"` (default) refuses to start and names the holder, `"auto"`
+    /// binds the next free port and logs it. NEBULA_PORT_CONFLICT overrides.
+    ///
+    /// Failing is the default because an explicit port is a promise to
+    /// whatever connects to it; an instance quietly serving somewhere else is
+    /// harder to debug than one that did not start. Embedders that would
+    /// rather come up than match a number set `"auto"`.
+    pub port_conflict: Option<String>,
     /// Honour a container's publish address instead of forcing loopback
     /// (default false). NEBULA_ALLOW_PUBLIC_PUBLISH overrides.
     ///
