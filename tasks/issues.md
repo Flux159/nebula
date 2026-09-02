@@ -647,6 +647,56 @@ limitations; routine TODOs live in code.)
   checkout that no longer exists — it now builds the in-repo `slim/` workspace
   and runs all three suites.
 
+- 2026-09-02 — **install-image wrote 3.2 GB to deliver 23 MB (#24).** The
+  shipped rootfs is 1 GiB and 98% zeros; `install_image` decompressed it into
+  `cache/image-install` and then `fs::copy`'d it twice (pristine + live disk),
+  plus the kernel twice. On Windows every byte goes through Defender's
+  real-time scanner, so an embedder's engine upgrade (Ragnarok, 0.1.7 → 0.1.8)
+  sat at "Updating the virtual machine image" for over five minutes. Fixed by
+  `nebula_core::sparse`: a zero-skipping writer used by `install_image`,
+  `maybe_gunzip` and `clone_file`, so `vessels reset` and vessel creation get
+  it too. The staging copy is gone — gzip decompresses straight to
+  `images/rootfs-pristine.img` — and `download_images` now hands the `.gz`
+  straight to `install_image` instead of expanding a 1 GiB tmp copy first.
+  Measured, same 1 GiB rootfs, all byte-identical (SHA-256) and booting:
+  ext4 1024 → 22 MiB on disk; NTFS 1024 → 22 MiB, sparse flag confirmed via
+  `fsutil sparse queryflag`. Whole `install-image` from the shipped `.gz`,
+  release builds, on the Windows box with Defender RTP on and no exclusions:
+  **3182 MiB → 94 MiB on disk, 1.2s → 0.5s**.
+  **Two measurement traps worth remembering:**
+  (a) The first cut was *slower* on Windows (6.2s vs 3.5s) despite writing
+  34x less: it decompressed to the pristine copy and then read that GiB back
+  to produce the live disk, because NTFS has no reflink to make the second
+  file free. Fixed with `write_sparse_many`, which fills both files from the
+  single decompression pass — but only where the filesystem cannot clone; on
+  APFS/btrfs/XFS a reflink is better still, since it shares extents instead
+  of writing the bytes twice.
+  (b) Even then AFTER measured slower until the benchmark was moved to
+  **release** builds. Skipping zeros means *scanning* for them, and an
+  unoptimised byte-at-a-time scan over a GiB costs seconds: the same install
+  is 8.9s debug vs 1.3s release on macOS. Benchmark what ships.
+  **Gotchas found on the way:**
+  (1) **NTFS allocates a seek's zeros** unless the handle is marked with
+  `FSCTL_SET_SPARSE` first — the one platform where a plain seek is not
+  enough, and the one where it matters most. Costs a `windows-sys` dep on
+  `Win32_System_IO` for that single ioctl.
+  (2) **APFS declines to hole small files.** A 16 MiB file with 64 KiB of data
+  reports fully allocated; 32 MiB with the same data reports 64 KiB. A
+  sparseness assertion below that threshold measures the filesystem, not the
+  writer — the unit test now probes the platform first and sizes its sample
+  at 48 MiB.
+  (3) `copy_sparse` refuses to copy a file onto itself. `fs::copy` truncates
+  the source first, and `install-image --kernel ~/.nebula/kernel/Image` has
+  eaten an installed kernel that way.
+  Coverage: 12 unit tests in `sparse.rs` (byte-identity across holes, trailing
+  zeros, short reads, overwrite-a-larger-file) run on all three platforms,
+  plus `scripts/test-image-install.sh` (macOS/Linux) and
+  `scripts/test-image-install.ps1` (Windows/NTFS) — both verify SHA-256
+  against the source, the upgrade-over-an-existing-install path, `vessels
+  reset`, and that the result boots.
+  **Not done:** `scripts/unpack-guest-images.sh` still expands dev images with
+  a shell redirect (dense). It is a repo build step, not a user path.
+
 - 2026-09-01 — **Multi-instance port collisions and silent exits (#22, #23).**
   Two instances configured with the same `api_port`/`dns_port`/`k8s_port`
   both started; the loser bound what it could, logged `Address already in

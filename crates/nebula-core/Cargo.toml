@@ -14,6 +14,14 @@ serde_json.workspace = true
 tracing.workspace = true
 libc.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# FSCTL_SET_SPARSE only: NTFS allocates a seek's zeros unless the handle is
+# marked sparse first (see src/sparse.rs).
+windows-sys = { version = "0.59", features = [
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"

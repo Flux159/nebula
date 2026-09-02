@@ -506,45 +506,117 @@ pub fn install_image(kernel: Option<PathBuf>, rootfs: Option<PathBuf>) -> anyhow
         rootfs_src.display()
     );
 
-    // Accept gzip artifacts directly (app bundles / release downloads).
-    let staging = home.join("cache/image-install");
-    let kernel_src = maybe_gunzip(&kernel_src, &staging.join("Image"))?;
-    let rootfs_src = maybe_gunzip(&rootfs_src, &staging.join("rootfs.img"))?;
+    // Straight to the destination, no staging copy, skipping the zeros.
+    //
+    // This used to decompress into `cache/image-install` and then copy twice:
+    // ~3.2 GB written to deliver 23 MB of content, because the 1 GiB rootfs is
+    // 98% zeros. On Windows every one of those bytes went through Defender's
+    // real-time scanner and an embedded app's engine upgrade took over five
+    // minutes (issue #24). Now: one write for the kernel, one sparse write for
+    // the pristine rootfs, and a clone/sparse copy to the live disk.
+    std::fs::create_dir_all(home.join("images"))?;
+    let kernel_dst = home.join("kernel/Image");
+    let pristine = home.join("images/rootfs-pristine.img");
+    let live = home.join("disks/rootfs.img");
 
-    std::fs::copy(&kernel_src, home.join("kernel/Image"))?;
+    place_image(&kernel_src, &[&kernel_dst])?;
+
     // Pristine store: the live engine disk mutates from here; resets
     // (`nebula vessels reset`) re-clone from this untouched copy.
-    std::fs::create_dir_all(home.join("images"))?;
-    std::fs::copy(&rootfs_src, home.join("images/rootfs-pristine.img"))?;
-    std::fs::copy(&rootfs_src, home.join("disks/rootfs.img"))?;
+    //
+    // Where the filesystem can reflink (APFS, btrfs/XFS) the live disk is a
+    // near-free clone of the pristine copy that also *shares* its extents, so
+    // write the pristine once and clone it. NTFS has no reflink, and reading
+    // a GiB back out to copy it is the expensive half — measured on Windows,
+    // it cost more wall-clock than the dense copy it replaced even while
+    // writing 34x less. So there, both files are filled from the single
+    // decompression pass instead.
+    let _ = std::fs::remove_file(&live);
+    let can_reflink = !cfg!(windows);
+    let rootfs_bytes = if can_reflink {
+        place_image(&rootfs_src, &[&pristine])?
+    } else {
+        place_image(&rootfs_src, &[&pristine, &live])?
+    };
+    if can_reflink {
+        nebula_core::vessels::clone_file(&pristine, &live)?;
+    }
+
     println!("installed kernel:  {}", kernel_src.display());
     println!("installed rootfs:  {}", rootfs_src.display());
+    if let Some(phys) = nebula_core::sparse::physical_bytes(&pristine) {
+        println!(
+            "  rootfs {} MiB on disk of {} MiB logical",
+            phys / (1024 * 1024),
+            rootfs_bytes / (1024 * 1024)
+        );
+    }
+    // Left behind by versions before this one, which staged a 1 GiB copy here.
+    let _ = std::fs::remove_dir_all(home.join("cache/image-install"));
     Ok(())
+}
+
+/// Put one guest image at every path in `dsts`, decompressing if the source
+/// is gzip and writing sparsely either way — one pass over the source
+/// whatever the number of destinations. Returns the logical bytes installed.
+fn place_image(src: &std::path::Path, dsts: &[&std::path::Path]) -> anyhow::Result<u64> {
+    use nebula_core::sparse;
+    let describe = || {
+        let names: Vec<String> = dsts.iter().map(|d| d.display().to_string()).collect();
+        format!("install {} -> {}", src.display(), names.join(", "))
+    };
+    if is_gzip(src)? {
+        let mut d =
+            flate2::read::GzDecoder::new(std::io::BufReader::new(std::fs::File::open(src)?));
+        sparse::write_sparse_many(&mut d, dsts).with_context(describe)
+    } else {
+        // Same self-copy guard as `copy_sparse`: `fs::copy` semantics would
+        // truncate the source first, and `--kernel ~/.nebula/kernel/Image`
+        // has eaten an installed kernel that way.
+        for dst in dsts {
+            anyhow::ensure!(
+                !same_path(src, dst),
+                "refusing to install {} onto itself",
+                src.display()
+            );
+        }
+        let mut f =
+            std::fs::File::open(src).with_context(|| format!("open {} failed", src.display()))?;
+        sparse::write_sparse_many(&mut f, dsts).with_context(describe)
+    }
+}
+
+fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn is_gzip(path: &std::path::Path) -> anyhow::Result<bool> {
+    use std::io::Read;
+    let mut magic = [0u8; 2];
+    let mut f =
+        std::fs::File::open(path).with_context(|| format!("open {} failed", path.display()))?;
+    // A file shorter than two bytes is not gzip and not our problem here.
+    if f.read_exact(&mut magic).is_err() {
+        return Ok(false);
+    }
+    Ok(magic == [0x1f, 0x8b])
 }
 
 /// Decompress `src` to `dst` when it's gzip; otherwise return `src` as-is.
-/// Pure Rust (flate2): no `gzip` binary on stock Windows.
+/// Pure Rust (flate2): no `gzip` binary on stock Windows. Sparse — guest
+/// images are mostly zeros.
 pub fn maybe_gunzip(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<PathBuf> {
-    let mut magic = [0u8; 2];
-    use std::io::Read;
-    std::fs::File::open(src)?.read_exact(&mut magic).ok();
-    if magic != [0x1f, 0x8b] {
+    if !is_gzip(src)? {
         return Ok(src.to_path_buf());
     }
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    gunzip(src, dst)?;
-    Ok(dst.to_path_buf())
-}
-
-fn gunzip(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
     let mut decoder =
         flate2::read::GzDecoder::new(std::io::BufReader::new(std::fs::File::open(src)?));
-    let mut out = std::io::BufWriter::new(std::fs::File::create(dst)?);
-    std::io::copy(&mut decoder, &mut out)
-        .map_err(|e| anyhow::anyhow!("decompress {} failed: {e}", src.display()))?;
-    Ok(())
+    nebula_core::sparse::write_sparse(&mut decoder, dst)
+        .with_context(|| format!("decompress {} failed", src.display()))?;
+    Ok(dst.to_path_buf())
 }
 
 /// Verify `files` against a `shasum -a 256`-format checksum list.
@@ -611,11 +683,9 @@ pub fn download_images() -> anyhow::Result<()> {
     // Verify before touching anything (pure Rust: no shasum on Windows).
     verify_sha256sums(&tmp, &sums)?;
 
-    let kernel = tmp.join("Image");
-    let rootfs = tmp.join("rootfs.img");
-    gunzip(&tmp.join(&kernel_gz), &kernel)?;
-    gunzip(&tmp.join(&rootfs_gz), &rootfs)?;
-    install_image(Some(kernel), Some(rootfs))?;
+    // The .gz goes straight in: install_image decompresses to the destination,
+    // so nothing expands a 1 GiB rootfs into tmp first.
+    install_image(Some(tmp.join(&kernel_gz)), Some(tmp.join(&rootfs_gz)))?;
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(())
 }

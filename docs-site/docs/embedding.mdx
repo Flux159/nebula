@@ -60,6 +60,16 @@ nebula install-image --kernel <Resources>/kernel-Image.gz --rootfs <Resources>/r
 nebula up                # ~0.5-0.6s to a healthy engine
 ```
 
+`install-image` decompresses straight to its destination and writes sparsely:
+the shipped rootfs is 1 GiB of which ~23 MB is non-zero, so it puts ~25 MB on
+disk rather than the ~3.2 GB earlier versions wrote (a staging copy plus two
+dense copies). That matters most on Windows, where every written byte goes
+through Defender's real-time scanner — an upgrade that took over five minutes
+now takes seconds. **Upgrades run the same command**: guest images change
+between releases, so ship the new `.gz` pair and re-run it. Installing over an
+existing engine is safe and leaves nothing of the old image behind; stop the
+engine first (`nebula down`), which `install-image` enforces.
+
 **Steady state:** poll `GET http://127.0.0.1:<api_port>/v1alpha1/status` (or
 the TS/Python SDK with `baseUrl`), run containers against
 `unix://$NEBULA_HOME/run/docker.sock` with any Docker client library
