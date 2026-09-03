@@ -7,6 +7,7 @@
 //! KVM (Linux) and WHP (Windows) backends slot in behind the same trait later.
 
 pub mod backend;
+pub mod detach;
 pub mod display;
 pub mod dns;
 pub mod error;
