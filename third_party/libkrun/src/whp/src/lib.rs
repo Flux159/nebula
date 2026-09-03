@@ -393,7 +393,17 @@ impl WhpVm {
         // otherwise they get lost
         let processor_features_banks = get_processor_features_banks()?;
         if processor_features_banks.BanksCount >= 2 {
-            Self::set_property(
+            // Windows 10 rejects this with E_INVALIDARG: its WHv will not take
+            // a ProcessorFeaturesBanks write with TscInvariantSupport set, and
+            // because this runs before everything else the partition never gets
+            // set up and the guest never boots -- with no output anywhere but
+            // an EINVAL from krun_start_enter.
+            //
+            // Advertising invariant TSC is an optimisation, not a requirement.
+            // Where it is refused, carry on without it: the guest picks another
+            // clocksource, which is what it would have done before this was
+            // ever set. Failing the whole VM to keep a hint is the wrong trade.
+            if let Err(e) = Self::set_property(
                 handle,
                 WHvPartitionPropertyCodeProcessorFeaturesBanks,
                 |p| {
@@ -403,7 +413,12 @@ impl WhpVm {
                         p.ProcessorFeaturesBanks.Anonymous.AsUINT64[1] |= 0x2; // TscInvariantSupport
                     }
                 },
-            )?;
+            ) {
+                log::warn!(
+                    "invariant TSC not advertised: {e}. The guest will use \
+                     another clocksource."
+                );
+            }
         }
 
         // This unlocks the MSRs you are advertising in CPUID.
