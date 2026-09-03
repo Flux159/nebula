@@ -265,6 +265,27 @@ fn get_processor_features_banks() -> Result<WHV_PROCESSOR_FEATURES_BANKS, Error>
     }
 }
 
+// CPUID.15H describes TSC frequency as ECX * EBX / EAX. Keep the synthetic
+// crystal in the range used by real x86 CPUs: Linux also uses ECX to calibrate
+// the count-mode local APIC timer.
+const CPUID_0X15_CRYSTAL_HZ: u32 = 25_000_000;
+const CPUID_0X15_DENOMINATOR: u32 = 100;
+
+fn cpuid_0x15_values(tsc_freq_hz: u64) -> Option<(u32, u32, u32)> {
+    let numerator = ((tsc_freq_hz as u128 * CPUID_0X15_DENOMINATOR as u128)
+        + CPUID_0X15_CRYSTAL_HZ as u128 / 2)
+        / CPUID_0X15_CRYSTAL_HZ as u128;
+    let numerator = u32::try_from(numerator).ok()?;
+    if numerator == 0
+        || (CPUID_0X15_CRYSTAL_HZ / 1_000)
+            .checked_mul(numerator)
+            .is_none()
+    {
+        return None;
+    }
+    Some((CPUID_0X15_DENOMINATOR, numerator, CPUID_0X15_CRYSTAL_HZ))
+}
+
 /// Parsed CPUID exit context returned by [`WhpVcpu::cpuid_exit_info`].
 #[derive(Debug, Clone)]
 pub struct CpuidExitInfo {
@@ -599,27 +620,36 @@ impl WhpVm {
         }
 
         // Standard Intel CPUID leaves (Intel's SDM Vol. 2A)
-        if tsc_freq_hz > 0 {
+        if let Some((eax_val, ebx_val, crystal_hz)) = cpuid_0x15_values(tsc_freq_hz) {
             debug!("Providing TSC frequency to guest: {} Hz", tsc_freq_hz);
 
             // CPUID 0x15 — TSC / Core Crystal Clock (Intel SDM)
             // Formula: TSC Frequency = ECX (Crystal Hz) * EBX/EAX (Ratio)
             //
-            // We use a 1 kHz crystal (ECX=1000, EAX=1) rather than a 1 Hz crystal.
-            // This prevents a 32-bit overflow in EBX for CPUs clocked above 4.29 GHz,
-            // while maintaining high precision (millisecond-level).
-            // Max representable frequency: 1000 * (2^32 - 1) ≈ 4.29 THz.
-            let crystal_khz: u32 = 1_000;
-            let ebx_val = (tsc_freq_hz / crystal_khz as u64) as u32;
+            // Do not use a tiny synthetic crystal just to make the ratio fit.
+            // With the former 1 kHz value and a HZ=250 guest, Linux derived a
+            // four-count LAPIC period and divided it by 16 before writing
+            // TMICT. The resulting zero disables the timer. Windows 10 does
+            // not expose the TSC-deadline path that masks this on Windows 11,
+            // so the guest halted before probing any virtio device.
+            //
+            // A 25 MHz crystal with a denominator of 100 retains 250 kHz
+            // precision and keeps Linux's u32 crystal_khz * numerator
+            // intermediate in range for any realistic TSC. Do not substitute
+            // WHP's InterruptClockFrequency capability here: it describes a
+            // root-partition processor property, not a CPUID core crystal,
+            // and using its 200 MHz value resets affected Windows 10 hosts.
 
             cpuid_results.push(WHV_X64_CPUID_RESULT {
                 Function: 0x15,
                 Reserved: [0; 3],
-                Eax: 1,
+                Eax: eax_val,
                 Ebx: ebx_val,
-                Ecx: crystal_khz,
+                Ecx: crystal_hz,
                 Edx: 0,
             });
+        } else if tsc_freq_hz > 0 {
+            log::warn!("TSC frequency {tsc_freq_hz} cannot be represented safely in CPUID 0x15");
         }
 
         let hr = unsafe {
@@ -1534,8 +1564,8 @@ pub fn debug_sample_vp(vm: &WhpVm, index: u32) -> String {
 }
 
 /// Debug aid: dump key xAPIC registers from a VP's interrupt-controller
-/// state blob (ID, version, spurious/SW-enable, ICR, LVT timer, and whether
-/// any ISR/IRR bits are set).
+/// state blob (ID, version, spurious/SW-enable, ICR, LVT timer, timer counts,
+/// timer divisor, and whether any ISR/IRR bits are set).
 pub fn debug_sample_apic(vm: &WhpVm, index: u32) -> String {
     let mut buf = vec![0u8; 4096];
     let mut written = 0u32;
@@ -1566,7 +1596,7 @@ pub fn debug_parse_apic(buf: &[u8]) -> String {
     };
     let bits = |base: usize| -> u32 { (0..8).map(|i| dw(base + i * 0x10).count_ones()).sum() };
     format!(
-        "len={} id={:#x} ver={:#x} tpr={:#x} svr={:#x} icr={:#x}:{:#x} lvt_timer={:#x} isr_bits={} irr_bits={}",
+        "len={} id={:#x} ver={:#x} tpr={:#x} svr={:#x} icr={:#x}:{:#x} lvt_timer={:#x} tmict={} tmcct={} tdcr={:#x} isr_bits={} irr_bits={}",
         buf.len(),
         dw(0x20),
         dw(0x30),
@@ -1575,7 +1605,44 @@ pub fn debug_parse_apic(buf: &[u8]) -> String {
         dw(0x310),
         dw(0x300),
         dw(0x320),
+        dw(0x380),
+        dw(0x390),
+        dw(0x3e0),
         bits(0x100),
         bits(0x200),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpuid_0x15_ratio_is_accurate_and_linux_safe() {
+        let measured_hz = 2_995_177_500;
+        let (denominator, numerator, crystal_hz) = cpuid_0x15_values(measured_hz).unwrap();
+
+        assert_eq!(
+            (denominator, numerator, crystal_hz),
+            (100, 11_981, 25_000_000)
+        );
+        let represented_hz = crystal_hz as u64 * numerator as u64 / denominator as u64;
+        assert!(represented_hz.abs_diff(measured_hz) <= 125_000);
+        assert!((crystal_hz / 1_000).checked_mul(numerator).is_some());
+    }
+
+    #[test]
+    fn cpuid_0x15_ratio_covers_fast_realistic_tscs() {
+        let (denominator, numerator, crystal_hz) = cpuid_0x15_values(6_000_000_000).unwrap();
+        assert_eq!(
+            (denominator, numerator, crystal_hz),
+            (100, 24_000, 25_000_000)
+        );
+    }
+
+    #[test]
+    fn cpuid_0x15_ratio_rejects_unrepresentable_values() {
+        assert!(cpuid_0x15_values(10_000).is_none());
+        assert!(cpuid_0x15_values(u64::MAX).is_none());
+    }
 }
