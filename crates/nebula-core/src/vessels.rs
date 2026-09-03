@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 
+use crate::detach;
 use crate::ipc::{self, IpcStream};
 use crate::proto::*;
 use crate::spec::{BootSpec, ConsoleSpec, DiskSpec, NetSpec, ShareSpec, VmSpec, VsockPortMap};
@@ -254,27 +255,6 @@ pub fn random_mac() -> anyhow::Result<String> {
         "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         b[0], b[1], b[2], b[3], b[4]
     ))
-}
-
-/// Strip the inherit flag from this process's stdio handles so spawned
-/// workers can't keep an ancestor's pipe alive past our exit.
-#[cfg(windows)]
-fn unset_stdio_inheritance() {
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetStdHandle(nstdhandle: u32) -> isize;
-        fn SetHandleInformation(hobject: isize, dwmask: u32, dwflags: u32) -> i32;
-    }
-    const HANDLE_FLAG_INHERIT: u32 = 1;
-    // STD_INPUT/OUTPUT/ERROR_HANDLE
-    for std in [-10i32 as u32, -11i32 as u32, -12i32 as u32] {
-        unsafe {
-            let h = GetStdHandle(std);
-            if h != 0 && h != -1 {
-                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
-            }
-        }
-    }
 }
 
 // --- agent & worker control ----------------------------------------------------
@@ -581,47 +561,40 @@ pub fn start_with(name: &str, restore: Option<&Path>) -> anyhow::Result<StartOut
         spec.restore_path = restore.map(|p| p.to_path_buf());
     }
 
-    // Windows: any inheritable handle leaks into the worker (CreateProcess
-    // bInheritHandles=TRUE whenever stdio is redirected). If our stdout is a
-    // pipeline pipe, the immortal worker holds it open and the parent shell
-    // never sees EOF — `nebula vessels new x | ...` hangs forever. Strip the
-    // inherit flag from our own stdio before spawning.
-    #[cfg(windows)]
-    unset_stdio_inheritance();
-
+    // The worker outlives this call, so it must inherit nothing of ours: on
+    // Windows a leaked pipe handle it never writes to still denies the reader
+    // EOF, and `nebula vessels new x | ...` hangs until the vessel dies.
+    // `detach` hands the child only the log files named here.
     let spec_json = serde_json::to_string(&spec)?;
     let exe = std::env::current_exe()?;
     let child = if backend == "vz" {
         // VZ writes the guest console itself (spec); stderr catches worker errors.
         let log = std::fs::File::create(dir.join("worker.log"))?;
-        let mut cmd = std::process::Command::new(&exe);
-        cmd.arg("vz-worker")
+        let mut cmd = detach::Detached::new(&exe)
+            .arg("vz-worker")
             .arg("--spec")
             .arg(spec_json)
             .arg("--control")
             .arg(dir.join("vmm.sock"))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(log);
+            .stderr(detach::Stdio::File(log));
         if let Some(state) = restore {
-            cmd.arg("--restore").arg(state);
+            cmd = cmd.arg("--restore").arg(state);
         }
         cmd.spawn()?
     } else {
         let console = std::fs::File::create(dir.join("console.log"))?;
         // stderr catches worker panics + fork log/trace output.
         let log = std::fs::File::create(dir.join("worker.log"))?;
-        std::process::Command::new(&exe)
+        detach::Detached::new(&exe)
             .arg("krun-worker")
             .arg("--spec")
             .arg(spec_json)
-            .stdin(std::process::Stdio::null())
-            .stdout(console)
-            .stderr(log)
+            .stdout(detach::Stdio::File(console))
+            .stderr(detach::Stdio::File(log))
             .spawn()?
     };
     std::fs::write(dir.join("pid"), child.id().to_string())?;
-    std::mem::forget(child); // vessel outlives this invocation
+    drop(child); // vessel outlives this invocation; dropping neither kills nor reaps
 
     // Wait for the agent socket to answer.
     let t0 = Instant::now();

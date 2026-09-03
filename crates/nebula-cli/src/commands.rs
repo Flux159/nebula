@@ -32,11 +32,10 @@ pub fn up() -> anyhow::Result<()> {
     let startup_error = client::nebula_home()?.join("run/startup-error.txt");
     let _ = std::fs::remove_file(&startup_error);
 
-    let mut child = std::process::Command::new(&nebulad)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+    // Detached, and holding none of our handles: an embedder that captures
+    // this command's output would otherwise wait on a pipe the daemon keeps
+    // open forever (see nebula_core::detach).
+    let mut child = nebula_core::detach::Detached::new(&nebulad).spawn()?;
 
     let t0 = Instant::now();
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -44,8 +43,9 @@ pub fn up() -> anyhow::Result<()> {
         if client::daemon_running() {
             if let Ok(DaemonResponse::Status(s)) = client::request(&DaemonRequest::Status) {
                 if s.agent.is_some() {
-                    // Intentionally not waited on: nebulad outlives the CLI.
-                    std::mem::forget(child);
+                    // Intentionally not waited on: nebulad outlives the CLI,
+                    // and dropping the handle neither kills nor reaps it.
+                    drop(child);
                     println!(
                         "nebula up in {:?} (vm {}, agent healthy)",
                         t0.elapsed(),

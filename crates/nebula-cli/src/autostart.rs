@@ -189,12 +189,10 @@ pub fn open_ui() -> anyhow::Result<()> {
             for profile in ["release", "debug"] {
                 let bin = dir.join(format!("ui/src-tauri/target/{profile}/nebula-ui"));
                 if bin.is_file() {
-                    let child = std::process::Command::new(&bin)
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn()?;
-                    std::mem::forget(child);
+                    // Same rule as `nebula up`: the app outlives this command,
+                    // so it must not hold a handle our caller is reading.
+                    let child = nebula_core::detach::Detached::new(&bin).spawn()?;
+                    drop(child);
                     println!("opened Nebula app (dev build: {})", bin.display());
                     return Ok(());
                 }
