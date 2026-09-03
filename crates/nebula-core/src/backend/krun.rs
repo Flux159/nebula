@@ -157,6 +157,21 @@ fn dylib_path() -> Result<PathBuf> {
         })
 }
 
+impl KrunApi {
+    pub fn has_pause(&self) -> bool {
+        self.krun_vm_pause.is_some()
+    }
+    pub fn has_resume(&self) -> bool {
+        self.krun_vm_resume.is_some()
+    }
+    pub fn has_save(&self) -> bool {
+        self.krun_vm_save.is_some()
+    }
+    pub fn has_restore(&self) -> bool {
+        self.krun_set_restore.is_some()
+    }
+}
+
 fn load_api() -> Result<&'static KrunApi> {
     static API: OnceLock<std::result::Result<KrunApi, String>> = OnceLock::new();
     let res = API.get_or_init(|| {
@@ -275,6 +290,35 @@ impl VmHandle for KrunVm {
                 Err(_) => VmState::Failed,
             },
         }
+    }
+
+    /// krun snapshots live in the worker (the vCPU/device state is the
+    /// worker's, not ours), so the answer is whether the libkrun we actually
+    /// loaded exports the save/restore entry points — a build/arch question,
+    /// not a device-config one. Reported per symbol so a partial fork build
+    /// says which half is missing.
+    fn validate_save_restore(&self) -> Result<()> {
+        let api = load_api()?;
+        let missing: Vec<&str> = [
+            ("krun_vm_pause", api.has_pause()),
+            ("krun_vm_resume", api.has_resume()),
+            ("krun_vm_save", api.has_save()),
+            ("krun_set_restore", api.has_restore()),
+        ]
+        .iter()
+        .filter(|(_, present)| !present)
+        .map(|(name, _)| *name)
+        .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(Error::backend(
+            BACKEND,
+            format!(
+                "this libkrun build has no memory-snapshot support (missing: {})",
+                missing.join(", ")
+            ),
+        ))
     }
 
     fn start(&mut self) -> Result<()> {
@@ -469,7 +513,19 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
         eprintln!("krun-worker: api loaded, calling krun_set_log_level");
     }
     unsafe {
-        (api.krun_set_log_level)(if debug { 3 } else { 0 });
+        // Errors always, not only under NEBULA_DEBUG.
+        //
+        // 0 silences libkrun entirely, so when krun_start_enter fails the
+        // worker's stderr log carries the return code and nothing else -- a
+        // player's machine returned -22 (EINVAL) and the reason, which
+        // libkrun had logged with error!, went nowhere. There are a dozen
+        // distinct EINVAL paths in krun_start_enter and no way to tell them
+        // apart from the number.
+        //
+        // 1 is error only: a working boot stays as quiet as it was, and a
+        // failing one says what happened without needing the failure
+        // reproduced a second time with an environment variable set.
+        (api.krun_set_log_level)(if debug { 3 } else { 1 });
         if debug {
             eprintln!("krun-worker: krun_set_log_level ok, creating ctx");
         }
