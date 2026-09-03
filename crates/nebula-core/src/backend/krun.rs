@@ -157,21 +157,6 @@ fn dylib_path() -> Result<PathBuf> {
         })
 }
 
-impl KrunApi {
-    pub fn has_pause(&self) -> bool {
-        self.krun_vm_pause.is_some()
-    }
-    pub fn has_resume(&self) -> bool {
-        self.krun_vm_resume.is_some()
-    }
-    pub fn has_save(&self) -> bool {
-        self.krun_vm_save.is_some()
-    }
-    pub fn has_restore(&self) -> bool {
-        self.krun_set_restore.is_some()
-    }
-}
-
 fn load_api() -> Result<&'static KrunApi> {
     static API: OnceLock<std::result::Result<KrunApi, String>> = OnceLock::new();
     let res = API.get_or_init(|| {
@@ -290,35 +275,6 @@ impl VmHandle for KrunVm {
                 Err(_) => VmState::Failed,
             },
         }
-    }
-
-    /// krun snapshots live in the worker (the vCPU/device state is the
-    /// worker's, not ours), so the answer is whether the libkrun we actually
-    /// loaded exports the save/restore entry points — a build/arch question,
-    /// not a device-config one. Reported per symbol so a partial fork build
-    /// says which half is missing.
-    fn validate_save_restore(&self) -> Result<()> {
-        let api = load_api()?;
-        let missing: Vec<&str> = [
-            ("krun_vm_pause", api.has_pause()),
-            ("krun_vm_resume", api.has_resume()),
-            ("krun_vm_save", api.has_save()),
-            ("krun_set_restore", api.has_restore()),
-        ]
-        .iter()
-        .filter(|(_, present)| !present)
-        .map(|(name, _)| *name)
-        .collect();
-        if missing.is_empty() {
-            return Ok(());
-        }
-        Err(Error::backend(
-            BACKEND,
-            format!(
-                "this libkrun build has no memory-snapshot support (missing: {})",
-                missing.join(", ")
-            ),
-        ))
     }
 
     fn start(&mut self) -> Result<()> {
