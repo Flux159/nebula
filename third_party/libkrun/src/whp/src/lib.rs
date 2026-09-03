@@ -419,13 +419,32 @@ impl WhpVm {
                     }
                 },
             )
-            .inspect_err(|e| {
-                log::warn!(
-                    "invariant TSC not advertised: {e}. The guest will use \
-                     another clocksource."
-                );
-            })
             .is_ok();
+
+            // Windows 10 refuses the write above with E_INVALIDARG. Do not
+            // give up on the banks entirely: re-set the host's own values
+            // unchanged, so the partition still gets its feature banks and
+            // only the invariant-TSC hint is lost. Dropping the whole write
+            // leaves the banks unset, which is a bigger change than the hint
+            // we were trying to add.
+            if !tsc_invariant {
+                match Self::set_property(
+                    handle,
+                    WHvPartitionPropertyCodeProcessorFeaturesBanks,
+                    |p| {
+                        p.ProcessorFeaturesBanks = processor_features_banks;
+                    },
+                ) {
+                    Ok(()) => log::warn!(
+                        "invariant TSC not advertised (not supported here); \
+                         processor feature banks set unchanged"
+                    ),
+                    Err(e) => log::warn!(
+                        "processor feature banks not set: {e}. The guest will \
+                         use another clocksource."
+                    ),
+                }
+            }
         }
 
         // This unlocks the MSRs you are advertising in CPUID.
