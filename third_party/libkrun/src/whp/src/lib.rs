@@ -97,7 +97,7 @@ pub enum Error {
     CheckCapability(i32),
     HypervisorNotPresent,
     CreatePartition(i32),
-    SetPartitionProperty(i32),
+    SetPartitionProperty(WHV_PARTITION_PROPERTY_CODE, i32),
     SetupPartition(i32),
     DeletePartition(i32),
     MapGpaRange(i32),
@@ -126,8 +126,14 @@ impl Display for Error {
             CheckCapability(hr) => write!(f, "WHvGetCapability failed: HRESULT 0x{hr:08x}"),
             HypervisorNotPresent => write!(f, "WHP hypervisor is not present on this system"),
             CreatePartition(hr) => write!(f, "WHvCreatePartition failed: HRESULT 0x{hr:08x}"),
-            SetPartitionProperty(hr) => {
-                write!(f, "WHvSetPartitionProperty failed: HRESULT 0x{hr:08x}")
+            SetPartitionProperty(code, hr) => {
+                // Naming the property is the whole value of this error. Every
+                // call here fails the same way, and "SetPartitionProperty
+                // failed" sent two people hunting the wrong one.
+                write!(
+                    f,
+                    "WHvSetPartitionProperty({code}) failed: HRESULT 0x{hr:08x}"
+                )
             }
             SetupPartition(hr) => write!(f, "WHvSetupPartition failed: HRESULT 0x{hr:08x}"),
             DeletePartition(hr) => write!(f, "WHvDeletePartition failed: HRESULT 0x{hr:08x}"),
@@ -584,7 +590,10 @@ impl WhpVm {
             )
         };
         if hr != S_OK {
-            return Err(Error::SetPartitionProperty(hr));
+            return Err(Error::SetPartitionProperty(
+                WHvPartitionPropertyCodeCpuidResultList,
+                hr,
+            ));
         }
 
         let hr = unsafe { WHvSetupPartition(handle) };
@@ -634,7 +643,7 @@ impl WhpVm {
             )
         };
         if hr != S_OK {
-            Err(Error::SetPartitionProperty(hr))
+            Err(Error::SetPartitionProperty(code, hr))
         } else {
             Ok(())
         }
