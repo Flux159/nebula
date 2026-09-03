@@ -91,9 +91,6 @@ struct KrunApi {
     krun_set_gpu_options: Option<unsafe extern "C" fn(u32, u32) -> i32>,
     /// Map a host unix socket to a guest vsock port (listen=true: host-initiated).
     krun_add_vsock_port2: unsafe extern "C" fn(u32, u32, *const c_char, bool) -> i32,
-    /// Upstream libkrun leaves vsock disabled until this is called; our fork
-    /// enables it implicitly. Optional so either library loads.
-    krun_add_vsock: Option<unsafe extern "C" fn(u32, u32) -> i32>,
     /// Optional: only exported when libkrun is built with NET=1. Attaches a
     /// virtio-net device backed by a userspace proxy (passt) unix socket.
     krun_add_net_unixstream:
@@ -108,6 +105,9 @@ struct KrunApi {
     /// Optional: restore from a snapshot directory instead of booting
     /// (linux x86_64 fork).
     krun_set_restore: Option<unsafe extern "C" fn(u32, *const c_char) -> i32>,
+    /// Upstream libkrun leaves vsock disabled until this is called; our fork
+    /// enables it implicitly. Optional so either library loads.
+    krun_add_vsock: Option<unsafe extern "C" fn(u32, u32) -> i32>,
 }
 
 #[cfg(windows)]
@@ -160,21 +160,6 @@ fn dylib_path() -> Result<PathBuf> {
         })
 }
 
-impl KrunApi {
-    pub fn has_pause(&self) -> bool {
-        self.krun_vm_pause.is_some()
-    }
-    pub fn has_resume(&self) -> bool {
-        self.krun_vm_resume.is_some()
-    }
-    pub fn has_save(&self) -> bool {
-        self.krun_vm_save.is_some()
-    }
-    pub fn has_restore(&self) -> bool {
-        self.krun_set_restore.is_some()
-    }
-}
-
 fn load_api() -> Result<&'static KrunApi> {
     static API: OnceLock<std::result::Result<KrunApi, String>> = OnceLock::new();
     let res = API.get_or_init(|| {
@@ -224,7 +209,6 @@ fn load_api() -> Result<&'static KrunApi> {
                 krun_add_virtiofs: sym(handle, "krun_add_virtiofs").ok(),
                 krun_set_gpu_options: sym(handle, "krun_set_gpu_options").ok(),
                 krun_add_vsock_port2: sym(handle, "krun_add_vsock_port2")?,
-                krun_add_vsock: sym(handle, "krun_add_vsock").ok(),
                 krun_add_net_unixstream: sym(handle, "krun_add_net_unixstream").ok(),
                 krun_add_net_usernet: sym(handle, "krun_add_net_usernet").ok(),
                 krun_start_enter: sym(handle, "krun_start_enter")?,
@@ -232,6 +216,7 @@ fn load_api() -> Result<&'static KrunApi> {
                 krun_vm_resume: sym(handle, "krun_vm_resume").ok(),
                 krun_vm_save: sym(handle, "krun_vm_save").ok(),
                 krun_set_restore: sym(handle, "krun_set_restore").ok(),
+                krun_add_vsock: sym(handle, "krun_add_vsock").ok(),
             })
         }
     });
@@ -294,35 +279,6 @@ impl VmHandle for KrunVm {
                 Err(_) => VmState::Failed,
             },
         }
-    }
-
-    /// krun snapshots live in the worker (the vCPU/device state is the
-    /// worker's, not ours), so the answer is whether the libkrun we actually
-    /// loaded exports the save/restore entry points — a build/arch question,
-    /// not a device-config one. Reported per symbol so a partial fork build
-    /// says which half is missing.
-    fn validate_save_restore(&self) -> Result<()> {
-        let api = load_api()?;
-        let missing: Vec<&str> = [
-            ("krun_vm_pause", api.has_pause()),
-            ("krun_vm_resume", api.has_resume()),
-            ("krun_vm_save", api.has_save()),
-            ("krun_set_restore", api.has_restore()),
-        ]
-        .iter()
-        .filter(|(_, present)| !present)
-        .map(|(name, _)| *name)
-        .collect();
-        if missing.is_empty() {
-            return Ok(());
-        }
-        Err(Error::backend(
-            BACKEND,
-            format!(
-                "this libkrun build has no memory-snapshot support (missing: {})",
-                missing.join(", ")
-            ),
-        ))
     }
 
     fn start(&mut self) -> Result<()> {
