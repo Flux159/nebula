@@ -391,6 +391,11 @@ impl WhpVm {
         // Set invariant TSC support
         // First we need to retrieve the processor features banks and re-set them with the invariant TSC support
         // otherwise they get lost
+        // Whether the partition actually accepts an invariant TSC. What we
+        // advertise in CPUID has to match: telling the guest the TSC is
+        // invariant while the partition refused to support it leaves the
+        // kernel trusting a clock the hypervisor will not hold up.
+        let mut tsc_invariant = false;
         let processor_features_banks = get_processor_features_banks()?;
         if processor_features_banks.BanksCount >= 2 {
             // Windows 10 rejects this with E_INVALIDARG: its WHv will not take
@@ -403,7 +408,7 @@ impl WhpVm {
             // Where it is refused, carry on without it: the guest picks another
             // clocksource, which is what it would have done before this was
             // ever set. Failing the whole VM to keep a hint is the wrong trade.
-            if let Err(e) = Self::set_property(
+            tsc_invariant = Self::set_property(
                 handle,
                 WHvPartitionPropertyCodeProcessorFeaturesBanks,
                 |p| {
@@ -413,12 +418,14 @@ impl WhpVm {
                         p.ProcessorFeaturesBanks.Anonymous.AsUINT64[1] |= 0x2; // TscInvariantSupport
                     }
                 },
-            ) {
+            )
+            .inspect_err(|e| {
                 log::warn!(
                     "invariant TSC not advertised: {e}. The guest will use \
                      another clocksource."
                 );
-            }
+            })
+            .is_ok();
         }
 
         // This unlocks the MSRs you are advertising in CPUID.
@@ -560,8 +567,8 @@ impl WhpVm {
             Edx: 0,
         });
 
-        // invariant tsc
-        if processor_features_banks.BanksCount >= 2 {
+        // invariant tsc -- only when the partition took it above
+        if tsc_invariant {
             cpuid_results.push(WHV_X64_CPUID_RESULT {
                 Function: 0x80000007,
                 Reserved: [0; 3],
