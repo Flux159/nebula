@@ -29,7 +29,8 @@ use windows_sys::Win32::System::Hypervisor::{
     WHvRunVpExitReasonMemoryAccess, WHvRunVpExitReasonUnrecoverableException,
     WHvRunVpExitReasonUnsupportedFeature, WHvRunVpExitReasonX64Cpuid, WHvRunVpExitReasonX64Halt,
     WHvRunVpExitReasonX64InterruptWindow, WHvRunVpExitReasonX64IoPortAccess,
-    WHvRunVpExitReasonX64MsrAccess, WHvSetPartitionProperty, WHvSetVirtualProcessorRegisters,
+    WHvGetPartitionProperty, WHvRunVpExitReasonX64MsrAccess, WHvSetPartitionProperty,
+    WHvSetVirtualProcessorRegisters,
     WHvSetupPartition, WHvX64LocalApicEmulationModeXApic,
     WHvX64RegisterDeliverabilityNotifications, WHvX64RegisterRax, WHvX64RegisterRbx,
     WHvX64RegisterRcx, WHvX64RegisterRdx, WHvX64RegisterRip,
@@ -400,6 +401,22 @@ impl WhpVm {
         }
 
         // This unlocks the MSRs you are advertising in CPUID.
+        //
+        // Windows 10 does not have this property. Its WHv rejects the code
+        // outright -- WHvGetPartitionProperty and WHvSetPartitionProperty both
+        // return 0x80370302 (unknown property) on build 19045, while every
+        // other property we set succeeds -- so setting it unconditionally
+        // fails partition setup and the guest never boots. The symptom is a
+        // silent one: krun_start_enter returns EINVAL, the console log stays
+        // empty, and nebulad reports only that the agent never became healthy.
+        //
+        // Ask before setting. Where the property does not exist there is
+        // nothing to unlock and nothing to do; a Windows that has it behaves
+        // exactly as before.
+        if Self::property_supported(
+            handle,
+            WHvPartitionPropertyCodeSyntheticProcessorFeaturesBanks,
+        ) {
         Self::set_property(
             handle,
             WHvPartitionPropertyCodeSyntheticProcessorFeaturesBanks,
@@ -431,6 +448,7 @@ impl WhpVm {
                 }
             },
         )?;
+        }
 
         let mut cpuid_results: Vec<WHV_X64_CPUID_RESULT> = Vec::new();
 
@@ -575,6 +593,29 @@ impl WhpVm {
         } else {
             Ok(())
         }
+    }
+
+    /// Does this Windows know the property at all?
+    ///
+    /// Reading it is the cheapest probe: a code this build does not implement
+    /// fails the same way for get and for set (0x80370302), and a code it does
+    /// implement reads back whatever the partition currently holds.
+    fn property_supported(
+        handle: WHV_PARTITION_HANDLE,
+        code: WHV_PARTITION_PROPERTY_CODE,
+    ) -> bool {
+        let mut prop = unsafe { MaybeUninit::<WHV_PARTITION_PROPERTY>::zeroed().assume_init() };
+        let mut written: u32 = 0;
+        let hr = unsafe {
+            WHvGetPartitionProperty(
+                handle,
+                code,
+                &mut prop as *mut _ as *mut _,
+                mem::size_of::<WHV_PARTITION_PROPERTY>() as u32,
+                &mut written,
+            )
+        };
+        hr == S_OK
     }
 
     fn set_property(
