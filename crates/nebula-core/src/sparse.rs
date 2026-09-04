@@ -163,6 +163,45 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Create a file of exactly `len` bytes, sparse where the filesystem allows.
+///
+/// Built under a temporary name and renamed into place, so a failure leaves
+/// nothing behind. That matters more than it sounds: `File::create` followed by
+/// a failing `set_len` -- ENOSPC, most of all -- used to leave a 0-byte image
+/// at the real path, and a caller that decides "already made?" by existence
+/// then skips creation forever and hands the guest an empty block device. One
+/// transient full disk bricked the install until someone deleted the file by
+/// hand.
+pub fn create_sized(path: &Path, len: u64) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let tmp = path.with_extension("partial");
+    let _ = std::fs::remove_file(&tmp);
+
+    let built = (|| -> anyhow::Result<()> {
+        let f = File::create(&tmp)?;
+        // Before set_len: NTFS only honours this on a file with no extents yet,
+        // and it is what keeps the length a ceiling rather than an allocation.
+        mark_sparse(&f);
+        f.set_len(len)?;
+        Ok(())
+    })();
+    if let Err(e) = built {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| {
+            format!(
+                "creating a {} MiB file at {} (needs that much free space on the volume holding it)",
+                len / (1024 * 1024),
+                path.display(),
+            )
+        });
+    }
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("renaming {} into place", tmp.display()))?;
+    Ok(())
+}
+
 /// Mark a freshly created file sparse. Only NTFS needs telling; everywhere
 /// else a seek already makes a hole.
 ///
@@ -426,5 +465,30 @@ mod tests {
         write_sparse(&mut Cursor::new(&data), &dst).unwrap();
         assert_eq!(std::fs::read(&dst).unwrap(), data);
         let _ = std::fs::remove_file(&dst);
+    }
+
+    /// The property the data disk depends on: nothing is left at the real path
+    /// unless it is complete, and nothing is left beside it either.
+    #[test]
+    fn create_sized_makes_the_whole_file_and_no_debris() {
+        let dir = std::env::temp_dir().join(format!("neb-sized-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let img = dir.join("data.img");
+
+        // Parent does not exist yet: creation has to make it.
+        create_sized(&img, 8 * 1024 * 1024).unwrap();
+        assert_eq!(std::fs::metadata(&img).unwrap().len(), 8 * 1024 * 1024);
+        assert!(
+            !img.with_extension("partial").exists(),
+            "left a .partial behind"
+        );
+
+        // Recreating over an existing image replaces it cleanly rather than
+        // failing on the rename or leaving the old length in place.
+        create_sized(&img, 4 * 1024 * 1024).unwrap();
+        assert_eq!(std::fs::metadata(&img).unwrap().len(), 4 * 1024 * 1024);
+        assert!(!img.with_extension("partial").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

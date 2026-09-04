@@ -39,9 +39,28 @@ impl Vessel {
         );
 
         // Sparse data disk on first boot; guest formats it (nebula-init).
-        if !paths.data_img().is_file() {
-            let f = std::fs::File::create(paths.data_img())?;
-            f.set_len(eff.data_disk_gib * 1024 * 1024 * 1024)?;
+        //
+        // Recreated when it is missing *or* empty, not merely when it is
+        // missing. A 0-byte image is the fingerprint of the old failure mode:
+        // creation that died at set_len left the file behind, existence said
+        // "already done", and every later boot handed the guest an empty block
+        // device -- one transient full disk, and the install never recovered
+        // even after space was freed. create_sized cannot produce that state
+        // any more, so this only heals installs already broken by it.
+        //
+        // Deliberately only zero. A non-empty image of an unexpected size is
+        // somebody's data disk after a data_disk_gib change, and silently
+        // recreating it would delete everything they have.
+        let want = eff.data_disk_gib * 1024 * 1024 * 1024;
+        let have = std::fs::metadata(paths.data_img()).ok().map(|m| m.len());
+        if have.is_none_or(|n| n == 0) {
+            if have == Some(0) {
+                tracing::warn!(
+                    path = %paths.data_img().display(),
+                    "data disk is empty -- an earlier creation failed part-way; recreating it"
+                );
+            }
+            nebula_core::sparse::create_sized(&paths.data_img(), want)?;
             tracing::info!(gib = eff.data_disk_gib, "created sparse data disk");
         }
 
