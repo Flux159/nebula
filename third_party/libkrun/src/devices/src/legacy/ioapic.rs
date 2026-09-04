@@ -131,6 +131,15 @@ impl<B: IoApicBackend> IrqChipT for Ioapic<B> {
         backend.set_irq(irq_line, interrupt_evt, regs)
     }
 
+    fn irq_is_masked(&self, irq_line: u32) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .regs
+            .ioredtbl
+            .get(irq_line as usize)
+            .map_or(true, |entry| entry & (1 << IOAPIC_LVT_MASKED_SHIFT) != 0)
+    }
+
     // Userspace ioapic: register state lives here, so snapshots carry it.
     // Layout: [id, ioregsel, version, pad] + irr(le32) + 24x ioredtbl(le64).
     fn snapshot_state(&self) -> Option<Vec<u8>> {

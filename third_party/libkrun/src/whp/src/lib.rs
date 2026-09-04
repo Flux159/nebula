@@ -891,6 +891,50 @@ impl WhpVm {
         }
     }
 
+    /// Clear a vector from a VP's local-APIC in-service register.
+    ///
+    /// A userspace PIC injects its vector through `WHvRequestInterrupt`, so
+    /// WHP records it in the LAPIC even though a legacy guest acknowledges it
+    /// at the PIC. Call this while the VP is stopped on that PIC port exit.
+    pub fn clear_interrupt_in_service(&self, vp_index: u32, vector: u8) -> Result<(), Error> {
+        let mut state = vec![0u8; 4096];
+        let mut written = 0u32;
+        let hr = unsafe {
+            WHvGetVirtualProcessorInterruptControllerState2(
+                self.handle,
+                vp_index,
+                state.as_mut_ptr() as *mut c_void,
+                state.len() as u32,
+                &mut written,
+            )
+        };
+        if hr != S_OK {
+            return Err(Error::GetInterruptController(hr));
+        }
+
+        let offset = 0x100 + (usize::from(vector) / 32) * 0x10;
+        if offset + 4 > written as usize {
+            return Ok(());
+        }
+        let mut word = u32::from_le_bytes(state[offset..offset + 4].try_into().unwrap());
+        word &= !(1 << (vector % 32));
+        state[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+
+        let hr = unsafe {
+            WHvSetVirtualProcessorInterruptControllerState2(
+                self.handle,
+                vp_index,
+                state.as_ptr() as *const c_void,
+                written,
+            )
+        };
+        if hr != S_OK {
+            Err(Error::SetInterruptController(hr))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn partition_handle(&self) -> WHV_PARTITION_HANDLE {
         self.handle
     }

@@ -36,6 +36,11 @@ impl IrqChipDevice {
         self.inner.set_irq(irq_line, interrupt_evt)
     }
 
+    #[cfg(target_arch = "x86_64")]
+    pub fn irq_is_masked(&self, irq_line: u32) -> bool {
+        self.inner.irq_is_masked(irq_line)
+    }
+
     /// Snapshot of userspace irqchip register state (None for in-kernel
     /// chips, whose state is saved through the hypervisor instead).
     #[cfg(target_arch = "x86_64")]
@@ -133,6 +138,10 @@ pub trait IrqChipT: BusDevice {
         irq_line: Option<u32>,
         interrupt_evt: Option<&EventFd>,
     ) -> Result<(), DeviceError>;
+
+    fn irq_is_masked(&self, _irq_line: u32) -> bool {
+        true
+    }
 
     /// Userspace register snapshot for VM save/restore. In-kernel chips
     /// (KVM ioapic) keep the default None — their state travels with the
