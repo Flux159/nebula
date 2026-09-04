@@ -996,11 +996,11 @@ dependencies = [
 
 [[package]]
 name = "nebula-balloon"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "nebula-battletest"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-display"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "nebula-core",
@@ -1057,7 +1057,7 @@ dependencies = [
 
 [[package]]
 name = "nebulad"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2197,7 +2197,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vessel-agent"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "nebula-core",
@@ -2206,7 +2206,7 @@ dependencies = [
 
 [[package]]
 name = "vessel-display"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "nebula-core",
@@ -2215,7 +2215,7 @@ dependencies = [
 
 [[package]]
 name = "vessel-init"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
 ]
