@@ -34,6 +34,22 @@ impl fmt::Display for Error {
 
 type Result<T> = ::std::result::Result<T, Error>;
 
+#[cfg(windows)]
+struct I8042CommandPort {
+    device: Arc<Mutex<devices::legacy::I8042Device>>,
+}
+
+#[cfg(windows)]
+impl devices::BusDevice for I8042CommandPort {
+    fn read(&mut self, vcpuid: u64, offset: u64, data: &mut [u8]) {
+        devices::BusDevice::read(&mut *self.device.lock().unwrap(), vcpuid, offset + 4, data);
+    }
+
+    fn write(&mut self, vcpuid: u64, offset: u64, data: &[u8]) {
+        devices::BusDevice::write(&mut *self.device.lock().unwrap(), vcpuid, offset + 4, data);
+    }
+}
+
 /// The `PortIODeviceManager` is a wrapper that is used for registering legacy devices
 /// on an I/O Bus. It currently manages the uart and i8042 devices.
 /// The `LegacyDeviceManger` should be initialized only by using the constructor.
@@ -42,6 +58,14 @@ pub struct PortIODeviceManager {
     pub cmos: Arc<Mutex<devices::legacy::Cmos>>,
     pub stdio_serial: Vec<Arc<Mutex<devices::legacy::Serial>>>,
     pub i8042: Arc<Mutex<devices::legacy::I8042Device>>,
+    #[cfg(windows)]
+    pub pit: Arc<Mutex<devices::legacy::I8254>>,
+    #[cfg(windows)]
+    pub pit_speaker: Arc<Mutex<devices::legacy::I8254Speaker>>,
+    #[cfg(windows)]
+    pub pic: Arc<Mutex<devices::legacy::I8259>>,
+    #[cfg(windows)]
+    pub pic_slave: Arc<Mutex<devices::legacy::I8259>>,
 
     pub com_evt_1: EventFd,
     pub com_evt_2: EventFd,
@@ -79,11 +103,24 @@ impl PortIODeviceManager {
             kbd_evt.try_clone().map_err(Error::EventFd)?,
         )));
 
+        #[cfg(windows)]
+        let (pic, pic_slave, timer_irq) = devices::legacy::I8259::new();
+        #[cfg(windows)]
+        let (pit, pit_speaker) = devices::legacy::I8254::new(timer_irq);
+
         Ok(PortIODeviceManager {
             io_bus,
             cmos,
             stdio_serial,
             i8042,
+            #[cfg(windows)]
+            pit: Arc::new(Mutex::new(pit)),
+            #[cfg(windows)]
+            pit_speaker: Arc::new(Mutex::new(pit_speaker)),
+            #[cfg(windows)]
+            pic: Arc::new(Mutex::new(pic)),
+            #[cfg(windows)]
+            pic_slave: Arc::new(Mutex::new(pic_slave)),
             com_evt_1: evts[0].try_clone().map_err(Error::EventFd)?,
             com_evt_2: evts[1].try_clone().map_err(Error::EventFd)?,
             com_evt_3: evts[2].try_clone().map_err(Error::EventFd)?,
@@ -139,6 +176,37 @@ impl PortIODeviceManager {
                 0x8,
             )
             .map_err(Error::BusError)?;
+        #[cfg(windows)]
+        {
+            // The i8042 uses only 0x60 and 0x64. Registering its historical
+            // five-port span swallowed system-control port B at 0x61, which
+            // the PIT needs for channel 2 gate/output.
+            self.io_bus
+                .insert(self.i8042.clone(), 0x60, 0x1)
+                .map_err(Error::BusError)?;
+            self.io_bus
+                .insert(self.pit_speaker.clone(), 0x61, 0x1)
+                .map_err(Error::BusError)?;
+            self.io_bus
+                .insert(
+                    Arc::new(Mutex::new(I8042CommandPort {
+                        device: self.i8042.clone(),
+                    })),
+                    0x64,
+                    0x1,
+                )
+                .map_err(Error::BusError)?;
+            self.io_bus
+                .insert(self.pit.clone(), 0x40, 0x4)
+                .map_err(Error::BusError)?;
+            self.io_bus
+                .insert(self.pic.clone(), 0x20, 0x2)
+                .map_err(Error::BusError)?;
+            self.io_bus
+                .insert(self.pic_slave.clone(), 0xa0, 0x2)
+                .map_err(Error::BusError)?;
+        }
+        #[cfg(not(windows))]
         self.io_bus
             .insert(self.i8042.clone(), 0x060, 0x5)
             .map_err(Error::BusError)?;

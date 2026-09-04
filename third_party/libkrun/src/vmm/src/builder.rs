@@ -1932,6 +1932,18 @@ fn attach_legacy_devices(
     intc: Option<Arc<Mutex<IrqChipDevice>>>,
 ) -> std::result::Result<(), StartMicrovmError> {
     pio_device_manager
+        .pic
+        .lock()
+        .unwrap()
+        .set_vm(_vm.whp_vm().clone());
+    if let Some(ioapic) = intc.as_ref() {
+        pio_device_manager
+            .pic
+            .lock()
+            .unwrap()
+            .set_ioapic(ioapic.clone());
+    }
+    pio_device_manager
         .register_devices()
         .map_err(Error::LegacyIOBus)
         .map_err(StartMicrovmError::Internal)?;

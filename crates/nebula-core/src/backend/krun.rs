@@ -6,7 +6,7 @@
 //! The handle spawns the current executable with a hidden `krun-worker` arg;
 //! any binary embedding nebula-core must route that arg to [`run_worker`].
 
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{CString, c_char, c_void};
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::{Mutex, OnceLock};
@@ -82,6 +82,9 @@ struct KrunApi {
     /// kernel HANDLEs (windows).
     krun_add_virtio_console_default:
         unsafe extern "C" fn(u32, ConsoleIo, ConsoleIo, ConsoleIo) -> i32,
+    /// Optional legacy serial console, used for pre-virtio boot diagnostics.
+    #[cfg(windows)]
+    krun_add_serial_console_default: Option<unsafe extern "C" fn(u32, ConsoleIo, ConsoleIo) -> i32>,
     /// Optional: only exported when libkrun is built with BLK=1.
     krun_add_disk2:
         Option<unsafe extern "C" fn(u32, *const c_char, *const c_char, u32, bool) -> i32>,
@@ -205,6 +208,9 @@ fn load_api() -> Result<&'static KrunApi> {
                 krun_set_vm_config: sym(handle, "krun_set_vm_config")?,
                 krun_set_kernel: sym(handle, "krun_set_kernel")?,
                 krun_add_virtio_console_default: sym(handle, "krun_add_virtio_console_default")?,
+                #[cfg(windows)]
+                krun_add_serial_console_default: sym(handle, "krun_add_serial_console_default")
+                    .ok(),
                 krun_add_disk2: sym(handle, "krun_add_disk2").ok(),
                 krun_add_virtiofs: sym(handle, "krun_add_virtiofs").ok(),
                 krun_set_gpu_options: sym(handle, "krun_set_gpu_options").ok(),
@@ -505,6 +511,13 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
         } = &spec.boot;
         let kernel_c = cstr(&kernel.to_string_lossy());
         let initrd_c = initramfs.as_ref().map(|p| cstr(&p.to_string_lossy()));
+        let debug_cmdline;
+        let cmdline = if debug && cfg!(windows) {
+            debug_cmdline = format!("{cmdline} earlyprintk=ttyS0,115200,keep");
+            &debug_cmdline
+        } else {
+            cmdline
+        };
         let cmdline_c = cstr(cmdline);
         check(
             "krun_set_kernel",
@@ -540,6 +553,11 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
                 let out_file = std::fs::File::create(path)?;
                 let err_file = out_file.try_clone()?;
                 let devnull = std::fs::File::open("NUL")?;
+                let serial_out = if debug {
+                    Some(out_file.try_clone()?)
+                } else {
+                    None
+                };
                 // handles are intentionally leaked into the VMM (it owns them).
                 check(
                     "krun_add_virtio_console_default",
@@ -550,6 +568,19 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
                         err_file.into_raw_handle(),
                     ),
                 )?;
+                if let (Some(add_serial), Some(serial_out)) =
+                    (api.krun_add_serial_console_default, serial_out)
+                {
+                    let serial_null = std::fs::File::open("NUL")?;
+                    check(
+                        "krun_add_serial_console_default",
+                        add_serial(
+                            ctx,
+                            serial_null.into_raw_handle(),
+                            serial_out.into_raw_handle(),
+                        ),
+                    )?;
+                }
             }
         }
 

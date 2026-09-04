@@ -36,6 +36,10 @@ mod vcpu;
 mod x86_64;
 #[cfg(target_arch = "x86_64")]
 use x86_64::cmos;
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+use x86_64::i8254;
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+use x86_64::i8259;
 #[cfg(target_arch = "x86_64")]
 use x86_64::serial;
 #[cfg(target_arch = "aarch64")]
@@ -59,6 +63,10 @@ pub use self::gpio::Gpio;
 pub use self::hvfgicv3::HvfGicV3;
 #[cfg(target_arch = "x86_64")]
 pub use self::i8042::{Error as I8042DeviceError, I8042Device};
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+pub use self::i8254::{I8254, I8254Speaker};
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+pub use self::i8259::{I8259, I8259Pin};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub use self::ioapic_kvm::IoApic;
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
