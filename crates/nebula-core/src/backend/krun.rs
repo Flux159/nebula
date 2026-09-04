@@ -6,7 +6,7 @@
 //! The handle spawns the current executable with a hidden `krun-worker` arg;
 //! any binary embedding nebula-core must route that arg to [`run_worker`].
 
-use std::ffi::{CString, c_char, c_void};
+use std::ffi::{c_char, c_void, CString};
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::{Mutex, OnceLock};
