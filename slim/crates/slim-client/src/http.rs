@@ -40,6 +40,15 @@ pub enum Stream {
 }
 
 impl Stream {
+    /// Deliver stdin EOF while keeping the cloned reader open for output.
+    pub fn shutdown_write(&self) -> io::Result<()> {
+        match self {
+            #[cfg(unix)]
+            Stream::Unix(s) => s.shutdown(std::net::Shutdown::Write),
+            Stream::Tcp(s) => s.shutdown(std::net::Shutdown::Write),
+        }
+    }
+
     pub fn try_clone(&self) -> io::Result<Stream> {
         Ok(match self {
             #[cfg(unix)]

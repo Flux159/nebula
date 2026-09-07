@@ -66,6 +66,12 @@ wait_running s1 || { bad "s1 never reached running"; tail -20 /tmp/slimd.log; }
 $DS ps >/tmp/o 2>&1 && grep -q "s1" /tmp/o && ok "ps shows s1" || { bad "ps"; cat /tmp/o; }
 retry_out 10 "started" $DS logs s1 && ok "logs" || { bad "logs"; cat /tmp/o; }
 retry_out 10 "from-exec" $DS exec s1 echo from-exec && ok "exec" || { bad "exec"; cat /tmp/o; tail -20 /tmp/slimd.log; }
+printf 'private stdin\n' | timeout 10 $DS exec -i s1 sh -c 'cat; echo after-eof; exit 7' >/tmp/o 2>&1
+if [ $? -eq 7 ] && grep -qx 'private stdin' /tmp/o && grep -qx 'after-eof' /tmp/o; then
+    ok "exec stdin EOF, output drain and exit code"
+else
+    bad "exec stdin EOF, output drain and exit code"; cat /tmp/o
+fi
 $DS stop s1 >/tmp/o 2>&1 && ok "stop" || { bad "stop"; cat /tmp/o; }
 $DS rm s1 >/tmp/o 2>&1 && ok "rm" || { bad "rm"; cat /tmp/o; }
 

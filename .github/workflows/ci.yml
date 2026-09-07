@@ -74,6 +74,21 @@ jobs:
       - name: Unit tests
         run: cargo test
 
+  slim-host-cli:
+    # Exercise stdin EOF over TCP on Windows as well as Unix hosts. The full
+    # Linux slim job above runs these CLI integration tests too.
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: slim
+      - run: cargo test --locked --manifest-path slim/Cargo.toml -p slim-client -p docker-slim
+
   slim-engine:
     # The slim engine only exists on real Linux (namespaces, overlayfs,
     # cgroup2, iptables), so lint+unit tests can't tell us whether it still
