@@ -38,6 +38,7 @@ socket proxy); slim just swaps the guest engine.
   propagation, `-d`, `-t`, `logs`, `exec`, `cp`, `ps`, `inspect -f`
 - `exec -i` delivers piped stdin through EOF and drains the command's output
   before reporting its exit code, including batch tools such as database clients
+  (`docker-slim capabilities` reports `exec-stdin-eof-v1` without contacting an engine)
 - **host bind mounts** (`-v` and `--mount type=bind`), directories or files,
   read-only or read-write, from any path on the `$HOME` share — **including
   paths with spaces**, which is where a macOS app keeps its state

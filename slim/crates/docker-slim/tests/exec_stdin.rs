@@ -133,3 +133,14 @@ fn exec_empty_stdin_delivers_eof_and_drains_output() {
 fn exec_multichunk_stdin_and_nonzero_exit() {
     run(vec![b'x'; 32 * 1024], 7);
 }
+
+#[test]
+fn capabilities_can_be_checked_without_an_engine() {
+    let output = Command::new(env!("CARGO_BIN_EXE_docker-slim"))
+        .arg("capabilities")
+        .env("DOCKER_HOST", "tcp://127.0.0.1:1")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"exec-stdin-eof-v1\n");
+}
