@@ -50,6 +50,13 @@ pub fn run(argv: &[String]) -> i32 {
     let cmd = rest[0].as_str();
     let cargs = &rest[1..];
 
+    // Embedders must detect this host-client contract before starting a private
+    // stdin operation; the legacy version string does not identify the fix.
+    if cmd == "capabilities" {
+        println!("exec-stdin-eof-v1");
+        return 0;
+    }
+
     let result = match cmd {
         "version" => cmds::version(&client),
         "info" => cmds::info(&client),

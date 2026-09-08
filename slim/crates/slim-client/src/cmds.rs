@@ -780,6 +780,10 @@ pub fn exec(client: &Client, cargs: &[String]) -> CmdResult {
                     break;
                 }
             }
+            // Dropping this clone does not send EOF: the output reader still
+            // owns the socket. Half-close so batch commands can finish reading
+            // stdin, then continue draining their output above.
+            let _ = sock.shutdown_write();
         });
     }
     let _ = reader.join();
