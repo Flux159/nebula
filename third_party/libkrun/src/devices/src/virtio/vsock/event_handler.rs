@@ -28,7 +28,15 @@ impl Vsock {
 
         let mut raise_irq = false;
         match self.queue_events[RXQ_INDEX].read() {
-            Ok(_) => raise_irq |= self.process_stream_rx(),
+            Ok(_) => {
+                // Fresh RX buffers are the wake-up for any proxy that had to
+                // abandon a drain when the queue ran dry (Windows only; see
+                // VsockMuxer::drain_stalled_proxies). Do it before serving
+                // the muxer's own queue so stalled bulk data moves first.
+                #[cfg(windows)]
+                self.muxer.drain_stalled_proxies();
+                raise_irq |= self.process_stream_rx();
+            }
             // Spurious wakeup from the Windows epoll bridge; nothing queued.
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => error!("Failed to get vsock rx queue event: {e:?}"),

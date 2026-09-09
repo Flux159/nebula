@@ -124,6 +124,9 @@ fn read_port_file(path: &Path) -> std::io::Result<u16> {
 pub struct TcpProxy {
     /// Host peer half-closed its write side; guest already got SHUTDOWN(SEND).
     half_closed: bool,
+    /// The last drain stopped because the guest's RX virtqueue was empty,
+    /// not because the socket was. See `drain_stalled`.
+    rx_starved: bool,
     id: u64,
     cid: u64,
     stream: Option<TcpStream>,
@@ -165,6 +168,7 @@ impl TcpProxy {
             stream: None,
             event: None,
             half_closed: false,
+            rx_starved: false,
             status: ProxyStatus::Idle,
             mem,
             queue,
@@ -204,6 +208,7 @@ impl TcpProxy {
             stream: Some(stream),
             event,
             half_closed: false,
+            rx_starved: false,
             status: ProxyStatus::ReverseInit,
             mem,
             queue,
@@ -298,6 +303,10 @@ impl TcpProxy {
     fn recv_pkt(&mut self) -> (bool, bool) {
         let mut have_used = false;
         let mut wait_credit = false;
+        // Set unless the loop stops for a reason of its own (credit, EOF,
+        // WouldBlock): what is left is "the guest ran out of RX buffers",
+        // and then the socket may still hold data nobody will wake us for.
+        let mut starved = true;
         let queue_mutex = self.queue.clone();
         let mut queue = queue_mutex.lock().unwrap();
 
@@ -328,6 +337,7 @@ impl TcpProxy {
 
             if len == 0 {
                 queue.undo_pop();
+                starved = false;
                 break;
             } else {
                 have_used = true;
@@ -338,6 +348,7 @@ impl TcpProxy {
             }
         }
 
+        self.rx_starved = starved;
         (have_used, wait_credit)
     }
 
@@ -595,6 +606,23 @@ impl Proxy for TcpProxy {
         {
             warn!("error sending shutdown to socket: {e}");
         }
+    }
+
+    /// The guest handed back RX buffers. If the last drain stopped because
+    /// there were none, finish it now: `WSAEventSelect` re-records FD_READ
+    /// only when new data arrives or a `recv` leaves data behind, so bytes
+    /// already sitting in the socket buffer would never signal again. That
+    /// is the whole stall — a 69 MB `docker-slim load` upload would park
+    /// with both sides idle and the client waiting on a response the engine
+    /// never got to send.
+    fn drain_stalled(&mut self) -> Option<ProxyUpdate> {
+        if !self.rx_starved {
+            return None;
+        }
+        self.rx_starved = false;
+        let mut update = ProxyUpdate::default();
+        self.drain_into_guest(&mut update);
+        Some(update)
     }
 
     fn release(&mut self) -> ProxyUpdate {
