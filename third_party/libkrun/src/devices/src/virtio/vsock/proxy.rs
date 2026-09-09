@@ -120,6 +120,16 @@ pub trait Proxy: Send + AsRawFd {
     fn enqueue_accept(&mut self) {}
     fn push_accept_rsp(&self, _result: i32) {}
     fn shutdown(&mut self, _pkt: &VsockPacket) {}
+    /// Re-read a host socket that was left unread because the guest's RX
+    /// virtqueue was empty at the time. Called when the guest hands back RX
+    /// buffers, which is the wake-up that never arrives from the socket
+    /// itself. Windows-only, and declared so: its readiness events are
+    /// one-shot, where unix epoll keeps reporting a socket that still has
+    /// data, so only that backend can strand a drain this way.
+    #[cfg(windows)]
+    fn drain_stalled(&mut self) -> Option<ProxyUpdate> {
+        None
+    }
     fn release(&mut self) -> ProxyUpdate;
     fn process_event(&mut self, evset: EventSet) -> ProxyUpdate;
 }

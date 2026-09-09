@@ -193,6 +193,29 @@ impl VsockMuxer {
         !self.rxq.lock().unwrap().is_empty()
     }
 
+    /// Finish drains that stopped for want of RX buffers. On Windows a
+    /// socket readiness event fires once and is consumed when we read it,
+    /// so a proxy that had to stop mid-drain has nothing left to wake it:
+    /// the guest returning RX buffers is the only signal, and this is where
+    /// it lands. Nothing else re-reads those sockets.
+    #[cfg(windows)]
+    pub(crate) fn drain_stalled_proxies(&self) {
+        let ids: Vec<u64> = self.proxy_map.read().unwrap().keys().copied().collect();
+        for id in ids {
+            // Take the update out from under the map lock: process_proxy_update
+            // wants a write lock of its own when a proxy is being removed.
+            let update = self
+                .proxy_map
+                .read()
+                .unwrap()
+                .get(&id)
+                .and_then(|proxy| proxy.lock().unwrap().drain_stalled());
+            if let Some(update) = update {
+                self.process_proxy_update(id, update);
+            }
+        }
+    }
+
     pub(crate) fn recv_pkt(&mut self, pkt: &mut VsockPacket) -> super::Result<()> {
         debug!("recv_stream_pkt");
         if self.rxq.lock().unwrap().is_empty() {
