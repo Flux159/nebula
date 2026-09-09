@@ -6,6 +6,44 @@ limitations; routine TODOs live in code.)
 
 ## Open (being worked / next phase)
 
+- **(2026-09-08, windows/vsock) `docker-slim load` hung on Windows: the
+  guest's RX buffers ran out and the host socket was never re-read.**
+  RESOLVED in this change. Reported as "the loader imports the images and
+  then never exits", first hit on a first run of an embedding app. Both
+  processes sat at ~0 CPU and the client had read *zero* bytes of the
+  response. Measured on the Windows box against an isolated `NEBULA_HOME`:
+  3 of 20 loads hung through nebulad, and 5 of 11 with nebulad's `bridge`
+  taken out of the path (`DOCKER_HOST` pointed straight at libkrun's vsock
+  listener), which is what ruled out the host proxy and the client.
+  The stall is in the fork's Windows vsock backend. `TcpProxy::recv_pkt`
+  drains the host socket into RX virtqueue buffers and stops when the queue
+  runs dry — but by then `WSAEnumNetworkEvents` has already consumed the
+  FD_READ signal, and `WSAEventSelect` re-records it only when *new* data
+  arrives or a `recv` leaves data behind. Bytes already in the socket buffer
+  therefore never signal again, and nothing else re-reads that socket:
+  `process_stream_rx` only serves the muxer's own rxq. The unix backend
+  cannot hit this, because epoll is level-triggered. It bites the 69 MB
+  upload rather than the reply, which is why the engine never answered.
+  Fix: the guest handing back RX buffers is the missing wake-up, so
+  `handle_rxq_event` now calls `VsockMuxer::drain_stalled_proxies` for any
+  proxy that stopped for want of buffers.
+  **Also fixed, same report, different mechanism:** some of those "hangs"
+  were the client *aborting*. `read_chunked` allocated the chunk size the
+  peer declared, and a desynced stream reads payload as a size line — docker
+  layer ids are hex, so `31ad4a471c68` is a 54 TB chunk. That is an
+  allocation failure, not an error: it aborts, and `slim`'s release profile
+  is `panic = "abort"`, so Windows Error Reporting then holds the corpse in
+  the process table for 30 s to several minutes. A caller blocked in
+  `wait()` sees a hang and cannot tell it from a slow import. Reproduced
+  deterministically by pointing `docker-slim` at a fake engine that sends
+  that size line, and confirmed in the event log
+  (`0xc0000409` / `FAST_FAIL_FATAL_APP_EXIT`, "memory allocation of
+  54620345277544 bytes failed").
+  **Deliberately not done:** `slim`'s `panic = "abort"` stays. Binary size
+  is a stated product decision there, and with the allocation bounded the
+  known abort is gone — but any *future* panic in a shipped CLI will present
+  to a Windows caller as a hang rather than a crash, so it is worth knowing.
+
 - **(2026-08-25, display bridge) `vessel-init` starts vessel-agent twice.**
   Pre-existing, found while adding the display service. `agent_svc` is spawned
   early (so the host sees "healthy" in ~1s), pushed into `services` carrying
