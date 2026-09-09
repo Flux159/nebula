@@ -466,9 +466,18 @@ impl Response {
         let mut out = Vec::new();
         match self.body_len {
             BodyLen::Len(n) => {
-                let mut buf = vec![0u8; n as usize];
-                self.stream.read_exact(&mut buf)?;
-                out = buf;
+                // Grow as the bytes arrive rather than trusting the header:
+                // `vec![0u8; n]` on a bogus Content-Length is an allocation
+                // failure, and that aborts the process instead of returning
+                // an error the caller can report.
+                let mut remaining = n;
+                let mut buf = [0u8; 8192];
+                while remaining > 0 {
+                    let want = buf.len().min(remaining as usize);
+                    self.stream.read_exact(&mut buf[..want])?;
+                    out.extend_from_slice(&buf[..want]);
+                    remaining -= want as u64;
+                }
             }
             BodyLen::Eof => {
                 self.stream.read_to_end(&mut out)?;
@@ -513,24 +522,50 @@ impl Response {
     }
 
     fn read_chunked(&mut self, sink: &mut dyn FnMut(&[u8])) -> io::Result<()> {
-        loop {
-            let mut size_line = String::new();
-            self.stream.read_line(&mut size_line)?;
-            let size = u64::from_str_radix(size_line.trim().split(';').next().unwrap_or("0"), 16)
-                .unwrap_or(0);
-            if size == 0 {
-                let mut trailer = String::new();
-                let _ = self.stream.read_line(&mut trailer);
-                break;
-            }
-            let mut buf = vec![0u8; size as usize];
-            self.stream.read_exact(&mut buf)?;
-            sink(&buf);
-            let mut crlf = [0u8; 2];
-            let _ = self.stream.read_exact(&mut crlf);
-        }
-        Ok(())
+        read_chunked_from(&mut self.stream, sink)
     }
+}
+
+/// Largest chunk we will allocate for. Two orders of magnitude above
+/// anything the engine sends (one chunk per `write` call, so JSON progress
+/// lines and 8 KiB `io::copy` blocks), and small enough that a bad size is
+/// an error rather than a fatal allocation.
+const MAX_CHUNK: u64 = 64 * 1024 * 1024;
+
+/// Decode a chunked body, handing each chunk to `sink`.
+///
+/// The size line is the peer's word and a desynced stream turns payload into
+/// one: docker layer ids are hex, so a stray `31ad4a471c68` reads as a 54 TB
+/// chunk. `vec![0u8; size]` on that does not fail — it aborts the process,
+/// and on Windows the corpse then sits in Error Reporting long enough that
+/// whoever spawned the CLI sees a hang rather than a crash.
+fn read_chunked_from(stream: &mut impl BufRead, sink: &mut dyn FnMut(&[u8])) -> io::Result<()> {
+    loop {
+        let mut size_line = String::new();
+        stream.read_line(&mut size_line)?;
+        let size =
+            u64::from_str_radix(size_line.trim().split(';').next().unwrap_or("0"), 16).unwrap_or(0);
+        if size == 0 {
+            let mut trailer = String::new();
+            let _ = stream.read_line(&mut trailer);
+            break;
+        }
+        if size > MAX_CHUNK {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "engine sent a {size}-byte chunk (limit {MAX_CHUNK}); the response stream is out of frame at {:?}",
+                    size_line.trim()
+                ),
+            ));
+        }
+        let mut buf = vec![0u8; size as usize];
+        stream.read_exact(&mut buf)?;
+        sink(&buf);
+        let mut crlf = [0u8; 2];
+        let _ = stream.read_exact(&mut crlf);
+    }
+    Ok(())
 }
 
 fn api_error(status: u16, bytes: &[u8]) -> ApiError {
@@ -573,6 +608,60 @@ pub fn demux_stdcopy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chunked(bytes: &[u8]) -> io::Result<Vec<u8>> {
+        let mut cur = io::Cursor::new(bytes.to_vec());
+        let mut out = Vec::new();
+        read_chunked_from(&mut cur, &mut |c| out.extend_from_slice(c))?;
+        Ok(out)
+    }
+
+    #[test]
+    fn chunked_bodies_decode() {
+        let body = chunked(b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n").unwrap();
+        assert_eq!(body, b"hello world");
+    }
+
+    #[test]
+    fn a_chunk_larger_than_the_reader_survives() {
+        let payload = vec![b'x'; 200_000];
+        let mut wire = format!("{:x}\r\n", payload.len()).into_bytes();
+        wire.extend_from_slice(&payload);
+        wire.extend_from_slice(b"\r\n0\r\n\r\n");
+        assert_eq!(chunked(&wire).unwrap(), payload);
+    }
+
+    // The bug this guards: a desynced response puts payload where the size
+    // line belongs, and docker layer ids are hex. "31ad4a471c68" is a real
+    // one -- 54 TB as a chunk size. Allocating that does not return an
+    // error, it aborts the process, and a Windows caller waiting on the CLI
+    // then waits on a corpse that Error Reporting holds open.
+    #[test]
+    fn an_absurd_chunk_size_is_an_error_not_an_allocation() {
+        let err = chunked(b"31ad4a471c68\r\n{\"stream\":\"Loading layer\"}\r\n").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("out of frame"),
+            "unhelpful message: {err}"
+        );
+    }
+
+    #[test]
+    fn the_ceiling_is_where_refusing_starts() {
+        // One under the ceiling is a size we honour; the ceiling itself is
+        // where refusing starts. Both are about MAX_CHUNK, not the payload,
+        // so a short body just ends as EOF rather than being refused.
+        let head = format!("{:x}\r\n", MAX_CHUNK).into_bytes();
+        assert_eq!(
+            chunked(&head).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        let over = format!("{:x}\r\n", MAX_CHUNK + 1).into_bytes();
+        assert_eq!(
+            chunked(&over).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
 
     // Runs on every platform on purpose: this is the parsing behind Windows
     // endpoint discovery, and nothing in CI runs Windows tests.
