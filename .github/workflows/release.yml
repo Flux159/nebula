@@ -343,23 +343,66 @@ jobs:
             arch: x86_64
             img_arch: x86_64 # guest-images.yml artifact naming
             galaxy_arch: x64 # Galaxy fetch-nebula.mjs naming (node process.arch)
+            kit_triple: x64-unknown-linux
           - runner: ubuntu-24.04-arm
             arch: aarch64
             img_arch: arm64
             galaxy_arch: arm64
+            kit_triple: arm64-unknown-linux
+          # The Steam Deck. Same sources, same runner, same target triple --
+          # the only difference is which glibc they are built against.
+          #
+          # ubuntu-24.04 is glibc 2.39, and nothing pins that, so the floor
+          # rises on its own whenever GitHub moves the image. A Deck is far
+          # below it: SteamOS 3.2 has 2.33, and on one of those every binary
+          # in this kit refused to start, taking the embedder's app with it.
+          #
+          # bullseye is 2.31, and what comes out of it asks for 2.30 -- under
+          # every SteamOS there has been. Not musl: nebulad finds libkrun with
+          # dlopen, and a musl process cannot load a glibc shared object.
+          - runner: ubuntu-24.04
+            arch: x86_64
+            img_arch: x86_64
+            galaxy_arch: x64
+            kit_triple: x64-steamdeck-linux
+            glibc_image: rust:1-bullseye
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Two kits build on the same runner from the same sources against
+          # different glibcs; they must not share a cache entry.
+          key: ${{ matrix.kit_triple }}
+
+      # Both builds in one `docker run`: each invocation is a fresh container,
+      # so splitting them would download the cargo registry twice. `--user`
+      # keeps the outputs owned by the runner, or the assembly below cannot
+      # read what this produced.
+      - name: Build libkrun, nebula and nebulad against an old glibc
+        if: matrix.glibc_image
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e CARGO_TERM_COLOR=always \
+            -v "$PWD:/work" -w /work \
+            "${{ matrix.glibc_image }}" bash -euxc '
+              ldd --version | head -1
+              ( cd third_party/libkrun && cargo build --release -p libkrun --features blk,net )
+              cargo build --release -p nebula-cli -p nebulad
+            '
+          ls -la third_party/libkrun/target/release/libkrun.so*
 
       - name: Build libkrun fork (.so)
+        if: ${{ !matrix.glibc_image }}
         run: |
           cd third_party/libkrun
           cargo build --release -p libkrun --features blk,net
           ls -la target/release/libkrun.so*
 
       - name: Build nebula + nebulad
+        if: ${{ !matrix.glibc_image }}
         run: cargo build --release -p nebula-cli -p nebulad
 
       # Same run, so this is the artifact the guest-images job above
@@ -427,8 +470,32 @@ jobs:
             export DOCKER_HOST=unix://$NEBULA_HOME/run/docker.sock
             bin/docker-slim ps          # also: bin/kubectl-slim, bin/helm-slim
           EOF
-          tar -C "$OUT" -czf "nebula-slim-embed-${{ matrix.galaxy_arch }}-unknown-linux.tar.gz" .
+          tar -C "$OUT" -czf "nebula-slim-embed-${{ matrix.kit_triple }}.tar.gz" .
           ls -lh nebula-slim-embed-*.tar.gz
+
+      # The point of the Steam Deck kit, checked rather than assumed: an
+      # embedder cannot discover this until it fails on somebody's device.
+      - name: The Steam Deck kit must stay under the SteamOS glibc floor
+        if: matrix.glibc_image
+        env:
+          MAX_GLIBC: "2.33" # SteamOS 3.2, the oldest a Deck realistically runs
+        run: |
+          set -e
+          bad=0
+          for binary in dist-embed-slim-linux/bin/* dist-embed-slim-linux/lib/*; do
+            [ -f "$binary" ] || continue
+            need=$(objdump -T "$binary" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1 || true)
+            name=$(basename "$binary")
+            if [ -z "$need" ]; then
+              echo "ok    $name  no glibc dependency"
+            elif [ "$(printf '%s\n%s\n' "$need" "$MAX_GLIBC" | sort -V | head -1)" = "$need" ]; then
+              echo "ok    $name  needs $need"
+            else
+              echo "::error file=$binary::$name needs glibc $need, above the $MAX_GLIBC a Steam Deck provides"
+              bad=1
+            fi
+          done
+          exit $bad
 
       # The proof: boot the exact assembled kit on the runner (hosted runners
       # expose /dev/kvm) and hit the slimd Docker socket. Skips with a warning
