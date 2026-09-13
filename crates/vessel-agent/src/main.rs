@@ -374,11 +374,25 @@ mod agent {
                 }
             }
             AgentRequest::Shutdown => {
-                std::thread::spawn(|| {
+                // arm64 powers off through PSCI, which VZ and libkrun both
+                // implement. x86 under libkrun has no power-off device (no
+                // ACPI), so RB_POWER_OFF prints "Power off not available:
+                // System halted instead" and parks every vCPU. KVM hands that
+                // halt to the VMM, which ends the VM; WHP does not, and libkrun
+                // idles a halted vCPU there forever -- so on Windows every
+                // `nebula down` sat out the graceful timeout and then killed
+                // the worker (Flux159/ragnarokoffline.app#119). A reset goes
+                // out through the i8042 controller, which libkrun wires to its
+                // exit event on both hypervisors: the route its own init uses.
+                #[cfg(target_arch = "x86_64")]
+                let cmd = libc::RB_AUTOBOOT;
+                #[cfg(not(target_arch = "x86_64"))]
+                let cmd = libc::RB_POWER_OFF;
+                std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(150));
                     unsafe {
                         libc::sync();
-                        libc::reboot(libc::RB_POWER_OFF);
+                        libc::reboot(cmd);
                     }
                 });
                 AgentResponse::Ok

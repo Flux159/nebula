@@ -115,6 +115,11 @@ pub fn is_serving() -> bool {
     SERVING.load(Ordering::SeqCst)
 }
 
+/// True once [`finish`] has begun: the daemon is leaving, whatever its VM says.
+pub fn is_finishing() -> bool {
+    FINISHING.load(Ordering::SeqCst)
+}
+
 /// Call once, as early as the paths are known — before anything that can fail
 /// with a reason worth recording.
 pub fn init(paths: &Paths) {
@@ -183,8 +188,9 @@ pub fn finish(reason: Reason) -> ! {
 
     let vessel = ctx.vessel.lock().unwrap().clone();
     if let Some(vessel) = vessel {
-        let state = vessel.state();
-        if !matches!(state, nebula_core::backend::VmState::Stopped) {
+        // Gone includes Failed: a `down` that had to kill the worker leaves it
+        // there, and stopping it again meant a second graceful attempt.
+        if !crate::vessel::vm_gone(vessel.state()) {
             let force = matches!(reason, Reason::Down { force: true });
             if let Err(e) = vessel.stop(force) {
                 tracing::error!("stopping vessel: {e:#}");

@@ -134,11 +134,18 @@ mod init {
     }
 
     fn poweroff() -> ! {
+        // A reset on x86, where libkrun has no power-off device and a halted
+        // guest never ends the VM on Windows. See AgentRequest::Shutdown in
+        // vessel-agent for the whole story.
+        #[cfg(target_arch = "x86_64")]
+        let cmd = libc::RB_AUTOBOOT;
+        #[cfg(not(target_arch = "x86_64"))]
+        let cmd = libc::RB_POWER_OFF;
         let _ = std::io::stdout().flush();
         std::thread::sleep(Duration::from_millis(150));
         unsafe {
             libc::sync();
-            libc::reboot(libc::RB_POWER_OFF);
+            libc::reboot(cmd);
         }
         loop {
             std::thread::sleep(Duration::from_secs(3600));

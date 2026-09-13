@@ -23,6 +23,10 @@ pub const VSOCK_PORT_CONTAINERD: u32 = 2376;
 /// UDP port on the host (NAT gateway address) where nebulad answers DNS
 /// relayed by the guest agent's 127.0.0.1:53 proxy.
 pub const HOST_DNS_UDP_PORT: u16 = 42053;
+/// The `DaemonResponse::Error` message nebulad answers every request with once
+/// it has begun to stop. Matched exactly by the CLI: a daemon that says this
+/// still holds its socket, ports and VM, and is about to exit.
+pub const DAEMON_SHUTTING_DOWN: &str = "nebulad is shutting down";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
