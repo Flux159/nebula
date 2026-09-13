@@ -11,8 +11,21 @@ use crate::client;
 
 pub fn up() -> anyhow::Result<()> {
     if client::daemon_running() {
-        println!("nebula is already running");
-        return status();
+        if !daemon_departing() {
+            println!("nebula is already running");
+            return status();
+        }
+        // Starting beside it fails on the socket and the ports, and reporting
+        // it as running is worse: the caller goes on to use an engine that is
+        // about to exit.
+        println!("waiting for the previous nebulad to exit…");
+        if !wait_for_daemon_exit(DEPART_TIMEOUT) {
+            bail!(
+                "the previous nebulad was still shutting down after {}s — check {}",
+                DEPART_TIMEOUT.as_secs(),
+                client::nebula_home()?.join("logs/nebulad.log").display()
+            );
+        }
     }
     ensure_images_installed()?;
 
@@ -92,19 +105,72 @@ pub fn up() -> anyhow::Result<()> {
     }
 }
 
+/// How long `up` and `down` wait for a departing daemon to exit.
+///
+/// Generous on purpose. A healthy stop takes seconds, but a daemon from before
+/// the x86 shutdown fix spent two graceful timeouts and more on Windows, and
+/// giving up early hands the caller the very race this wait exists to close.
+const DEPART_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Is the daemon on the socket one that has begun to stop?
+fn daemon_departing() -> bool {
+    matches!(
+        client::request(&DaemonRequest::Status),
+        Ok(DaemonResponse::Error { message }) if message == DAEMON_SHUTTING_DOWN
+    )
+}
+
+/// Wait for the daemon to exit. False if it is still there after `timeout`.
+///
+/// The socket is the signal: nebulad keeps accepting until the process ends.
+fn wait_for_daemon_exit(timeout: Duration) -> bool {
+    wait_until(timeout, Duration::from_millis(200), || {
+        !client::daemon_running()
+    })
+}
+
+fn wait_until(timeout: Duration, every: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if done() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(every);
+    }
+}
+
 pub fn down(force: bool) -> anyhow::Result<()> {
     if !client::daemon_running() {
         println!("nebula is not running");
         return Ok(());
     }
-    match client::request(&DaemonRequest::Down { force })? {
-        DaemonResponse::Ok => {
-            println!("nebula stopped");
-            Ok(())
-        }
-        DaemonResponse::Error { message } => bail!("stop failed: {message}"),
-        other => bail!("unexpected response: {other:?}"),
+    let stopped = match client::request(&DaemonRequest::Down { force }) {
+        Ok(DaemonResponse::Ok) => Ok(()),
+        // Someone else's `down`, or a signal, got there first. What is left
+        // to do is the same wait.
+        Ok(DaemonResponse::Error { message }) if message == DAEMON_SHUTTING_DOWN => Ok(()),
+        Ok(DaemonResponse::Error { message }) => Err(anyhow::anyhow!("stop failed: {message}")),
+        Ok(other) => Err(anyhow::anyhow!("unexpected response: {other:?}")),
+        Err(e) => Err(e),
+    };
+    // Return once the daemon has exited, not once it has replied. It replies
+    // first, and for as long as it takes to leave it still holds the socket,
+    // the ports and the VM -- a caller that starts the engine again in that
+    // gap gets "already running" from an engine about to be gone. The daemon
+    // exits after a failed stop too, so this waits either way.
+    if !wait_for_daemon_exit(DEPART_TIMEOUT) {
+        bail!(
+            "nebulad had not exited {}s after being stopped — check {}",
+            DEPART_TIMEOUT.as_secs(),
+            client::nebula_home()?.join("logs/nebulad.log").display()
+        );
     }
+    stopped?;
+    println!("nebula stopped");
+    Ok(())
 }
 
 pub fn status() -> anyhow::Result<()> {
@@ -179,6 +245,12 @@ pub fn status() -> anyhow::Result<()> {
                         .unwrap_or_default()
                 );
             }
+            Ok(())
+        }
+        // Its own state rather than an error: an embedder deciding whether to
+        // start the engine needs to know this one is about to be gone.
+        DaemonResponse::Error { message } if message == DAEMON_SHUTTING_DOWN => {
+            println!("nebula: stopping (daemon shutting down)");
             Ok(())
         }
         DaemonResponse::Error { message } => bail!("status failed: {message}"),
@@ -769,5 +841,32 @@ struct RawTerm;
 impl RawTerm {
     fn enable() -> anyhow::Result<Self> {
         Ok(Self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_until_returns_as_soon_as_the_condition_holds() {
+        let mut polls = 0;
+        let done = wait_until(Duration::from_secs(5), Duration::from_millis(1), || {
+            polls += 1;
+            polls == 3
+        });
+        assert!(done);
+        assert_eq!(polls, 3);
+    }
+
+    #[test]
+    fn wait_until_gives_up_at_the_deadline() {
+        let started = Instant::now();
+        assert!(!wait_until(
+            Duration::from_millis(50),
+            Duration::from_millis(5),
+            || false
+        ));
+        assert!(started.elapsed() >= Duration::from_millis(50));
     }
 }

@@ -89,7 +89,10 @@ pub fn serve(paths: &Paths, vessel: Vessel, plan: crate::ports::PortPlan) -> any
         let shutdown = shutdown.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(3));
-            if shutdown.load(Ordering::SeqCst) {
+            // A stop from a signal sets no flag here, only FINISHING; without
+            // this the VM it stops looks like a death, and the second finish
+            // exits the process twenty seconds into the first.
+            if shutdown.load(Ordering::SeqCst) || crate::shutdown::is_finishing() {
                 return;
             }
             let st = vessel.state();
@@ -103,10 +106,15 @@ pub fn serve(paths: &Paths, vessel: Vessel, plan: crate::ports::PortPlan) -> any
         });
     }
 
+    // Keeps accepting through a `down`. The daemon exits from the shutdown path
+    // once the vessel has stopped, and until then every request is answered
+    // "shutting down" (see `handle`), so a caller can tell a departing daemon
+    // from a live one. Breaking out here instead did two things wrong: the
+    // first connection after a `down` found a socket that looked live, and the
+    // return went straight into main's `listener-closed` exit -- a second
+    // shutdown that gave the first one twenty seconds and then called
+    // process::exit underneath it.
     for conn in listener.incoming() {
-        if shutdown.load(Ordering::SeqCst) {
-            break;
-        }
         let Ok(conn) = conn else { continue };
         let vessel = vessel.clone();
         let balloon = balloon.clone();
@@ -117,11 +125,6 @@ pub fn serve(paths: &Paths, vessel: Vessel, plan: crate::ports::PortPlan) -> any
                 tracing::debug!("connection error: {e:#}");
             }
         });
-        // `down` is handled inline below via the shutdown flag; the listener
-        // loop needs a nudge, which the closing client connection provides.
-        if shutdown.load(Ordering::SeqCst) {
-            break;
-        }
     }
 
     // Reached only when the listener ends without a `down`; main turns this
@@ -155,13 +158,28 @@ fn handle(
         }
     };
 
+    // Once a stop has begun this daemon is leaving, whatever its VM says, and a
+    // normal answer is a lie a caller acts on: `nebula up` saw a status, said
+    // "already running", and returned -- and the engine then exited under it.
+    if shutdown.load(Ordering::SeqCst) || crate::shutdown::is_finishing() {
+        return respond(
+            &mut writer,
+            &DaemonResponse::Error {
+                message: DAEMON_SHUTTING_DOWN.into(),
+            },
+        );
+    }
+
     match req {
         DaemonRequest::Status => {
-            let agent = match vessel.agent_request(&AgentRequest::Health) {
+            // Bounded, unlike exec: these are instant on a live guest, and a
+            // halted one would otherwise hang `nebula status` indefinitely.
+            let timeout = std::time::Duration::from_secs(5);
+            let agent = match vessel.agent_request_long(&AgentRequest::Health, timeout) {
                 Ok(AgentResponse::Health(h)) => Some(h),
                 _ => None,
             };
-            let mem = match vessel.agent_request(&AgentRequest::MemStats) {
+            let mem = match vessel.agent_request_long(&AgentRequest::MemStats, timeout) {
                 Ok(AgentResponse::MemStats(m)) => Some(m),
                 _ => None,
             };

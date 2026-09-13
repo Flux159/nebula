@@ -236,13 +236,20 @@ impl Vessel {
         Ok(())
     }
 
-    /// Stop the Vessel: graceful via agent shutdown, falling back to VZ stop.
+    /// Stop the Vessel: graceful via agent shutdown, falling back to a forced
+    /// stop. Ok once the VM is gone, whichever way it went (see [`vm_gone`]).
     pub fn stop(&self, force: bool) -> anyhow::Result<()> {
+        if vm_gone(self.state()) {
+            return Ok(());
+        }
         if !force {
-            let _ = self.agent_request(&AgentRequest::Shutdown);
+            // Bounded. The agent may already be on its way down, and with no
+            // read timeout an unanswered request held the whole shutdown for
+            // as long as the connection took to fail -- tens of seconds.
+            let _ = self.agent_request_long(&AgentRequest::Shutdown, AGENT_SHUTDOWN_TIMEOUT);
             let deadline = Instant::now() + Duration::from_secs(10);
             while Instant::now() < deadline {
-                if self.state() == VmState::Stopped {
+                if vm_gone(self.state()) {
                     return Ok(());
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -251,9 +258,29 @@ impl Vessel {
         }
         let mut vm = self.vm.lock().unwrap();
         vm.stop(true)?;
-        vm.wait_for(VmState::Stopped, Duration::from_secs(10))?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !vm_gone(vm.state()) {
+            if Instant::now() >= deadline {
+                anyhow::bail!("vessel still {:?} 10s after a forced stop", vm.state());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
         Ok(())
     }
+}
+
+/// How long a graceful stop waits for the agent to acknowledge.
+const AGENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Has the VM ended, cleanly or not?
+///
+/// A forced stop cannot end in `Stopped` on krun: the worker is killed, a
+/// killed process exits non-zero, and a non-zero worker reads as `Failed`.
+/// Waiting for `Stopped` after that errored at once, and the shutdown path took
+/// the error for a VM still to be stopped and ran the whole graceful attempt a
+/// second time against an agent that no longer existed.
+pub fn vm_gone(state: VmState) -> bool {
+    matches!(state, VmState::Stopped | VmState::Failed)
 }
 
 /// The engine vessel's MAC, minted once and persisted — same contract as
@@ -366,6 +393,21 @@ mod tests {
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
             .collect();
         String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn a_killed_worker_counts_as_stopped() {
+        assert!(vm_gone(VmState::Stopped));
+        // What a forced stop on krun actually leaves behind.
+        assert!(vm_gone(VmState::Failed));
+        for live in [
+            VmState::Created,
+            VmState::Starting,
+            VmState::Running,
+            VmState::Stopping,
+        ] {
+            assert!(!vm_gone(live), "{live:?}");
+        }
     }
 
     #[test]
