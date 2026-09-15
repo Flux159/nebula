@@ -6,6 +6,7 @@
 
 mod api;
 mod balloon;
+mod clock;
 mod config;
 mod images;
 mod instance;
