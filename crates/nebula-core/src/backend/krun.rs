@@ -443,6 +443,92 @@ fn passt_path() -> Option<PathBuf> {
     local.is_file().then_some(local)
 }
 
+/// Whether the guest has to calibrate its TSC against the PIT.
+///
+/// Linux reads the TSC's frequency from CPUID leaf 0x15, which the WHP fork
+/// synthesises, but only believes it on a GenuineIntel CPU whose basic leaves
+/// reach 0x15. Anywhere else -- every AMD machine -- it times the TSC by
+/// polling libkrun's emulated PIT through port 0x61, and wants at least a
+/// thousand reads in 10 ms with none ten times slower than the fastest. Each
+/// read is a WHP exit to this process, so it gets neither. The guest logs
+/// "Unable to calibrate against PIT", finds no HPET or PM timer to fall back
+/// on, marks the TSC unstable, and keeps time with refined-jiffies: a clock
+/// that only moves on timer interrupts. Every server in the guest paces
+/// itself by that clock -- a game's monsters move in bursts, on a machine
+/// with power to spare.
+#[cfg(all(windows, target_arch = "x86_64"))]
+fn guest_calibrates_against_pit() -> bool {
+    #[allow(unused_unsafe)]
+    let leaf0 = unsafe { core::arch::x86_64::__cpuid(0) };
+    calibrates_against_pit(leaf0.eax, leaf0.ebx, leaf0.ecx, leaf0.edx)
+}
+
+#[cfg(not(all(windows, target_arch = "x86_64")))]
+fn guest_calibrates_against_pit() -> bool {
+    false
+}
+
+/// Kernel arguments that tell such a guest what its TSC is.
+///
+/// WHP runs the guest on the host's TSC, unscaled, so the host can measure
+/// the frequency the guest cannot. `tsc_early_khz` skips the calibration,
+/// and `tsc=reliable` keeps the clocksource watchdog -- which on this machine
+/// compares against jiffies, still driven by emulated timer interrupts --
+/// from demoting the TSC later.
+fn tsc_args(khz: Option<u64>) -> String {
+    match khz {
+        Some(khz) => format!(" tsc_early_khz={khz} tsc=reliable"),
+        None => " tsc=reliable".into(),
+    }
+}
+
+/// The host TSC frequency, measured against `Instant` (QueryPerformanceCounter
+/// on Windows). Median of three 50 ms windows: a window the scheduler
+/// interrupts runs long on both clocks alike, so they agree to a few ppm.
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[allow(unused_unsafe)]
+fn host_tsc_khz() -> Option<u64> {
+    use core::arch::x86_64::_rdtsc;
+    use std::time::{Duration, Instant};
+
+    let mut samples: Vec<u64> = (0..3)
+        .filter_map(|_| {
+            let t0 = Instant::now();
+            let c0 = unsafe { _rdtsc() };
+            std::thread::sleep(Duration::from_millis(50));
+            let c1 = unsafe { _rdtsc() };
+            let t1 = Instant::now();
+            tsc_khz(c1.wrapping_sub(c0), t1 - t0)
+        })
+        .collect();
+    samples.sort_unstable();
+    samples.get(samples.len() / 2).copied()
+}
+
+#[cfg(not(all(windows, target_arch = "x86_64")))]
+fn host_tsc_khz() -> Option<u64> {
+    None
+}
+
+#[cfg(any(test, all(windows, target_arch = "x86_64")))]
+fn tsc_khz(ticks: u64, elapsed: std::time::Duration) -> Option<u64> {
+    let nanos = elapsed.as_nanos();
+    if nanos == 0 {
+        return None;
+    }
+    let khz = (ticks as u128 * 1_000_000 / nanos) as u64;
+    // Outside 100 MHz..100 GHz is a torn read, not a processor.
+    (100_000..100_000_000).contains(&khz).then_some(khz)
+}
+
+/// [`guest_calibrates_against_pit`] for a given CPUID leaf 0.
+#[cfg(any(test, all(windows, target_arch = "x86_64")))]
+fn calibrates_against_pit(max_basic_leaf: u32, ebx: u32, ecx: u32, edx: u32) -> bool {
+    // "GenuineIntel", split across EBX, EDX, ECX in that order.
+    let intel = ebx == 0x756e_6547 && edx == 0x4965_6e69 && ecx == 0x6c65_746e;
+    !(intel && max_basic_leaf >= 0x15)
+}
+
 fn parse_mac(mac: Option<&str>) -> Option<[u8; 6]> {
     let mac = mac?;
     let mut out = [0u8; 6];
@@ -511,14 +597,14 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
         } = &spec.boot;
         let kernel_c = cstr(&kernel.to_string_lossy());
         let initrd_c = initramfs.as_ref().map(|p| cstr(&p.to_string_lossy()));
-        let debug_cmdline;
-        let cmdline = if debug && cfg!(windows) {
-            debug_cmdline = format!("{cmdline} earlyprintk=ttyS0,115200,keep");
-            &debug_cmdline
-        } else {
-            cmdline
-        };
-        let cmdline_c = cstr(cmdline);
+        let mut cmdline = cmdline.clone();
+        if guest_calibrates_against_pit() {
+            cmdline.push_str(&tsc_args(host_tsc_khz()));
+        }
+        if debug && cfg!(windows) {
+            cmdline.push_str(" earlyprintk=ttyS0,115200,keep");
+        }
+        let cmdline_c = cstr(&cmdline);
         check(
             "krun_set_kernel",
             (api.krun_set_kernel)(
@@ -878,5 +964,56 @@ fn serve_worker_control(
                 ),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{calibrates_against_pit, tsc_args, tsc_khz};
+    use std::time::Duration;
+
+    #[test]
+    fn tsc_frequency_from_a_window() {
+        // A 2995.250 MHz TSC over 50 ms.
+        assert_eq!(
+            tsc_khz(149_762_500, Duration::from_millis(50)),
+            Some(2_995_250)
+        );
+        assert_eq!(tsc_khz(0, Duration::from_millis(50)), None);
+        assert_eq!(tsc_khz(1, Duration::ZERO), None);
+    }
+
+    #[test]
+    fn tsc_args_skip_calibration_when_measured() {
+        assert_eq!(
+            tsc_args(Some(3_600_000)),
+            " tsc_early_khz=3600000 tsc=reliable"
+        );
+        assert_eq!(tsc_args(None), " tsc=reliable");
+    }
+
+    // CPUID leaf 0 vendor registers: EBX, ECX, EDX.
+    const INTEL: (u32, u32, u32) = (0x756e_6547, 0x6c65_746e, 0x4965_6e69);
+    const AMD: (u32, u32, u32) = (0x6874_7541, 0x444d_4163, 0x6974_6e65);
+
+    #[test]
+    fn intel_with_leaf_0x15_reads_the_timer_frequency() {
+        let (b, c, d) = INTEL;
+        assert!(!calibrates_against_pit(0x20, b, c, d));
+    }
+
+    #[test]
+    fn intel_without_leaf_0x15_calibrates() {
+        let (b, c, d) = INTEL;
+        assert!(calibrates_against_pit(0x14, b, c, d));
+    }
+
+    #[test]
+    fn amd_always_calibrates() {
+        // Zen 3's max basic leaf is 0x10, but a higher one would not help:
+        // Linux only reads leaf 0x15 on Intel.
+        let (b, c, d) = AMD;
+        assert!(calibrates_against_pit(0x10, b, c, d));
+        assert!(calibrates_against_pit(0x20, b, c, d));
     }
 }

@@ -299,13 +299,24 @@ impl I8254 {
             )
         };
 
-        std::thread::spawn(move || run_channel0(state, generation, period, periodic));
+        let first = Instant::now() + period;
+        std::thread::spawn(move || run_channel0(state, generation, first, period, periodic));
     }
 }
 
-fn run_channel0(state: Weak<Mutex<PitState>>, generation: u64, period: Duration, periodic: bool) {
+fn run_channel0(
+    state: Weak<Mutex<PitState>>,
+    generation: u64,
+    first: Instant,
+    period: Duration,
+    periodic: bool,
+) {
+    let mut deadline = first;
     loop {
-        std::thread::sleep(period);
+        let now = Instant::now();
+        if deadline > now {
+            std::thread::sleep(deadline - now);
+        }
 
         let Some(state) = state.upgrade() else {
             return;
@@ -321,7 +332,38 @@ fn run_channel0(state: Weak<Mutex<PitState>>, generation: u64, period: Duration,
         if !periodic {
             return;
         }
+        deadline = next_channel0_deadline(deadline, period, Instant::now());
     }
+}
+
+/// How far behind channel 0 may fall before it gives up on the missed ticks.
+const CHANNEL_0_MAX_BEHIND_PERIODS: u32 = 50;
+
+/// When the pulse after the one due at `last` should fire.
+///
+/// A periodic PIT has to hold its rate, not merely its period. Linux on a
+/// host without CPUID leaf 0x15 -- every AMD machine -- has no other way to
+/// know the local APIC timer's frequency, so after calibrating it against the
+/// TSC it counts PIT ticks across 100 ms and disables the APIC timer if the
+/// count is off by more than two. The guest then runs every timer it has off
+/// this device. Until the TSC is trusted, its clocksource watchdog reads
+/// time from jiffies these ticks drive, too.
+///
+/// Sleeping one period after each pulse, as this did, makes every tick late
+/// by whatever the host's sleep overshoots, and those overshoots add up. So
+/// each deadline is one period after the previous deadline, and a late pulse
+/// is followed by the next one sooner.
+///
+/// Catch-up pulses stay a quarter period apart, because two edge interrupts
+/// that reach the LAPIC before the guest takes the first one merge into one.
+/// A worker that fell far behind (the host slept, or descheduled it)
+/// resynchronises instead of delivering the backlog as a storm.
+fn next_channel0_deadline(last: Instant, period: Duration, now: Instant) -> Instant {
+    let next = last + period;
+    if now > next + period * CHANNEL_0_MAX_BEHIND_PERIODS {
+        return now + period;
+    }
+    next.max(now + period / 4)
 }
 
 impl BusDevice for I8254 {
@@ -448,6 +490,42 @@ mod tests {
         let state = pit.state.lock().unwrap();
         assert!(state.channel2.started_at.is_none());
         assert!(state.channel2.elapsed_before_start >= 2_000);
+    }
+
+    #[test]
+    fn channel0_deadlines_do_not_accumulate_lateness() {
+        let period = Duration::from_millis(1);
+        let start = Instant::now();
+        let mut deadline = start;
+        // Every pulse is delivered 300 us after it was due.
+        for _ in 0..1_000 {
+            deadline = next_channel0_deadline(deadline, period, deadline + period * 3 / 10);
+        }
+        assert_eq!(deadline - start, period * 1_000);
+    }
+
+    #[test]
+    fn channel0_catches_up_with_spaced_pulses() {
+        let period = Duration::from_millis(4);
+        let start = Instant::now();
+        // The pulse due at `start` went out 10 ms late: the next two are
+        // already overdue and must not land back to back.
+        let now = start + Duration::from_millis(10);
+        assert_eq!(next_channel0_deadline(start, period, now), now + period / 4);
+        // Once caught up, the schedule is the original one again.
+        let on_time = start + period * 3;
+        assert_eq!(
+            next_channel0_deadline(on_time, period, on_time + Duration::from_micros(100)),
+            on_time + period
+        );
+    }
+
+    #[test]
+    fn channel0_resynchronises_after_a_long_stall() {
+        let period = Duration::from_millis(1);
+        let start = Instant::now();
+        let now = start + Duration::from_secs(5);
+        assert_eq!(next_channel0_deadline(start, period, now), now + period);
     }
 
     #[test]

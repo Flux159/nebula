@@ -66,6 +66,9 @@ pub fn serve(paths: &Paths, vessel: Vessel, plan: crate::ports::PortPlan) -> any
     // Elastic memory (Phase 4).
     let balloon = crate::balloon::start(vessel.clone());
 
+    // Guest clock health into this log, for "it lags" reports.
+    crate::clock::start(vessel.clone());
+
     // REST API for SDKs/UI/embedders (Phase 10; hyper since the HTTP-embedding work).
     let kubeconfig = paths
         .config_toml()
