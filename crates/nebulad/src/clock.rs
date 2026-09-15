@@ -33,7 +33,7 @@ for d in /sys/devices/system/clockevents/clockevent*; do
   echo "clockevent ${d##*/}: $(cat $d/current_device 2>/dev/null)"
 done
 echo "broadcast: $(cat /sys/devices/system/clockevents/broadcast/current_device 2>/dev/null)"
-dmesg 2>/dev/null | grep -iE 'clocksource|tsc|apic timer|calibrat|verification|unstable|hz' | head -n 40
+dmesg 2>/dev/null | grep -iE 'clocksource|tsc|apic timer|calibrat|unstable|mhz' | head -n 40
 "#;
 
 /// Uptime first, before anything slow, so the host's send time stands in for
