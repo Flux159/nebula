@@ -592,31 +592,104 @@ fn api_error(status: u16, bytes: &[u8]) -> ApiError {
 }
 
 /// stdcopy demux: split a multiplexed docker stream into stdout/stderr.
-pub fn demux_stdcopy(
-    data: &[u8],
-    mut on_stdout: impl FnMut(&[u8]),
-    mut on_stderr: impl FnMut(&[u8]),
-) {
-    let mut i = 0;
-    while i + 8 <= data.len() {
-        let stream = data[i];
-        let len = u32::from_be_bytes([data[i + 4], data[i + 5], data[i + 6], data[i + 7]]) as usize;
-        i += 8;
-        if i + len > data.len() {
-            break;
-        }
-        let payload = &data[i..i + len];
-        match stream {
-            2 => on_stderr(payload),
-            _ => on_stdout(payload),
-        }
-        i += len;
+/// Splits Docker's multiplexed stdout/stderr stream (non-TTY attach, exec and
+/// logs): frames of an 8-byte header -- stream id, three zero bytes, a
+/// big-endian u32 length -- followed by that many bytes.
+///
+/// A frame can straddle any number of socket reads or HTTP chunks, so the
+/// demuxer keeps what it has not yet been able to emit and finishes the frame
+/// on the next `feed`. Parsing each read on its own -- what this replaced --
+/// silently dropped a frame cut by a read boundary and everything after it,
+/// while the exit code still reported success: past 8 KiB of output, `docker
+/// exec` could return a truncated answer that looked complete.
+#[derive(Default)]
+pub struct StdDemux {
+    pending: Vec<u8>,
+}
+
+impl StdDemux {
+    pub fn new() -> Self {
+        Self::default()
     }
+
+    /// Emits every frame completed by `data`; keeps the rest for next time.
+    pub fn feed(
+        &mut self,
+        data: &[u8],
+        mut on_stdout: impl FnMut(&[u8]),
+        mut on_stderr: impl FnMut(&[u8]),
+    ) {
+        self.pending.extend_from_slice(data);
+        let mut i = 0;
+        while i + 8 <= self.pending.len() {
+            let stream = self.pending[i];
+            let len = u32::from_be_bytes([
+                self.pending[i + 4],
+                self.pending[i + 5],
+                self.pending[i + 6],
+                self.pending[i + 7],
+            ]) as usize;
+            if i + 8 + len > self.pending.len() {
+                break;
+            }
+            let payload = &self.pending[i + 8..i + 8 + len];
+            match stream {
+                2 => on_stderr(payload),
+                _ => on_stdout(payload),
+            }
+            i += 8 + len;
+        }
+        self.pending.drain(..i);
+    }
+
+    /// Bytes left over when the stream ended: a frame cut short.
+    pub fn leftover(&self) -> usize {
+        self.pending.len()
+    }
+}
+
+/// One whole buffer of multiplexed output. For a stream read in pieces, use
+/// [`StdDemux`] so frames that cross a piece boundary survive.
+pub fn demux_stdcopy(data: &[u8], on_stdout: impl FnMut(&[u8]), on_stderr: impl FnMut(&[u8])) {
+    StdDemux::new().feed(data, on_stdout, on_stderr);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn frame(stream: u8, payload: &[u8]) -> Vec<u8> {
+        let mut f = vec![stream, 0, 0, 0];
+        f.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        f.extend_from_slice(payload);
+        f
+    }
+
+    #[test]
+    fn demux_survives_frames_split_at_every_boundary() {
+        let big: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+        let mut stream = frame(1, b"hello ");
+        stream.extend(frame(2, b"warn"));
+        stream.extend(frame(1, &big));
+        stream.extend(frame(1, b" bye"));
+        let mut want = b"hello ".to_vec();
+        want.extend_from_slice(&big);
+        want.extend_from_slice(b" bye");
+        for piece in [1usize, 3, 7, 8, 9, 100, 8192, stream.len()] {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let mut d = StdDemux::new();
+            for chunk in stream.chunks(piece) {
+                d.feed(
+                    chunk,
+                    |o| out.extend_from_slice(o),
+                    |e| err.extend_from_slice(e),
+                );
+            }
+            assert_eq!(out, want, "stdout with {piece}-byte pieces");
+            assert_eq!(err, b"warn", "stderr with {piece}-byte pieces");
+            assert_eq!(d.leftover(), 0);
+        }
+    }
 
     fn chunked(bytes: &[u8]) -> io::Result<Vec<u8>> {
         let mut cur = io::Cursor::new(bytes.to_vec());

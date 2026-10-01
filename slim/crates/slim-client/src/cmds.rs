@@ -2,7 +2,7 @@
 
 use crate::args::{self, Parsed};
 use crate::format as fmt;
-use crate::http::{demux_stdcopy, Client};
+use crate::http::{Client, StdDemux};
 use crate::tty;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -372,6 +372,7 @@ fn attach_and_run(
         let mut buf = [0u8; 8192];
         let mut out = std::io::stdout();
         let mut err = std::io::stderr();
+        let mut demux = StdDemux::new();
         loop {
             match read_sock.read(&mut buf) {
                 Ok(0) | Err(_) => break,
@@ -380,7 +381,7 @@ fn attach_and_run(
                         let _ = out.write_all(&buf[..n]);
                         let _ = out.flush();
                     } else {
-                        demux_stdcopy(
+                        demux.feed(
                             &buf[..n],
                             |o| {
                                 let _ = out.write_all(o);
@@ -661,12 +662,13 @@ fn stream_logs_full(
     }
     let mut out = std::io::stdout();
     let mut err = std::io::stderr();
+    let mut demux = StdDemux::new();
     resp.stream_body(|chunk| {
         if tty_mode {
             let _ = out.write_all(chunk);
             let _ = out.flush();
         } else {
-            demux_stdcopy(
+            demux.feed(
                 chunk,
                 |o| {
                     let _ = out.write_all(o);
@@ -747,6 +749,7 @@ pub fn exec(client: &Client, cargs: &[String]) -> CmdResult {
         let mut buf = [0u8; 8192];
         let mut out = std::io::stdout();
         let mut err = std::io::stderr();
+        let mut demux = StdDemux::new();
         loop {
             match read_sock.read(&mut buf) {
                 Ok(0) | Err(_) => break,
@@ -755,7 +758,7 @@ pub fn exec(client: &Client, cargs: &[String]) -> CmdResult {
                         let _ = out.write_all(&buf[..n]);
                         let _ = out.flush();
                     } else {
-                        demux_stdcopy(
+                        demux.feed(
                             &buf[..n],
                             |o| {
                                 let _ = out.write_all(o);
