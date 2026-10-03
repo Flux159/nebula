@@ -89,6 +89,22 @@ pub enum PullEvent {
     },
 }
 
+/// How old an interrupted load's leftovers must be before startup removes them.
+const STALE_LOAD_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Bytes under `path`, without following symlinks (layers contain plenty).
+fn dir_size(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if !meta.is_dir() {
+        return meta.len();
+    }
+    std::fs::read_dir(path)
+        .map(|it| it.flatten().map(|e| dir_size(&e.path())).sum())
+        .unwrap_or(0)
+}
+
 pub(crate) fn other(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }
@@ -114,12 +130,95 @@ impl Store {
         let shared = std::env::var("NEBULA_IMAGES_DIR")
             .map(|v| !v.trim().is_empty())
             .unwrap_or(false);
-        Ok(Store {
+        let store = Store {
             root: root.to_path_buf(),
             arch,
             db: Mutex::new(db),
             shared,
-        })
+        };
+        store.sweep_interrupted_loads(STALE_LOAD_AGE);
+        Ok(store)
+    }
+
+    /// Delete what an interrupted `docker load` leaves behind: the spooled
+    /// archive (`blobs/.upload-*.tar`, often hundreds of MB) and half-unpacked
+    /// layers (`layers/.tmp-load-*`). Both are removed when a load finishes or
+    /// fails, but not when the engine or the VM stops mid-load, and nothing
+    /// else ever looks at them. Only entries older than `min_age`: a shared
+    /// store (NEBULA_IMAGES_DIR) may have another engine's load in progress.
+    pub fn sweep_interrupted_loads(&self, min_age: std::time::Duration) -> u64 {
+        let mut freed = 0u64;
+        for (dir, prefix) in [("blobs", ".upload-"), ("layers", ".tmp-load-")] {
+            let Ok(entries) = std::fs::read_dir(self.root.join(dir)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if !entry.file_name().to_string_lossy().starts_with(prefix) {
+                    continue;
+                }
+                let Ok(meta) = entry.metadata() else { continue };
+                let old = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age >= min_age);
+                if !old {
+                    continue;
+                }
+                let path = entry.path();
+                let size = if meta.is_dir() {
+                    dir_size(&path)
+                } else {
+                    meta.len()
+                };
+                let gone = if meta.is_dir() {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                };
+                if gone.is_ok() {
+                    freed += size;
+                }
+            }
+        }
+        freed
+    }
+
+    /// `docker image prune`: remove every untagged image (or, with `all`,
+    /// every image) that no container uses. Returns the delete responses and
+    /// the bytes reclaimed, counted as the size of the layer directories that
+    /// actually went away (a layer another image shares stays, and is not
+    /// counted).
+    pub fn prune(
+        &self,
+        all: bool,
+        in_use: &dyn Fn(&str) -> bool,
+    ) -> (Vec<ImageDeleteResponse>, u64) {
+        let mut out = Vec::new();
+        let mut freed = 0u64;
+        for rec in self.list() {
+            if in_use(&rec.id) || (!all && !self.repo_tags(&rec.id).is_empty()) {
+                continue;
+            }
+            let layers: Vec<(PathBuf, u64)> = rec
+                .diff_ids
+                .iter()
+                .map(|d| {
+                    let p = self.layer_dir(d);
+                    let n = dir_size(&p);
+                    (p, n)
+                })
+                .collect();
+            if let Ok(resp) = self.remove(&rec.id, false, in_use) {
+                freed += layers
+                    .iter()
+                    .filter(|(p, _)| !p.exists())
+                    .map(|(_, n)| *n)
+                    .sum::<u64>();
+                out.extend(resp);
+            }
+        }
+        (out, freed)
     }
 
     /// Take an exclusive cross-process lock on the store (shared mode only).
@@ -627,3 +726,91 @@ pub fn unmount(path: &Path) {
 
 #[cfg(not(target_os = "linux"))]
 pub fn unmount(_path: &Path) {}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    fn store(tag: &str) -> (PathBuf, Store) {
+        let dir = std::env::temp_dir().join(format!("slimg-prune-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = Store::open(&dir).unwrap();
+        (dir, s)
+    }
+
+    fn layer(s: &Store, diff: &str, bytes: usize) {
+        let d = s.layer_dir(diff);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("file"), vec![0u8; bytes]).unwrap();
+    }
+
+    fn image(s: &Store, id: &str, layers: &[&str], tag: Option<&str>) {
+        let rec = ImageRecord {
+            id: id.into(),
+            diff_ids: layers.iter().map(|l| l.to_string()).collect(),
+            ..Default::default()
+        };
+        s.insert_local(b"{}", rec, tag).unwrap();
+    }
+
+    #[test]
+    fn prune_removes_untagged_unused_images_and_their_own_layers() {
+        let (dir, s) = store("images");
+        layer(&s, "sha256:shared", 100);
+        layer(&s, "sha256:old", 1000);
+        layer(&s, "sha256:running", 10);
+        image(
+            &s,
+            "sha256:current",
+            &["sha256:shared"],
+            Some("app/server:1"),
+        );
+        image(
+            &s,
+            "sha256:previous",
+            &["sha256:shared", "sha256:old"],
+            None,
+        );
+        image(&s, "sha256:inuse", &["sha256:running"], None);
+        let in_use = |id: &str| id == "sha256:inuse";
+
+        let (deleted, freed) = s.prune(false, &in_use);
+        let ids: Vec<_> = deleted.iter().filter_map(|d| d.deleted.clone()).collect();
+        assert_eq!(ids, vec!["sha256:previous".to_string()]);
+        assert_eq!(freed, 1000, "only the layer no other image shares");
+        assert!(s.layer_dir("sha256:shared").exists());
+        assert!(!s.layer_dir("sha256:old").exists());
+        assert!(s.resolve("sha256:inuse").is_some(), "in use: kept");
+        assert!(s.resolve("app/server:1").is_some(), "tagged: kept");
+
+        // -a: every unused image, tagged or not.
+        let (deleted, freed) = s.prune(true, &in_use);
+        let ids: Vec<_> = deleted.iter().filter_map(|d| d.deleted.clone()).collect();
+        assert_eq!(ids, vec!["sha256:current".to_string()]);
+        assert_eq!(freed, 100);
+        assert!(s.resolve("sha256:inuse").is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn interrupted_loads_are_swept_once_stale() {
+        let (dir, s) = store("sweep");
+        std::fs::write(dir.join("blobs/.upload-abc.tar"), vec![0u8; 500]).unwrap();
+        std::fs::create_dir_all(dir.join("layers/.tmp-load-xyz/usr")).unwrap();
+        std::fs::write(dir.join("layers/.tmp-load-xyz/usr/f"), vec![0u8; 50]).unwrap();
+        std::fs::create_dir_all(dir.join("layers/keep")).unwrap();
+
+        // Fresh: another engine sharing the store may still be loading.
+        assert_eq!(
+            s.sweep_interrupted_loads(std::time::Duration::from_secs(3600)),
+            0
+        );
+        assert!(dir.join("blobs/.upload-abc.tar").exists());
+
+        assert_eq!(s.sweep_interrupted_loads(std::time::Duration::ZERO), 550);
+        assert!(!dir.join("blobs/.upload-abc.tar").exists());
+        assert!(!dir.join("layers/.tmp-load-xyz").exists());
+        assert!(dir.join("layers/keep").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

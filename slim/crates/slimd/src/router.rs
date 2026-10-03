@@ -135,10 +135,7 @@ fn route(engine: &EngineRef, ctx: &mut Ctx, method: &str, segs: &[&str]) -> R {
             let name = rest.join("/");
             delete_image(engine, ctx, &name)
         }
-        ("POST", ["images", "prune"]) => ctx.respond_json(
-            200,
-            &serde_json::json!({"ImagesDeleted": [], "SpaceReclaimed": 0}),
-        ),
+        ("POST", ["images", "prune"]) => prune_images(engine, ctx),
         ("POST", ["build"]) => build::handle(engine, ctx),
         ("POST", ["commit"]) => ctx.respond_error(501, "commit is not yet supported in slim"),
 
@@ -196,10 +193,7 @@ fn route(engine: &EngineRef, ctx: &mut Ctx, method: &str, segs: &[&str]) -> R {
 
         // ----- system -----
         ("GET", ["system", "df"]) => ctx.respond_json(200, &inspect::system_df(engine)),
-        ("POST", ["system", "prune"]) => ctx.respond_json(
-            200,
-            &serde_json::json!({"ContainersDeleted":[],"ImagesDeleted":[],"SpaceReclaimed":0}),
-        ),
+        ("POST", ["system", "prune"]) => system_prune(engine, ctx),
 
         _ => ctx.respond_error(
             501,
@@ -317,16 +311,78 @@ fn wait_container(engine: &EngineRef, ctx: &mut Ctx, id: &str) -> R {
     w.finish()
 }
 
-fn prune_containers(engine: &EngineRef, ctx: &mut Ctx) -> R {
+fn remove_exited_containers(engine: &EngineRef) -> Vec<String> {
     let mut deleted = Vec::new();
     for c in engine.list(true) {
         if c.state.status == "exited" && engine.remove(&c.id, false, false).is_ok() {
             deleted.push(c.id);
         }
     }
+    deleted
+}
+
+fn prune_containers(engine: &EngineRef, ctx: &mut Ctx) -> R {
+    let deleted = remove_exited_containers(engine);
     ctx.respond_json(
         200,
         &serde_json::json!({"ContainersDeleted": deleted, "SpaceReclaimed": 0}),
+    )
+}
+
+/// Whether an image prune covers every unused image, not just untagged ones.
+/// Docker's CLI sends `filters={"dangling":["false"]}` for `image prune -a`;
+/// slim's own client also sends `all=1`.
+fn prune_all(ctx: &Ctx) -> bool {
+    if ctx.head.query_bool("all") {
+        return true;
+    }
+    ctx.head
+        .query_str("filters")
+        .and_then(|f| serde_json::from_str::<serde_json::Value>(f).ok())
+        .and_then(|v| v.get("dangling").cloned())
+        .is_some_and(|d| match d {
+            serde_json::Value::Array(a) => a.iter().any(|x| x == "false" || x == "0"),
+            serde_json::Value::Object(m) => m.contains_key("false") || m.contains_key("0"),
+            _ => false,
+        })
+}
+
+fn prune_unused_images(
+    engine: &EngineRef,
+    all: bool,
+) -> (Vec<slim_api::image::ImageDeleteResponse>, u64) {
+    let in_use = |image_id: &str| {
+        engine
+            .containers
+            .lock()
+            .unwrap()
+            .values()
+            .any(|e| e.c.lock().unwrap().image_id == image_id)
+    };
+    engine.store.prune(all, &in_use)
+}
+
+fn prune_images(engine: &EngineRef, ctx: &mut Ctx) -> R {
+    let (deleted, freed) = prune_unused_images(engine, prune_all(ctx));
+    ctx.respond_json(
+        200,
+        &serde_json::json!({"ImagesDeleted": deleted, "SpaceReclaimed": freed}),
+    )
+}
+
+/// `docker system prune`: stopped containers first (so the images they held
+/// become unused), then unused images -- untagged only, or all with `-a`.
+/// Volumes are never touched: that is where a container's data lives.
+fn system_prune(engine: &EngineRef, ctx: &mut Ctx) -> R {
+    let containers = remove_exited_containers(engine);
+    let (images, freed) = prune_unused_images(engine, prune_all(ctx));
+    ctx.respond_json(
+        200,
+        &serde_json::json!({
+            "ContainersDeleted": containers,
+            "ImagesDeleted": images,
+            "SpaceReclaimed": freed,
+        }),
     )
 }
 
