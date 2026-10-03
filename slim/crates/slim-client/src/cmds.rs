@@ -300,6 +300,7 @@ pub fn image_sub(client: &Client, cargs: &[String]) -> CmdResult {
         Some("tag") => tag(client, &cargs[1..]),
         Some("load") => load(client, &cargs[1..]),
         Some("save") => save(client, &cargs[1..]),
+        Some("prune") => prune(client, "images/prune", &cargs[1..]),
         Some(o) => Err(msg(format!("unknown image command: {o}"))),
     }
 }
@@ -1435,6 +1436,58 @@ pub fn network(client: &Client, cargs: &[String]) -> CmdResult {
     }
 }
 
+/// `image prune` / `system prune [-a] [-f]`. Untagged images by default,
+/// every unused one with `-a`; `system prune` also removes stopped
+/// containers. Never prompts, so `-f` is accepted and changes nothing.
+fn prune(client: &Client, endpoint: &str, cargs: &[String]) -> CmdResult {
+    let p = parse(
+        cargs,
+        &["--all", "--force"],
+        &["--filter"],
+        &[("-a", "--all"), ("-f", "--force")],
+        false,
+    )?;
+    let query = if p.flag("all") {
+        "?all=1&filters=%7B%22dangling%22%3A%5B%22false%22%5D%7D"
+    } else {
+        ""
+    };
+    let v: Value = client.json("POST", &format!("{V}/{endpoint}{query}"), None)?;
+    print!("{}", prune_report(&v));
+    Ok(())
+}
+
+/// Docker's wording for a prune response.
+fn prune_report(v: &Value) -> String {
+    let mut out = String::new();
+    if let Some(ids) = v["ContainersDeleted"].as_array().filter(|a| !a.is_empty()) {
+        out.push_str("Deleted Containers:\n");
+        for id in ids.iter().filter_map(|i| i.as_str()) {
+            out.push_str(id);
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    if let Some(items) = v["ImagesDeleted"].as_array().filter(|a| !a.is_empty()) {
+        out.push_str("Deleted Images:\n");
+        for item in items {
+            if let Some(t) = item["Untagged"].as_str() {
+                out.push_str(&format!("untagged: {t}\n"));
+            }
+            if let Some(d) = item["Deleted"].as_str() {
+                out.push_str(&format!("deleted: {d}\n"));
+            }
+        }
+        out.push('\n');
+    }
+    let freed = v["SpaceReclaimed"].as_i64().unwrap_or(0);
+    out.push_str(&format!(
+        "Total reclaimed space: {}\n",
+        fmt::human_size(freed)
+    ));
+    out
+}
+
 pub fn system(client: &Client, cargs: &[String]) -> CmdResult {
     match cargs.first().map(|s| s.as_str()) {
         Some("info") => info(client),
@@ -1443,11 +1496,7 @@ pub fn system(client: &Client, cargs: &[String]) -> CmdResult {
             println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
             Ok(())
         }
-        Some("prune") => {
-            client.action("POST", &format!("{V}/system/prune"), None)?;
-            println!("Total reclaimed space: 0B");
-            Ok(())
-        }
+        Some("prune") => prune(client, "system/prune", &cargs[1..]),
         _ => info(client),
     }
 }
@@ -1927,6 +1976,24 @@ fn slim_b64_decode(s: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn prune_report_reads_like_docker() {
+        let v = serde_json::json!({
+            "ContainersDeleted": ["c1"],
+            "ImagesDeleted": [{"Untagged": "app:1"}, {"Deleted": "sha256:ab"}],
+            "SpaceReclaimed": 350_000_000i64,
+        });
+        assert_eq!(
+            super::prune_report(&v),
+            "Deleted Containers:\nc1\n\nDeleted Images:\nuntagged: app:1\ndeleted: sha256:ab\n\nTotal reclaimed space: 350MB\n"
+        );
+        assert_eq!(
+            super::prune_report(&serde_json::json!({"ImagesDeleted": null, "SpaceReclaimed": 0})),
+            "Total reclaimed space: 0B\n"
+        );
+    }
+
     use super::*;
 
     fn ports(specs: &[&str]) -> Value {
