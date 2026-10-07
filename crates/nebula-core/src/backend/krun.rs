@@ -468,13 +468,20 @@ fn guest_calibrates_against_pit() -> bool {
     false
 }
 
-/// Kernel arguments that tell such a guest what its TSC is.
+/// Kernel arguments that tell a WHP guest its TSC can be trusted, and, when
+/// it can't measure it itself, what its frequency is.
 ///
-/// WHP runs the guest on the host's TSC, unscaled, so the host can measure
-/// the frequency the guest cannot. `tsc_early_khz` skips the calibration,
-/// and `tsc=reliable` keeps the clocksource watchdog -- which on this machine
-/// compares against jiffies, still driven by emulated timer interrupts --
-/// from demoting the TSC later.
+/// WHP runs every vCPU on the host's TSC, unscaled, so the host can measure
+/// the frequency a PIT-calibrating guest cannot: `tsc_early_khz` skips that
+/// calibration (`khz` is None when the guest reads it from leaf 0x15).
+///
+/// `tsc=reliable` goes to every WHP guest. It skips the boot-time check that
+/// the vCPUs' TSCs agree, and the clocksource watchdog. Both misfire here: WHP
+/// leaves the vCPUs a few cycles apart on some boots ("Measured 8 cycles TSC
+/// warp between CPUs, turning off TSC clock", issue ragnarokoffline.app#421,
+/// an i5-8600K on Windows 10, about one boot in four), and the watchdog
+/// compares against jiffies, driven by emulated timer interrupts. Either one
+/// demotes the TSC to refined-jiffies, and that guest's clock ran 7.6x fast.
 fn tsc_args(khz: Option<u64>) -> String {
     match khz {
         Some(khz) => format!(" tsc_early_khz={khz} tsc=reliable"),
@@ -598,8 +605,11 @@ pub fn run_worker(spec_json: &str) -> Result<std::convert::Infallible> {
         let kernel_c = cstr(&kernel.to_string_lossy());
         let initrd_c = initramfs.as_ref().map(|p| cstr(&p.to_string_lossy()));
         let mut cmdline = cmdline.clone();
-        if guest_calibrates_against_pit() {
-            cmdline.push_str(&tsc_args(host_tsc_khz()));
+        // Every WHP guest: see tsc_args. The frequency only where the guest
+        // can't read it from leaf 0x15.
+        if cfg!(all(windows, target_arch = "x86_64")) {
+            let khz = if guest_calibrates_against_pit() { host_tsc_khz() } else { None };
+            cmdline.push_str(&tsc_args(khz));
         }
         if debug && cfg!(windows) {
             cmdline.push_str(" earlyprintk=ttyS0,115200,keep");
