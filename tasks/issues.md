@@ -493,8 +493,11 @@ limitations; routine TODOs live in code.)
   (expected — dirty ext4, no journal replay survived repeated mid-write
   kills during bring-up; EBADMSG from /var/lib/nebula afterwards). Dev-loop
   hygiene: `nebula down` (graceful) before rebuilds; recovery: delete
-  data.img. The guest could run e2fsck -p on mount failure in nebula-init —
-  TODO worth doing for crash resilience on all OSes.
+  data.img. **Done (2026-10-11):** nebula-init runs `e2fsck -p` on the data
+  disk and every named volume before mounting, and `e2fsck -f -y` when that
+  will not fix it. Reported from a Windows player whose root directory block
+  failed its checksum after the VM died mid-session, so slimd crash-looped on
+  every start.
 
 - **(2026-06-11) krun-snapshot restore design (capture side DONE).** Capture
   verified on KVM: pause(0ms) → save(0.61s: 2GB RAM → 103MB sparse via
