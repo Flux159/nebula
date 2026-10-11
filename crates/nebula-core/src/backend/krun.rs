@@ -263,6 +263,19 @@ impl VmmBackend for KrunBackend {
     }
 }
 
+/// Keep the last run's log beside the new one (`x.log` -> `x.prev.log`). A
+/// worker that dies takes its reason with it into these files, and the start
+/// that follows -- usually the player trying again -- would otherwise
+/// truncate them before anyone reads them.
+fn keep_previous(log: &std::path::Path) {
+    let stem = log
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let _ = std::fs::rename(log, log.with_file_name(format!("{stem}.prev.log")));
+}
+
 pub struct KrunVm {
     spec: VmSpec,
     /// Worker subprocess. Mutex so `state(&self)` can reap (try_wait needs &mut).
@@ -310,6 +323,7 @@ impl VmHandle for KrunVm {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
+                keep_previous(path);
                 std::fs::File::create(path)?.into()
             }
             ConsoleSpec::None => std::process::Stdio::null(),
@@ -319,7 +333,9 @@ impl VmHandle for KrunVm {
         // silent worker death is undebuggable without this.
         let stderr: std::process::Stdio = match &self.spec.console {
             ConsoleSpec::File(path) => {
-                std::fs::File::create(path.with_extension("worker-stderr.log"))?.into()
+                let log = path.with_extension("worker-stderr.log");
+                keep_previous(&log);
+                std::fs::File::create(log)?.into()
             }
             ConsoleSpec::None => std::process::Stdio::inherit(),
         };
@@ -969,7 +985,7 @@ fn serve_worker_control(
 
 #[cfg(test)]
 mod tests {
-    use super::{calibrates_against_pit, tsc_args, tsc_khz};
+    use super::{calibrates_against_pit, keep_previous, tsc_args, tsc_khz};
     use std::time::Duration;
 
     #[test]
@@ -1015,5 +1031,28 @@ mod tests {
         let (b, c, d) = AMD;
         assert!(calibrates_against_pit(0x10, b, c, d));
         assert!(calibrates_against_pit(0x20, b, c, d));
+    }
+
+    #[test]
+    fn a_new_start_keeps_the_last_runs_logs() {
+        let dir = std::env::temp_dir().join(format!("nebula-keep-previous-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let console = dir.join("vessel-console.log");
+        let stderr = console.with_extension("worker-stderr.log");
+        for (log, text) in [(&console, "kernel panic"), (&stderr, "vcpu exit")] {
+            std::fs::write(log, text).unwrap();
+            keep_previous(log);
+        }
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
+        assert_eq!(read("vessel-console.prev.log"), "kernel panic");
+        assert_eq!(read("vessel-console.worker-stderr.prev.log"), "vcpu exit");
+        // The run before that is replaced, and a first start has nothing to keep.
+        std::fs::write(&console, "second run").unwrap();
+        keep_previous(&console);
+        assert_eq!(read("vessel-console.prev.log"), "second run");
+        keep_previous(&console);
+        assert_eq!(read("vessel-console.prev.log"), "second run");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
