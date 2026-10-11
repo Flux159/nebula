@@ -213,12 +213,43 @@ mod init {
         let _ = cmd.status();
     }
 
-    /// Format (first boot) and mount the data disk.
+    /// Repair `dev` before it is mounted. A VM that dies or is stopped by
+    /// force mid-write can leave the filesystem damaged, and ext4's journal
+    /// does not cover everything: a Windows player's data disk came back with
+    /// a root directory block that failed its checksum, so slimd could open
+    /// nothing and every start after that one failed. `-p` fixes what is
+    /// safe to fix unasked and returns at once on a clean filesystem; what it
+    /// will not fix gets `-y`, since the alternative is a disk that never
+    /// works again. Exit codes: 0 clean, 1/2 repaired, 4 and up not repaired.
+    fn check_ext4(dev: &str, label: &str) {
+        let fsck = |args: &[&str]| {
+            std::process::Command::new("/sbin/e2fsck")
+                .args(args)
+                .arg(dev)
+                .status()
+                .ok()
+                .and_then(|s| s.code())
+        };
+        match fsck(&["-p"]) {
+            None | Some(0) => {}
+            Some(1 | 2) => println!("nebula-init: repaired {dev} ({label})"),
+            Some(code) => {
+                println!("nebula-init: {dev} ({label}) needs repair (e2fsck -p exited {code}); running e2fsck -y");
+                match fsck(&["-f", "-y"]) {
+                    Some(0..=2) => println!("nebula-init: repaired {dev} ({label})"),
+                    other => println!("nebula-init: e2fsck -y on {dev} ({label}) exited {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// Format (first boot), check and mount the data disk.
     fn setup_data_disk() {
         if !std::path::Path::new(DATA_DEV).exists() {
             return;
         }
         ensure_ext4(DATA_DEV, "vdb", "nebula-data");
+        check_ext4(DATA_DEV, "nebula-data");
         mount(DATA_DEV, DATA_MNT, "ext4", 0, None);
     }
 
@@ -237,6 +268,7 @@ mod init {
                 continue;
             }
             ensure_ext4(&dev, &block, name);
+            check_ext4(&dev, name);
             mount(&dev, &format!("/mnt/{name}"), "ext4", 0, None);
         }
     }
